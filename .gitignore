@@ -1,0 +1,51 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+.output/
+.vinxi
+.tanstack/
+.nitro
+*.local
+
+# Environment files (keep the blank template)
+.env
+.env.*
+!.env.example
+
+# Signing credentials and provisioning profiles
+*.p8
+*.p12
+*.mobileprovision
+
+# Wrangler / Cloudflare
+.wrangler/
+.dev.vars
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Xcode user-specific files and build output
+xcuserdata/
+*.xcuserstate
+*.xcuserdatad
+*.xccheckout
+*.moved-aside
+ios/App/build/
+DerivedData/

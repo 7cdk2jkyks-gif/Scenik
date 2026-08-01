@@ -1,0 +1,144 @@
+import { createFileRoute, Outlet, redirect, Link, useNavigate } from "@tanstack/react-router";
+import { useEffect } from "react";
+import { supabase } from "@/integrations/supabase/client";
+import { Button } from "@/components/ui/button";
+import { LogOut, Map, Users, Settings, Crown, Navigation } from "lucide-react";
+
+import { Logo } from "@/components/Logo";
+import { useQueryClient } from "@tanstack/react-query";
+import { PaymentTestModeBanner } from "@/components/PaymentTestModeBanner";
+import { useSubscription } from "@/hooks/useSubscription";
+import { TermsGate } from "@/components/TermsGate";
+import { capture } from "@/lib/analytics/client";
+import { AnalyticsEvent } from "@/lib/analytics/events";
+import { isNativePlatform } from "@/lib/native";
+
+
+export const Route = createFileRoute("/_authenticated")({
+  ssr: false,
+  beforeLoad: async () => {
+    console.log("[Auth] /plan auth check started");
+    const { data: sessionData, error } = await supabase.auth.getSession();
+    if (error) {
+      console.error("[Auth] /plan client session check failed", error.message, error.stack ?? "Source line unavailable");
+      throw error;
+    }
+    if (sessionData.session?.user) {
+      console.log("[Auth] /plan auth check resolved from session");
+      return { user: sessionData.session.user };
+    }
+    console.log("[Auth] /plan auth check redirected to /auth");
+    throw redirect({ to: "/auth" });
+  },
+  component: AuthedLayout,
+});
+
+function AuthedLayout() {
+  const navigate = useNavigate();
+  const qc = useQueryClient();
+  const sub = useSubscription();
+  const isPremium = sub.data?.isPremium ?? false;
+  const user = Route.useRouteContext().user as { id?: string; is_anonymous?: boolean } | undefined;
+  const isGuest = user?.is_anonymous === true;
+
+  // On native (iOS/Android), configure RevenueCat with the signed-in user id
+  // so purchases and entitlements are attached to the correct account.
+  useEffect(() => {
+    if (!isNativePlatform() || !user?.id || isGuest) return;
+    void import("@/lib/revenuecat").then((m) => m.configureRevenueCat(user.id!));
+  }, [user?.id, isGuest]);
+
+
+
+  async function signOut() {
+    capture(AnalyticsEvent.UserSignedOut, { source: "nav_header" });
+    await qc.cancelQueries();
+    qc.clear();
+    await supabase.auth.signOut();
+    navigate({ to: "/auth", replace: true });
+  }
+
+  return (
+    <div
+      className="min-h-screen pb-20"
+      style={{
+        paddingTop: "env(safe-area-inset-top)",
+        paddingLeft: "env(safe-area-inset-left)",
+        paddingRight: "env(safe-area-inset-right)",
+        paddingBottom: "calc(5rem + env(safe-area-inset-bottom))",
+      }}
+    >
+      <PaymentTestModeBanner />
+      <header className="border-b border-border bg-card/70 backdrop-blur">
+        <div className="mx-auto flex max-w-6xl items-center justify-between gap-3 px-4 py-3 sm:px-6 sm:py-4">
+          <Link to="/plan" className="flex min-w-0 items-center gap-2">
+            <Logo className="h-5 w-5 shrink-0 text-primary" />
+            <span className="truncate font-serif text-lg font-semibold text-ink">Scenik</span>
+          </Link>
+          <Button variant="ghost" size="sm" onClick={signOut} title={isGuest ? "Exit guest" : "Sign out"} className="px-2 sm:px-3">
+            <LogOut className="h-4 w-4" />
+          </Button>
+        </div>
+      </header>
+      {isGuest && (
+        <div className="border-b border-amber-200 bg-amber-50 px-4 py-2 text-center text-xs text-amber-900 sm:text-sm">
+          You're browsing as a guest. {" "}
+          <Link to="/auth" className="font-medium underline">
+            Create an account
+          </Link>
+          {" "}to save routes across devices.
+        </div>
+      )}
+      <Outlet />
+      {!isGuest && <TermsGate />}
+      <nav className="fixed inset-x-0 bottom-0 z-40 border-t border-border bg-card/95 backdrop-blur">
+        <div className="mx-auto grid max-w-6xl grid-cols-5 items-center gap-1 px-2 py-2 sm:px-6">
+          <Link to="/plan" className="flex-1">
+            {({ isActive }) => (
+              <Button variant={isActive ? "secondary" : "ghost"} size="sm" className="w-full px-2 sm:px-3" title="Plan">
+                <Navigation className="h-4 w-4 sm:mr-1.5" />
+                <span className="hidden sm:inline">Plan</span>
+              </Button>
+            )}
+          </Link>
+          <Link to="/routes" className="flex-1">
+            {({ isActive }) => (
+              <Button variant={isActive ? "secondary" : "ghost"} size="sm" className="w-full px-2 sm:px-3">
+                <Map className="h-4 w-4 mr-1.5" />
+                <span className="hidden sm:inline">My routes</span>
+              </Button>
+            )}
+          </Link>
+          <Link to="/community" className="flex-1">
+            <Button variant="ghost" size="sm" className="w-full px-2 sm:px-3">
+              <Users className="h-4 w-4 mr-1.5" />
+              <span className="hidden sm:inline">Community</span>
+            </Button>
+          </Link>
+          <Link to="/settings" className="flex-1">
+            {({ isActive }) => (
+              <Button variant={isActive ? "secondary" : "ghost"} size="sm" className="w-full px-2 sm:px-3" title="Settings">
+                <Settings className="h-4 w-4" />
+              </Button>
+            )}
+          </Link>
+          {isPremium ? (
+            <Link to="/pricing" className="flex-1">
+              <Button variant="secondary" size="sm" className="w-full px-2 sm:px-3 border border-primary/40 text-primary" title="You're on Premium">
+                <Crown className="h-4 w-4 sm:mr-1.5" />
+                <span className="hidden sm:inline">Premium</span>
+              </Button>
+            </Link>
+          ) : (
+            <Link to="/pricing" className="flex-1">
+              <Button size="sm" className="w-full px-2 shadow-stamp sm:px-3">
+                <Crown className="h-4 w-4 sm:mr-1.5" />
+                <span className="hidden sm:inline">Upgrade</span>
+              </Button>
+            </Link>
+          )}
+        </div>
+      </nav>
+    </div>
+  );
+}
