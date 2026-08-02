@@ -97,7 +97,7 @@ import { useOnlineStatus } from "@/hooks/useOnlineStatus";
 import { saveLastPlan, loadLastPlan } from "@/lib/offline-cache";
 import { OfflineBanner } from "@/components/OfflineBanner";
 import { getFastLocation } from "@/lib/geolocation";
-import { isNativePlatform } from "@/lib/native";
+import { getPlatform, isNativePlatform } from "@/lib/native";
 import { OfflineUpgradeBanner } from "@/components/OfflineUpgradeBanner";
 import { LocationDisclosure } from "@/components/LocationDisclosure";
 import { useSubscription } from "@/hooks/useSubscription";
@@ -425,6 +425,10 @@ function PlanPage() {
   const [end, setEnd] = useState("");
   const [stops, setStops] = useState<string[]>([]);
   const [locating, setLocating] = useState(false);
+  const [startLocationMessage, setStartLocationMessage] = useState<{
+    kind: "error" | "warning";
+    text: string;
+  } | null>(null);
   const [moods, setMoods] = useState<string[]>([]);
   const [themes, setThemes] = useState<string[]>([]);
   const [extra, setExtra] = useState(30);
@@ -463,6 +467,7 @@ function PlanPage() {
   const [locRetryKey, setLocRetryKey] = useState(0);
   const [locationDisclosureOpen, setLocationDisclosureOpen] = useState(false);
   const pendingLocationActionRef = useRef<"start" | "nav" | null>(null);
+  const startLocationActiveRef = useRef(false);
 
   const retryLocation = () => {
     setLocMessage(null);
@@ -511,7 +516,11 @@ function PlanPage() {
     }
     let permissionGranted = false;
     try {
-      if (typeof navigator !== "undefined" && (navigator as Navigator).permissions) {
+      if (
+        getPlatform() === "web" &&
+        typeof navigator !== "undefined" &&
+        (navigator as Navigator).permissions
+      ) {
         const status = await (navigator as Navigator).permissions.query({
           name: "geolocation" as PermissionName,
         });
@@ -526,7 +535,6 @@ function PlanPage() {
       setLocationDisclosureOpen(true);
     }
   }
-
 
   const [descExpanded, setDescExpanded] = useState(false);
   const [waypointFact, setWaypointFact] = useState<{ name: string; text: string } | null>(null);
@@ -621,44 +629,134 @@ function PlanPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  function requestLocationForStart() {
-    if (typeof navigator === "undefined" || !navigator.geolocation) {
-      toast.error("Location isn't available on this device.");
-      return;
+  async function requestLocationForStart() {
+    if (startLocationActiveRef.current) return;
+    console.info("[Location] button tapped");
+    console.info(`[Location] platform: ${getPlatform() === "ios" ? "ios" : "web"}`);
+    startLocationActiveRef.current = true;
+    setLocating(true);
+    setStartLocationMessage(null);
+    try {
+      await promptLocation("start");
+    } catch (error) {
+      console.error("[Location] location prompt failed:", error);
+      setStartLocationMessage({
+        kind: "error",
+        text: "Couldn't request your location. Please try again.",
+      });
+      startLocationActiveRef.current = false;
+      setLocating(false);
+      console.info("[Location] loading cleared");
     }
-    promptLocation("start");
   }
 
-
   async function actuallyUseCurrentLocationForStart() {
-    setLocating(true);
+    const isNativeIOS = getPlatform() === "ios";
     try {
-      // On native iOS this uses Capacitor's Geolocation plugin (CLLocationManager)
-      // which is much faster than WKWebView's navigator.geolocation. On web it
-      // uses a cached wifi fix first and falls back to high-accuracy GPS.
-      const c = await getFastLocation();
-      setCurrentUserLocation(c);
-      try {
-        const r = await reverseGeocodeFn({ data: { lat: c.lat, lng: c.lng } });
-        setStart(r.address);
-        toast.success("Using your current location");
-      } catch {
-        toast.error("Couldn't resolve your location address.");
+      let coords: { latitude: number; longitude: number };
+
+      if (isNativeIOS) {
+        const { Geolocation } = await import("@capacitor/geolocation");
+        const permission = await Geolocation.checkPermissions();
+        console.info("[Location] permission status:", permission.location);
+        let permissionState = permission.location;
+        if (permissionState !== "granted") {
+          console.info("[Location] permission requested");
+          const requested = await Geolocation.requestPermissions({ permissions: ["location"] });
+          permissionState = requested.location;
+          console.info("[Location] permission result:", permissionState);
+        }
+        if (permissionState !== "granted") {
+          throw new Error("LOCATION_PERMISSION_DENIED");
+        }
+
+        console.info("[Location] fast position started");
+        const position = await Geolocation.getCurrentPosition({
+          enableHighAccuracy: false,
+          timeout: 5_000,
+          maximumAge: 60_000,
+        });
+        console.info("[Location] fast position received");
+        coords = position.coords;
+
+        void (async () => {
+          try {
+            console.info("[Location] accurate position started");
+            const accurate = await Geolocation.getCurrentPosition({
+              enableHighAccuracy: true,
+              timeout: 12_000,
+              maximumAge: 0,
+            });
+            console.info("[Location] accurate position received");
+            setCurrentUserLocation({
+              lat: accurate.coords.latitude,
+              lng: accurate.coords.longitude,
+            });
+          } catch (error) {
+            console.warn("[Location] accurate position failed:", error);
+          }
+        })();
+      } else {
+        if (typeof navigator === "undefined" || !navigator.geolocation) {
+          throw new Error("LOCATION_UNSUPPORTED");
+        }
+        console.info("[Location] permission status: browser-managed");
+        console.info("[Location] fast position started");
+        const position = await new Promise<GeolocationPosition>((resolve, reject) => {
+          navigator.geolocation.getCurrentPosition(resolve, reject, {
+            enableHighAccuracy: false,
+            timeout: 5_000,
+            maximumAge: 60_000,
+          });
+        });
+        console.info("[Location] fast position received");
+        coords = position.coords;
       }
-    } catch (err: unknown) {
-      const code = (err as { code?: number } | null)?.code;
-      const denied = code === 1;
+
+      setCurrentUserLocation({ lat: coords.latitude, lng: coords.longitude });
+      setStart("Current location");
+      console.info("[Location] form updated");
+
+      try {
+        console.info("[Location] reverse geocode started");
+        const r = await Promise.race([
+          reverseGeocodeFn({ data: { lat: coords.latitude, lng: coords.longitude } }),
+          new Promise<never>((_, reject) =>
+            window.setTimeout(() => reject(new Error("REVERSE_GEOCODE_TIMEOUT")), 8_000),
+          ),
+        ]);
+        setStart(r.address);
+        setStartLocationMessage(null);
+        console.info("[Location] reverse geocode completed");
+        console.info("[Location] form updated");
+        toast.success("Using your current location");
+      } catch (error) {
+        console.warn("[Location] reverse geocode failed:", error);
+        setStartLocationMessage({
+          kind: "warning",
+          text: "Your coordinates were found, but the address couldn't be loaded. You can continue using Current location.",
+        });
+      }
+    } catch (error) {
+      const denied =
+        error instanceof Error &&
+        (error.message === "LOCATION_PERMISSION_DENIED" ||
+          /permission|denied/i.test(error.message));
+      const message = denied
+        ? isNativeIOS
+          ? "Location access is off. Enable Location for Scenik in iPhone Settings, then try again."
+          : "Location permission is blocked. Enable it in your browser settings, then try again."
+        : "Couldn't get your location. Please try again.";
       capture(AnalyticsEvent.LocationError, {
         reason: denied ? "permission_denied" : "unavailable",
         source: "start_address_picker",
       });
-      toast.error(
-        denied
-          ? "Location permission denied. Enable it in Settings and try again."
-          : "Couldn't get your location.",
-      );
+      setStartLocationMessage({ kind: "error", text: message });
+      toast.error(message);
     } finally {
+      startLocationActiveRef.current = false;
       setLocating(false);
+      console.info("[Location] loading cleared");
     }
   }
 
@@ -1401,6 +1499,16 @@ function PlanPage() {
                 )}
                 {locating ? "Locating…" : "Use my current location"}
               </button>
+              {startLocationMessage && (
+                <p
+                  role={startLocationMessage.kind === "error" ? "alert" : "status"}
+                  className={`mt-1.5 text-xs ${
+                    startLocationMessage.kind === "error" ? "text-destructive" : "text-amber-700"
+                  }`}
+                >
+                  {startLocationMessage.text}
+                </p>
+              )}
             </div>
 
             {/* Stops between start and end */}
@@ -2440,7 +2548,15 @@ function PlanPage() {
           open={locationDisclosureOpen}
           onOpenChange={(open) => {
             setLocationDisclosureOpen(open);
-            if (!open) pendingLocationActionRef.current = null;
+            if (!open && pendingLocationActionRef.current) {
+              const cancelledAction = pendingLocationActionRef.current;
+              pendingLocationActionRef.current = null;
+              if (cancelledAction === "start") {
+                startLocationActiveRef.current = false;
+                setLocating(false);
+                console.info("[Location] loading cleared");
+              }
+            }
           }}
           onAllow={allowLocation}
         />

@@ -10,12 +10,33 @@
 
 import { getPlatform, isNativePlatform } from "@/lib/native";
 
-// Public SDK keys (safe to ship).
-const RC_IOS_KEY = "appl_UvJjHoyTeRNYpGriBhuDFSoOtIP";
-// Android SDK key not yet provisioned — reuse iOS key placeholder so Android
-// builds don't crash before a real Play Billing key exists. Purchases only
-// work once a real Android key + Play products are configured.
-const RC_ANDROID_KEY = "appl_UvJjHoyTeRNYpGriBhuDFSoOtIP";
+// Public, app-specific SDK keys are injected into the browser/native bundle by
+// Vite. Development may deliberately use RevenueCat Test Store keys. Production
+// must always provide the relevant platform's live key and never falls back to
+// a Test Store key.
+const RC_IOS_KEY = import.meta.env.VITE_REVENUECAT_IOS_PUBLIC_SDK_KEY as string | undefined;
+const RC_ANDROID_KEY = import.meta.env.VITE_REVENUECAT_ANDROID_PUBLIC_SDK_KEY as string | undefined;
+
+function getRevenueCatApiKey(): string {
+  const platform = getPlatform();
+  const variableName =
+    platform === "ios"
+      ? "VITE_REVENUECAT_IOS_PUBLIC_SDK_KEY"
+      : "VITE_REVENUECAT_ANDROID_PUBLIC_SDK_KEY";
+  const apiKey = platform === "ios" ? RC_IOS_KEY : RC_ANDROID_KEY;
+
+  if (!apiKey) {
+    throw new Error(`[revenuecat] Missing ${variableName} for ${platform}`);
+  }
+
+  if (import.meta.env.PROD && apiKey.startsWith("test_")) {
+    throw new Error(
+      `[revenuecat] ${variableName} must be a production public SDK key; Test Store keys are not allowed in production`,
+    );
+  }
+
+  return apiKey;
+}
 
 export const RC_ENTITLEMENT_ID = "premium";
 export const RC_OFFERING_ID = "default";
@@ -23,8 +44,7 @@ export const RC_PRODUCT_MONTHLY = "com.GoScenik.premium.monthly";
 export const RC_PRODUCT_ANNUAL = "com.GoScenik.premium.annual";
 
 // Apple's stable deep link into a user's subscriptions in the App Store app.
-export const APPLE_MANAGE_SUBSCRIPTIONS_URL =
-  "https://apps.apple.com/account/subscriptions";
+export const APPLE_MANAGE_SUBSCRIPTIONS_URL = "https://apps.apple.com/account/subscriptions";
 
 // Minimal shape we care about from a RevenueCat Package.
 export type RCPackage = {
@@ -57,9 +77,9 @@ async function loadPurchases() {
 
 export async function initRevenueCat(appUserId?: string): Promise<void> {
   if (!isNativePlatform() || configured) return;
+  const apiKey = getRevenueCatApiKey();
   try {
     const Purchases = await loadPurchases();
-    const apiKey = getPlatform() === "ios" ? RC_IOS_KEY : RC_ANDROID_KEY;
     await Purchases.configure({ apiKey, appUserID: appUserId });
     configured = true;
     currentAppUserId = appUserId ?? null;
