@@ -49,3 +49,6 @@ xcuserdata/
 *.moved-aside
 ios/App/build/
 DerivedData/
+
+# Supabase CLI local state
+supabase/.temp/
