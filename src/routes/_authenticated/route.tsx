@@ -13,21 +13,70 @@ import { capture } from "@/lib/analytics/client";
 import { AnalyticsEvent } from "@/lib/analytics/events";
 import { isNativePlatform } from "@/lib/native";
 
+const OAUTH_RESTORE_TIMEOUT_MS = 2_000;
+
+function isOAuthReturn(): boolean {
+  if (typeof window === "undefined") return false;
+  const query = new URLSearchParams(window.location.search);
+  const hash = new URLSearchParams(window.location.hash.slice(1));
+  return query.has("code") || query.has("error") || hash.has("access_token") || hash.has("error");
+}
+
+async function restoreBrowserOAuthSession() {
+  console.log("[WebAuth] session restore started");
+  const initial = await supabase.auth.getSession();
+  if (initial.error || initial.data.session) {
+    console.log("[WebAuth] session restore completed:", Boolean(initial.data.session));
+    return initial;
+  }
+
+  const restored = await new Promise<typeof initial>((resolve) => {
+    let settled = false;
+    const finish = (result: typeof initial) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      subscription.subscription.unsubscribe();
+      resolve(result);
+    };
+    const { data: subscription } = supabase.auth.onAuthStateChange((_event, session) => {
+      if (session) finish({ data: { session }, error: null });
+    });
+    const timeout = window.setTimeout(() => {
+      void supabase.auth.getSession().then(finish);
+    }, OAUTH_RESTORE_TIMEOUT_MS);
+  });
+  console.log("[WebAuth] session restore completed:", Boolean(restored.data.session));
+  return restored;
+}
 
 export const Route = createFileRoute("/_authenticated")({
   ssr: false,
   beforeLoad: async () => {
-    console.log("[Auth] /plan auth check started");
-    const { data: sessionData, error } = await supabase.auth.getSession();
+    console.log("[WebAuth] /plan guard started");
+    const oauthReturn = isOAuthReturn();
+    if (oauthReturn) console.log("[WebAuth] OAuth return detected");
+    if (typeof window !== "undefined")
+      console.log("[WebAuth] current pathname:", window.location.pathname);
+    const { data: sessionData, error } = oauthReturn
+      ? await restoreBrowserOAuthSession()
+      : await supabase.auth.getSession();
+    console.log("[WebAuth] /plan guard session:", Boolean(sessionData.session));
     if (error) {
-      console.error("[Auth] /plan client session check failed", error.message, error.stack ?? "Source line unavailable");
+      console.error(
+        "[Auth] /plan client session check failed",
+        error.message,
+        error.stack ?? "Source line unavailable",
+      );
       throw error;
     }
     if (sessionData.session?.user) {
       console.log("[Auth] /plan auth check resolved from session");
+      console.log("[WebAuth] navigation completed");
       return { user: sessionData.session.user };
     }
     console.log("[Auth] /plan auth check redirected to /auth");
+    console.log("[WebAuth] redirecting to:", "/auth");
     throw redirect({ to: "/auth" });
   },
   component: AuthedLayout,
@@ -47,8 +96,6 @@ function AuthedLayout() {
     if (!isNativePlatform() || !user?.id || isGuest) return;
     void import("@/lib/revenuecat").then((m) => m.configureRevenueCat(user.id!));
   }, [user?.id, isGuest]);
-
-
 
   async function signOut() {
     capture(AnalyticsEvent.UserSignedOut, { source: "nav_header" });
@@ -75,18 +122,24 @@ function AuthedLayout() {
             <Logo className="h-5 w-5 shrink-0 text-primary" />
             <span className="truncate font-serif text-lg font-semibold text-ink">Scenik</span>
           </Link>
-          <Button variant="ghost" size="sm" onClick={signOut} title={isGuest ? "Exit guest" : "Sign out"} className="px-2 sm:px-3">
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={signOut}
+            title={isGuest ? "Exit guest" : "Sign out"}
+            className="px-2 sm:px-3"
+          >
             <LogOut className="h-4 w-4" />
           </Button>
         </div>
       </header>
       {isGuest && (
         <div className="border-b border-amber-200 bg-amber-50 px-4 py-2 text-center text-xs text-amber-900 sm:text-sm">
-          You're browsing as a guest. {" "}
+          You're browsing as a guest.{" "}
           <Link to="/auth" className="font-medium underline">
             Create an account
-          </Link>
-          {" "}to save routes across devices.
+          </Link>{" "}
+          to save routes across devices.
         </div>
       )}
       <Outlet />
@@ -95,7 +148,12 @@ function AuthedLayout() {
         <div className="mx-auto grid max-w-6xl grid-cols-5 items-center gap-1 px-2 py-2 sm:px-6">
           <Link to="/plan" className="flex-1">
             {({ isActive }) => (
-              <Button variant={isActive ? "secondary" : "ghost"} size="sm" className="w-full px-2 sm:px-3" title="Plan">
+              <Button
+                variant={isActive ? "secondary" : "ghost"}
+                size="sm"
+                className="w-full px-2 sm:px-3"
+                title="Plan"
+              >
                 <Navigation className="h-4 w-4 sm:mr-1.5" />
                 <span className="hidden sm:inline">Plan</span>
               </Button>
@@ -103,7 +161,11 @@ function AuthedLayout() {
           </Link>
           <Link to="/routes" className="flex-1">
             {({ isActive }) => (
-              <Button variant={isActive ? "secondary" : "ghost"} size="sm" className="w-full px-2 sm:px-3">
+              <Button
+                variant={isActive ? "secondary" : "ghost"}
+                size="sm"
+                className="w-full px-2 sm:px-3"
+              >
                 <Map className="h-4 w-4 mr-1.5" />
                 <span className="hidden sm:inline">My routes</span>
               </Button>
@@ -117,14 +179,24 @@ function AuthedLayout() {
           </Link>
           <Link to="/settings" className="flex-1">
             {({ isActive }) => (
-              <Button variant={isActive ? "secondary" : "ghost"} size="sm" className="w-full px-2 sm:px-3" title="Settings">
+              <Button
+                variant={isActive ? "secondary" : "ghost"}
+                size="sm"
+                className="w-full px-2 sm:px-3"
+                title="Settings"
+              >
                 <Settings className="h-4 w-4" />
               </Button>
             )}
           </Link>
           {isPremium ? (
             <Link to="/pricing" className="flex-1">
-              <Button variant="secondary" size="sm" className="w-full px-2 sm:px-3 border border-primary/40 text-primary" title="You're on Premium">
+              <Button
+                variant="secondary"
+                size="sm"
+                className="w-full px-2 sm:px-3 border border-primary/40 text-primary"
+                title="You're on Premium"
+              >
                 <Crown className="h-4 w-4 sm:mr-1.5" />
                 <span className="hidden sm:inline">Premium</span>
               </Button>

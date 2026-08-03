@@ -16,7 +16,6 @@ import { Toaster } from "@/components/ui/sonner";
 import { AnalyticsProvider } from "@/components/AnalyticsProvider";
 import { useRevenueCatBootstrap } from "@/hooks/useRevenueCat";
 
-
 function NotFoundComponent() {
   return (
     <div className="flex min-h-screen items-center justify-center bg-background px-4">
@@ -83,9 +82,17 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
       { charSet: "utf-8" },
       { name: "viewport", content: "width=device-width, initial-scale=1" },
       { title: "Scenik — scenic routes, not fast ones" },
-      { name: "description", content: "An AI sat-nav that plans the most scenic drive based on your mood, your theme, and how much extra time you can spare." },
+      {
+        name: "description",
+        content:
+          "An AI sat-nav that plans the most scenic drive based on your mood, your theme, and how much extra time you can spare.",
+      },
       { property: "og:title", content: "Scenik — scenic routes, not fast ones" },
-      { property: "og:description", content: "Romantic, adventurous, historic — Scenik plans drives worth taking the long way for." },
+      {
+        property: "og:description",
+        content:
+          "Romantic, adventurous, historic — Scenik plans drives worth taking the long way for.",
+      },
       { property: "og:type", content: "website" },
       { name: "twitter:card", content: "summary_large_image" },
     ],
@@ -124,7 +131,8 @@ function RootComponent() {
   const router = useRouter();
 
   useEffect(() => {
-    const { data: sub } = supabase.auth.onAuthStateChange((event) => {
+    const { data: sub } = supabase.auth.onAuthStateChange((event, session) => {
+      console.log("[WebAuth] auth state event:", event, "session:", Boolean(session));
       if (event !== "SIGNED_IN" && event !== "SIGNED_OUT" && event !== "USER_UPDATED") return;
       router.invalidate();
       if (event !== "SIGNED_OUT") queryClient.invalidateQueries();
@@ -146,4 +154,3 @@ function RevenueCatBoot() {
   useRevenueCatBootstrap();
   return null;
 }
-
