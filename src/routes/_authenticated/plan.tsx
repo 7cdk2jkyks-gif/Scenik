@@ -12,6 +12,7 @@ import {
   waypointFacts,
   recommendThemesFn,
 } from "@/lib/routes.functions";
+import { reverseGeocodeInBrowser } from "@/lib/google-maps-loader";
 import {
   saveSearch,
   listSavedSearches,
@@ -718,20 +719,12 @@ function PlanPage() {
       console.info("[Location] form updated");
 
       try {
-        console.info("[Location] reverse geocode started");
-        const r = await Promise.race([
-          reverseGeocodeFn({ data: { lat: coords.latitude, lng: coords.longitude } }),
-          new Promise<never>((_, reject) =>
-            window.setTimeout(() => reject(new Error("REVERSE_GEOCODE_TIMEOUT")), 8_000),
-          ),
-        ]);
-        setStart(r.address);
+        const address = await reverseGeocodeInBrowser(coords.latitude, coords.longitude);
+        setStart(address);
         setStartLocationMessage(null);
-        console.info("[Location] reverse geocode completed");
         console.info("[Location] form updated");
         toast.success("Using your current location");
       } catch (error) {
-        console.warn("[Location] reverse geocode failed:", error);
         setStartLocationMessage({
           kind: "warning",
           text: "Your coordinates were found, but the address couldn't be loaded. You can continue using Current location.",

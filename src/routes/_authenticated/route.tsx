@@ -118,7 +118,7 @@ function AuthedLayout() {
       <PaymentTestModeBanner />
       <header className="border-b border-border bg-card/70 backdrop-blur">
         <div className="mx-auto flex max-w-6xl items-center justify-between gap-3 px-4 py-3 sm:px-6 sm:py-4">
-          <Link to="/plan" className="flex min-w-0 items-center gap-2">
+          <Link to="/" aria-label="Home" className="flex min-w-0 items-center gap-2">
             <Logo className="h-5 w-5 shrink-0 text-primary" />
             <span className="truncate font-serif text-lg font-semibold text-ink">Scenik</span>
           </Link>
