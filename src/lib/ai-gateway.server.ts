@@ -136,8 +136,12 @@ Return the JSON.`;
         title: "Direct drive",
         scenic_score: 20,
         score_breakdown: {
-          natural_beauty: 5, road_character: 4, points_of_interest: 3,
-          theme_match: 0, mood_match: 0, diversity: 2,
+          natural_beauty: 5,
+          road_character: 4,
+          points_of_interest: 3,
+          theme_match: 0,
+          mood_match: 0,
+          diversity: 2,
           rationale: "Fastest direct route — no scenic detours requested.",
         },
         narrative: "A straightforward drive from start to finish.",
@@ -156,7 +160,8 @@ Return the JSON.`;
   // Reconcile total with breakdown sum (model often drifts)
   const b = parsed.score_breakdown;
   if (b) {
-    const clamp = (n: number, max: number) => Math.max(0, Math.min(max, Math.round(Number(n) || 0)));
+    const clamp = (n: number, max: number) =>
+      Math.max(0, Math.min(max, Math.round(Number(n) || 0)));
     b.natural_beauty = clamp(b.natural_beauty, 25);
     b.road_character = clamp(b.road_character, 20);
     b.points_of_interest = clamp(b.points_of_interest, 20);
@@ -164,225 +169,25 @@ Return the JSON.`;
     b.mood_match = clamp(b.mood_match, 10);
     b.diversity = clamp(b.diversity, 10);
     parsed.scenic_score =
-      b.natural_beauty + b.road_character + b.points_of_interest +
-      b.theme_match + b.mood_match + b.diversity;
+      b.natural_beauty +
+      b.road_character +
+      b.points_of_interest +
+      b.theme_match +
+      b.mood_match +
+      b.diversity;
   } else {
     parsed.scenic_score = Math.max(0, Math.min(100, Math.round(parsed.scenic_score ?? 0)));
   }
   return parsed;
 }
 
-const MAPS_GATEWAY = "https://connector-gateway.lovable.dev/google_maps";
-
-export async function geocodeAddress(address: string): Promise<{ lat: number; lng: number; formatted: string }> {
-  const lovableKey = process.env.LOVABLE_API_KEY;
-  const mapsKey = process.env.GOOGLE_MAPS_API_KEY;
-  if (!lovableKey || !mapsKey) throw new Error("Google Maps connector not configured");
-
-  let res: Response;
-  try {
-    res = await fetch(
-      `${MAPS_GATEWAY}/maps/api/geocode/json?address=${encodeURIComponent(address)}`,
-      {
-        headers: {
-          Authorization: `Bearer ${lovableKey}`,
-          "X-Connection-Api-Key": mapsKey,
-        },
-      },
-    );
-  } catch {
-    throw new Error("NETWORK");
-  }
-  if (!res.ok) throw new Error("GEOCODE_FAILED");
-  const data = await res.json().catch(() => null);
-  const first = data?.results?.[0];
-  if (!first) throw new Error(`GEOCODE_NOT_FOUND:${address}`);
-  return {
-    lat: first.geometry.location.lat,
-    lng: first.geometry.location.lng,
-    formatted: first.formatted_address,
-  };
-}
-
-export async function reverseGeocodeLatLng(lat: number, lng: number): Promise<{ lat: number; lng: number; formatted: string }> {
-  const lovableKey = process.env.LOVABLE_API_KEY;
-  const mapsKey = process.env.GOOGLE_MAPS_API_KEY;
-  if (!lovableKey || !mapsKey) throw new Error("Google Maps connector not configured");
-
-  let res: Response;
-  try {
-    res = await fetch(
-      `${MAPS_GATEWAY}/maps/api/geocode/json?latlng=${lat},${lng}`,
-      {
-        headers: {
-          Authorization: `Bearer ${lovableKey}`,
-          "X-Connection-Api-Key": mapsKey,
-        },
-      },
-    );
-  } catch {
-    throw new Error("NETWORK");
-  }
-  if (!res.ok) throw new Error("REVERSE_GEOCODE_FAILED");
-  const data = await res.json().catch(() => null);
-  const first = data?.results?.[0];
-  if (!first) throw new Error(`REVERSE_GEOCODE_NOT_FOUND:${lat},${lng}`);
-  return {
-    lat: first.geometry.location.lat,
-    lng: first.geometry.location.lng,
-    formatted: first.formatted_address,
-  };
-}
-
-export interface NavStep {
-  instruction: string;
-  distance: string;
-  duration: string;
-  distanceMeters: number;
-  durationSeconds: number;
-  maneuver?: string;
-  startLat?: number;
-  startLng?: number;
-  endLat?: number;
-  endLng?: number;
-}
-
-export interface ComputedDirections {
-  encodedPolyline: string;
-  distance: string;
-  duration: string;
-  distanceMeters: number;
-  durationSeconds: number;
-  steps: NavStep[];
-  alternatives?: Array<{
-    encodedPolyline: string;
-    distanceMeters: number;
-    durationSeconds: number;
-  }>;
-}
-
-function formatMeters(m: number): string {
-  return `${(m / 1000).toFixed(1)} km`;
-}
-function formatDurationString(d: string): string {
-  const secs = parseInt(d.replace(/s$/, ""), 10) || 0;
-  const hrs = Math.floor(secs / 3600);
-  const mins = Math.round((secs % 3600) / 60);
-  return hrs > 0 ? `${hrs} hr ${mins} min` : `${mins} min`;
-}
-
-export async function computeDirections(input: {
-  origin: { lat: number; lng: number };
-  destination: { lat: number; lng: number };
-  waypoints: { lat: number; lng: number }[];
-  alternatives?: boolean;
-}): Promise<ComputedDirections> {
-  const lovableKey = process.env.LOVABLE_API_KEY;
-  const mapsKey = process.env.GOOGLE_MAPS_API_KEY;
-  if (!lovableKey || !mapsKey) throw new Error("Google Maps connector not configured");
-
-  const body: Record<string, unknown> = {
-    origin: { location: { latLng: { latitude: input.origin.lat, longitude: input.origin.lng } } },
-    destination: { location: { latLng: { latitude: input.destination.lat, longitude: input.destination.lng } } },
-    intermediates: input.waypoints.map((w) => ({
-      location: { latLng: { latitude: w.lat, longitude: w.lng } },
-    })),
-    travelMode: "DRIVE",
-    routingPreference: "TRAFFIC_AWARE",
-    languageCode: "en-US",
-    units: "METRIC",
-  };
-  // Routes API only supports alternatives with no intermediates.
-  if (input.alternatives && input.waypoints.length === 0) {
-    body.computeAlternativeRoutes = true;
-  }
-
-  let res: Response;
-  try {
-    res = await fetch(`${MAPS_GATEWAY}/routes/directions/v2:computeRoutes`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${lovableKey}`,
-        "X-Connection-Api-Key": mapsKey,
-        "Content-Type": "application/json",
-        "X-Goog-FieldMask": [
-          "routes.duration",
-          "routes.distanceMeters",
-          "routes.polyline.encodedPolyline",
-          "routes.legs.steps.navigationInstruction",
-          "routes.legs.steps.distanceMeters",
-          "routes.legs.steps.staticDuration",
-          "routes.legs.steps.startLocation",
-          "routes.legs.steps.endLocation",
-        ].join(","),
-      },
-      body: JSON.stringify(body),
-    });
-  } catch {
-    throw new Error("NETWORK");
-  }
-  if (!res.ok) throw new Error("DIRECTIONS_FAILED");
-  const data = await res.json().catch(() => null);
-  const routesArr = (data?.routes ?? []) as Array<Record<string, unknown>>;
-  const route = routesArr[0] as
-    | { polyline?: { encodedPolyline?: string }; legs?: unknown[]; distanceMeters?: number; duration?: string }
-    | undefined;
-  if (!route?.polyline?.encodedPolyline) throw new Error("DIRECTIONS_FAILED");
-
-  type RawStep = {
-    navigationInstruction?: { instructions?: string; maneuver?: string };
-    distanceMeters?: number;
-    staticDuration?: string;
-    startLocation?: { latLng?: { latitude?: number; longitude?: number } };
-    endLocation?: { latLng?: { latitude?: number; longitude?: number } };
-  };
-
-  const steps: NavStep[] = [];
-  (route.legs ?? []).forEach((leg) => {
-    const l = leg as { steps?: RawStep[] };
-    (l.steps ?? []).forEach((s) => {
-      const dm = s.distanceMeters ?? 0;
-      const ds = parseInt(String(s.staticDuration ?? "0s").replace(/s$/, ""), 10) || 0;
-      steps.push({
-        instruction: s.navigationInstruction?.instructions ?? "Continue",
-        maneuver: s.navigationInstruction?.maneuver,
-        distance: dm ? formatMeters(dm) : "",
-        duration: ds ? formatDurationString(`${ds}s`) : "",
-        distanceMeters: dm,
-        durationSeconds: ds,
-        startLat: s.startLocation?.latLng?.latitude,
-        startLng: s.startLocation?.latLng?.longitude,
-        endLat: s.endLocation?.latLng?.latitude,
-        endLng: s.endLocation?.latLng?.longitude,
-      });
-    });
-  });
-
-  const durationSeconds = parseInt(String(route.duration ?? "0s").replace(/s$/, ""), 10) || 0;
-  const alternatives = routesArr.slice(1).map((r) => {
-    const rr = r as { polyline?: { encodedPolyline?: string }; distanceMeters?: number; duration?: string };
-    return {
-      encodedPolyline: rr.polyline?.encodedPolyline ?? "",
-      distanceMeters: rr.distanceMeters ?? 0,
-      durationSeconds: parseInt(String(rr.duration ?? "0s").replace(/s$/, ""), 10) || 0,
-    };
-  }).filter((a) => a.encodedPolyline);
-
-  return {
-    encodedPolyline: route.polyline.encodedPolyline,
-    distance: formatMeters(route.distanceMeters ?? 0),
-    duration: formatDurationString(route.duration ?? "0s"),
-    distanceMeters: route.distanceMeters ?? 0,
-    durationSeconds,
-    steps,
-    alternatives: alternatives.length ? alternatives : undefined,
-  };
-}
-
 // Speed limits from OpenStreetMap via Overpass API (ODbL — free for any use
 // with attribution). Compliant with consumer apps, unlike Google Roads API
 // which is restricted to the Asset Tracking license tier.
-export async function getSpeedLimitKmh(input: { lat: number; lng: number }): Promise<number | null> {
+export async function getSpeedLimitKmh(input: {
+  lat: number;
+  lng: number;
+}): Promise<number | null> {
   try {
     // Find the nearest highway way within 25m that has a maxspeed tag.
     const query = `[out:json][timeout:8];way(around:25,${input.lat},${input.lng})[highway][maxspeed];out tags 1;`;
@@ -435,7 +240,11 @@ async function aiText(system: string, user: string): Promise<string> {
 }
 
 export async function getWaypointFacts(input: {
-  name: string; lat: number; lng: number; theme?: string; language?: string;
+  name: string;
+  lat: number;
+  lng: number;
+  theme?: string;
+  language?: string;
 }): Promise<{ facts: string }> {
   const lang = input.language || "English";
   const system = `You are a warm, well-traveled tour guide riding shotgun. Given a landmark or place, share 2-3 short, interesting, true facts that a driver would love to hear as they arrive. Keep it under 60 words, conversational, no bullet points, no preamble like "Here are facts". Reply in ${lang}.`;
@@ -445,7 +254,9 @@ export async function getWaypointFacts(input: {
 }
 
 export async function recommendThemes(input: {
-  start: string; end: string; available: string[];
+  start: string;
+  end: string;
+  available: string[];
 }): Promise<{ themes: string[] }> {
   const system = `You are a route-styling advisor. Pick 3-5 themes from the provided list that genuinely match the actual geography between the start and the end. Output ONLY valid minified JSON: {"themes": string[]}. Each item MUST match the list exactly (case-sensitive). No commentary.
 
@@ -469,11 +280,11 @@ If a theme is borderline, leave it out. Prefer a tight list of true fits over fi
   try {
     const parsed = JSON.parse(text.match(/\{[\s\S]*\}/)?.[0] ?? text);
     const list = Array.isArray(parsed?.themes) ? parsed.themes : [];
-    const filtered = list.filter((t: unknown): t is string => typeof t === "string" && input.available.includes(t));
+    const filtered = list.filter(
+      (t: unknown): t is string => typeof t === "string" && input.available.includes(t),
+    );
     return { themes: filtered.slice(0, 5) };
   } catch {
     return { themes: [] };
   }
 }
-
-

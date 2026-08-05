@@ -15,7 +15,7 @@ export const planScenicRoute = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
   .inputValidator((input: unknown) => PlanInput.parse(input))
   .handler(async ({ data, context }) => {
-    const { generateScenicRoute, geocodeAddress, computeDirections } = await import("./ai-gateway.server");
+    const { geocodeAddress, computeDirections } = await import("./google-maps.server");
 
     // Enforce free-tier cap (3 generations per calendar month)
     const monthStart = new Date();
@@ -37,10 +37,11 @@ export const planScenicRoute = createServerFn({ method: "POST" })
     const sub = subRows?.[0];
     const nowMs = Date.now();
     const subEndMs = sub?.current_period_end ? new Date(sub.current_period_end).getTime() : null;
-    const isPremium = !!sub && (
-      (["active", "trialing", "past_due"].includes(sub.status) && (!subEndMs || subEndMs > nowMs)) ||
-      (sub.status === "canceled" && !!subEndMs && subEndMs > nowMs)
-    );
+    const isPremium =
+      !!sub &&
+      ((["active", "trialing", "past_due"].includes(sub.status) &&
+        (!subEndMs || subEndMs > nowMs)) ||
+        (sub.status === "canceled" && !!subEndMs && subEndMs > nowMs));
     const FREE_LIMIT = 3;
     if (!isPremium && (usedThisMonth ?? 0) >= FREE_LIMIT) {
       throw new Error(`FREE_LIMIT_REACHED:${FREE_LIMIT}`);
@@ -48,7 +49,6 @@ export const planScenicRoute = createServerFn({ method: "POST" })
     if (!isPremium && data.stops.length > 0) {
       throw new Error("PREMIUM_REQUIRED:multi_stop");
     }
-
 
     const [start, end, ...stops] = await Promise.all([
       geocodeAddress(data.start_address),
@@ -58,30 +58,17 @@ export const planScenicRoute = createServerFn({ method: "POST" })
 
     const moodIn = data.mood.trim();
     const themeIn = data.theme.trim();
-    const fastest = !moodIn && !themeIn;
-    const effectiveMood = moodIn || (fastest ? "None — driver just wants to arrive" : "Open");
-    const effectiveTheme = themeIn || (fastest ? "Fastest direct route — minimize detours" : "Open");
-    const effectiveExtra = fastest ? 0 : data.extra_minutes;
-
-    const ai = await generateScenicRoute({
-      start: { address: start.formatted, lat: start.lat, lng: start.lng },
-      end: { address: end.formatted, lat: end.lat, lng: end.lng },
-      mood: effectiveMood,
-      theme: effectiveTheme,
-      extra_minutes: effectiveExtra,
-      required_stops: stops.map((s) => ({ address: s.formatted, lat: s.lat, lng: s.lng })),
+    const waypoints = stops.map((stop) => ({
+      name: stop.formatted,
+      lat: stop.lat,
+      lng: stop.lng,
+      description: "Required stop",
+    }));
+    const directions = await computeDirections({
+      origin: { lat: start.lat, lng: start.lng },
+      destination: { lat: end.lat, lng: end.lng },
+      waypoints: waypoints.map(({ lat, lng }) => ({ lat, lng })),
     });
-
-    let directions: Awaited<ReturnType<typeof computeDirections>> | null = null;
-    try {
-      directions = await computeDirections({
-        origin: { lat: start.lat, lng: start.lng },
-        destination: { lat: end.lat, lng: end.lng },
-        waypoints: ai.waypoints.map((w) => ({ lat: w.lat, lng: w.lng })),
-      });
-    } catch {
-      directions = null;
-    }
 
     // Log generation for free-tier metering — surface failures so the cap is enforced
     const { error: genErr } = await context.supabase
@@ -92,20 +79,24 @@ export const planScenicRoute = createServerFn({ method: "POST" })
       throw new Error("Failed to record route generation. Please try again.");
     }
 
-
-
     return {
-      title: ai.title,
-      narrative: ai.narrative,
-      scenic_score: ai.scenic_score,
-      score_breakdown: ai.score_breakdown,
-      highlights: ai.highlights,
-      waypoints: ai.waypoints,
+      title: "Scenic drive",
+      narrative:
+        "This is a traffic-aware Google route. Scenic scoring and AI-generated explanations are unavailable during the Phase A migration.",
+      scenic_score: 0,
+      score_breakdown: undefined,
+      highlights: [
+        "Traffic-aware route",
+        ...(waypoints.length
+          ? [`Includes ${waypoints.length} required stop${waypoints.length === 1 ? "" : "s"}`]
+          : []),
+      ],
+      waypoints,
       start: { address: start.formatted, lat: start.lat, lng: start.lng },
       end: { address: end.formatted, lat: end.lat, lng: end.lng },
-      mood: moodIn || (fastest ? "Fastest" : "Open"),
-      theme: themeIn || (fastest ? "Direct route" : "Open"),
-      extra_minutes: effectiveExtra,
+      mood: moodIn || "Open",
+      theme: themeIn || "Direct route",
+      extra_minutes: 0,
       directions,
     };
   });
@@ -121,12 +112,14 @@ const SaveInput = z.object({
   start_lng: z.number(),
   end_lat: z.number(),
   end_lng: z.number(),
-  waypoints: z.array(z.object({
-    name: z.string(),
-    lat: z.number(),
-    lng: z.number(),
-    description: z.string(),
-  })),
+  waypoints: z.array(
+    z.object({
+      name: z.string(),
+      lat: z.number(),
+      lng: z.number(),
+      description: z.string(),
+    }),
+  ),
   scenic_score: z.number().int(),
   narrative: z.string(),
   highlights: z.array(z.string()),
@@ -185,7 +178,7 @@ export const recomputeDirections = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
   .inputValidator((input: unknown) => RecomputeInput.parse(input))
   .handler(async ({ data }) => {
-    const { computeDirections } = await import("./ai-gateway.server");
+    const { computeDirections } = await import("./google-maps.server");
     return await computeDirections({
       origin: data.origin,
       destination: data.destination,
@@ -202,40 +195,43 @@ export const fetchSpeedLimit = createServerFn({ method: "POST" })
     return { kmh: await getSpeedLimitKmh(data) };
   });
 
-
 export const reverseGeocode = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
   .inputValidator((input: unknown) => z.object({ lat: z.number(), lng: z.number() }).parse(input))
   .handler(async ({ data }) => {
-    const { reverseGeocodeLatLng } = await import("./ai-gateway.server");
+    const { reverseGeocodeLatLng } = await import("./google-maps.server");
     const r = await reverseGeocodeLatLng(data.lat, data.lng);
     return { address: r.formatted, lat: r.lat, lng: r.lng };
   });
 
-
 export const waypointFacts = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
-  .inputValidator((input: unknown) => z.object({
-    name: z.string().min(1),
-    lat: z.number(),
-    lng: z.number(),
-    theme: z.string().optional(),
-    language: z.string().optional(),
-  }).parse(input))
-  .handler(async ({ data }) => {
-    const { getWaypointFacts } = await import("./ai-gateway.server");
-    return await getWaypointFacts(data);
+  .inputValidator((input: unknown) =>
+    z
+      .object({
+        name: z.string().min(1),
+        lat: z.number(),
+        lng: z.number(),
+        theme: z.string().optional(),
+        language: z.string().optional(),
+      })
+      .parse(input),
+  )
+  .handler(async () => {
+    return { facts: "Scenic commentary is unavailable during the Phase A migration." };
   });
 
 export const recommendThemesFn = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
-  .inputValidator((input: unknown) => z.object({
-    start: z.string().min(2),
-    end: z.string().min(2),
-    available: z.array(z.string()).min(1),
-  }).parse(input))
-  .handler(async ({ data }) => {
-    const { recommendThemes } = await import("./ai-gateway.server");
-    return await recommendThemes(data);
+  .inputValidator((input: unknown) =>
+    z
+      .object({
+        start: z.string().min(2),
+        end: z.string().min(2),
+        available: z.array(z.string()).min(1),
+      })
+      .parse(input),
+  )
+  .handler(async () => {
+    return { themes: [] as string[] };
   });
-

@@ -311,6 +311,14 @@ function RouteFeedback({ routeKey }: { routeKey: string }) {
 }
 
 function friendlyError(msg: string): string {
+  if (/MAPS_NOT_CONFIGURED/.test(msg))
+    return "Route planning is not configured right now. Please try again later.";
+  if (/GEOCODING_ZERO_RESULTS/.test(msg))
+    return "We couldn't find one of those locations. Please check the addresses and try again.";
+  if (/GEOCODING_REQUEST_DENIED|GEOCODING_QUOTA_EXCEEDED|GEOCODING_FAILED/.test(msg))
+    return "We couldn't look up those locations right now. Please try again.";
+  if (/DIRECTIONS_FAILED/.test(msg))
+    return "We couldn't calculate directions right now. Please try again.";
   if (/Failed to fetch|NetworkError|network|fetch failed/i.test(msg)) {
     return "Please check your internet connection and try again.";
   }
@@ -391,12 +399,7 @@ const FREE_THEMES = new Set(THEMES.slice(0, FREE_THEME_COUNT));
 
 // Themes tied to specific geography — only shown when the corridor recommender
 // confirms they actually exist along the route.
-const GEO_RESTRICTED_THEMES = new Set<string>([
-  "Coastal",
-  "Mountain",
-  "Waterfalls",
-]);
-
+const GEO_RESTRICTED_THEMES = new Set<string>(["Coastal", "Mountain", "Waterfalls"]);
 
 type PlanResult = Awaited<ReturnType<typeof planScenicRoute>>;
 
@@ -1009,13 +1012,12 @@ function PlanPage() {
       console.log("[Route] exact safe error:", e.message);
       if (/FREE_LIMIT_REACHED/.test(e.message)) {
         capture(AnalyticsEvent.FreeLimitReached, { source: "plan" });
-        setPlanError("You've used all 3 free routes this month. Upgrade to Premium for unlimited routes.");
-        toast.error(
-          "You've used all 3 free routes this month. Upgrade to Premium for unlimited.",
-          {
-            action: { label: "Upgrade", onClick: () => navigate({ to: "/pricing" }) },
-          },
+        setPlanError(
+          "You've used all 3 free routes this month. Upgrade to Premium for unlimited routes.",
         );
+        toast.error("You've used all 3 free routes this month. Upgrade to Premium for unlimited.", {
+          action: { label: "Upgrade", onClick: () => navigate({ to: "/pricing" }) },
+        });
         return;
       }
       if (/PREMIUM_REQUIRED:multi_stop/.test(e.message)) {
@@ -1086,12 +1088,7 @@ function PlanPage() {
 
   function openNav() {
     setNavError(null);
-    if (!import.meta.env.VITE_LOVABLE_CONNECTOR_GOOGLE_MAPS_BROWSER_KEY) {
-      toast.error("Unable to launch navigation. Please try again.");
-      return;
-    }
     promptLocation("nav");
-
   }
 
   function actuallyOpenNav() {
@@ -1394,7 +1391,12 @@ function PlanPage() {
 
   async function runPlan(overrides?: { moods?: string[]; themes?: string[] }) {
     console.log("[Route] request started");
-    console.log("[Route] location present:", Boolean(start.trim()), "destination present:", Boolean(end.trim()));
+    console.log(
+      "[Route] location present:",
+      Boolean(start.trim()),
+      "destination present:",
+      Boolean(end.trim()),
+    );
     if (!start.trim() || !end.trim()) {
       setPlanError("Enter a starting point and a destination first.");
       toast.error("Enter a start and end");
@@ -1602,9 +1604,7 @@ function PlanPage() {
                         onSelect={(e) => e.preventDefault()}
                       >
                         <span className="flex-1">{m}</span>
-                        {locked && (
-                          <Lock className="ml-2 h-3 w-3 shrink-0 text-muted-foreground" />
-                        )}
+                        {locked && <Lock className="ml-2 h-3 w-3 shrink-0 text-muted-foreground" />}
                       </DropdownMenuCheckboxItem>
                     );
                   })}
@@ -1617,7 +1617,6 @@ function PlanPage() {
                       Unlock all {MOODS.length} moods with Premium
                     </button>
                   )}
-
                 </DropdownMenuContent>
               </DropdownMenu>
               {moods.length > 0 && (
@@ -1735,7 +1734,6 @@ function PlanPage() {
                       </>
                     );
                   })()}
-
                 </DropdownMenuContent>
               </DropdownMenu>
               {themes.length > 0 && (
@@ -1910,7 +1908,7 @@ function PlanPage() {
         </Card>
 
         {/* Result */}
-          <div ref={resultRef} className="min-w-0 space-y-6 scroll-mt-24">
+        <div ref={resultRef} className="min-w-0 space-y-6 scroll-mt-24">
           {result && (
             <Card className="min-w-0 border-border bg-card p-4 shadow-paper sm:p-6">
               <div className="flex flex-wrap items-start justify-between gap-3 sm:gap-4">
@@ -1927,8 +1925,14 @@ function PlanPage() {
                     Scenic
                   </div>
                   <div className="font-serif text-2xl font-semibold text-primary sm:text-3xl">
-                    {result.scenic_score}
-                    <span className="text-sm text-muted-foreground sm:text-base">/100</span>
+                    {result.score_breakdown ? (
+                      <>
+                        {result.scenic_score}
+                        <span className="text-sm text-muted-foreground sm:text-base">/100</span>
+                      </>
+                    ) : (
+                      "Not scored"
+                    )}
                   </div>
                 </div>
               </div>
@@ -2084,7 +2088,6 @@ function PlanPage() {
                       setLocEnabled(false);
                     } else {
                       promptLocation(null);
-
                     }
                   }}
                   title={locEnabled ? "Hide my location" : "Show my location"}
@@ -2361,8 +2364,8 @@ function PlanPage() {
                     {altOffer && (
                       <div
                         style={{ top: "calc(max(1rem, env(safe-area-inset-top)) + 3rem)" }}
-                        className="absolute left-4 right-4 sm:right-auto sm:max-w-sm rounded-xl border border-amber-300 bg-amber-50/95 p-3 shadow-paper z-10">
-
+                        className="absolute left-4 right-4 sm:right-auto sm:max-w-sm rounded-xl border border-amber-300 bg-amber-50/95 p-3 shadow-paper z-10"
+                      >
                         <div className="flex items-start gap-2">
                           <RouteIcon className="mt-0.5 h-4 w-4 text-amber-700" />
                           <div className="min-w-0 flex-1">
@@ -2521,7 +2524,6 @@ function PlanPage() {
                   Start over
                 </Button>
               </div>
-
             </Card>
           )}
         </div>
