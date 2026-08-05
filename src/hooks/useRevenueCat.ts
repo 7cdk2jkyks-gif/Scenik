@@ -37,21 +37,19 @@ export function useRevenueCatBootstrap() {
     (async () => {
       const { data } = await supabase.auth.getUser();
       const u = data.user;
-      const stableId =
-        u && !(u as { is_anonymous?: boolean }).is_anonymous ? u.id : undefined;
+      const stableId = u && !(u as { is_anonymous?: boolean }).is_anonymous ? u.id : undefined;
       if (unsubbed) return;
       await initRevenueCat(stableId);
       qc.invalidateQueries({ queryKey: ["rc-premium"] });
     })();
 
-    const { data: authSub } = supabase.auth.onAuthStateChange(async (event, session) => {
+    const { data: authSub } = supabase.auth.onAuthStateChange((event, session) => {
       const u = session?.user;
-      const stableId =
-        u && !(u as { is_anonymous?: boolean }).is_anonymous ? u.id : undefined;
+      const stableId = u && !(u as { is_anonymous?: boolean }).is_anonymous ? u.id : undefined;
       if (event === "SIGNED_IN" || event === "USER_UPDATED") {
-        if (stableId) await rcLogIn(stableId);
+        if (stableId) void rcLogIn(stableId);
       } else if (event === "SIGNED_OUT") {
-        await rcLogOut();
+        void rcLogOut();
       }
       qc.invalidateQueries({ queryKey: ["rc-premium"] });
     });

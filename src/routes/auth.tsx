@@ -15,7 +15,7 @@ import { AnalyticsEvent } from "@/lib/analytics/events";
 import { canUseNativeAuth, nativeSignIn } from "@/lib/native-auth";
 import { getPublicOrigin, isNativePlatform, isIOS } from "@/lib/native";
 import { exchangeNativeGoogleToken } from "@/lib/native-google.functions";
-import { markNativeAuthCompleted } from "@/lib/native-auth-transition";
+import { markNativeAuthCompleted, restoreNativeSession } from "@/lib/native-auth-transition";
 
 export const Route = createFileRoute("/auth")({
   head: () => ({
@@ -94,10 +94,15 @@ function AuthPage() {
     // Passive session restore. Never touches the loading state, always bounded,
     // always resolves — failure leaves every sign-in option enabled.
     log("session restore started");
-    withAuthTimeout(supabase.auth.getSession(), "Session restore", 8_000)
-      .then(({ data }) => {
+    const restore = native
+      ? restoreNativeSession("auth page")
+      : withAuthTimeout(supabase.auth.getSession(), "Session restore", 8_000).then(
+          ({ data }) => data.session,
+        );
+    restore
+      .then((session) => {
         if (cancelled) return;
-        log(`session restore completed (session: ${data.session ? "yes" : "no"})`);
+        log(`session restore completed (session: ${session ? "yes" : "no"})`);
       })
       .catch((err) => {
         if (cancelled) return;
@@ -161,23 +166,38 @@ function AuthPage() {
       log(`${provider} OAuth started (user interaction)`);
       // On iOS/Android, use the native sign-in sheet so users never leave the app.
       if (canUseNativeAuth(provider)) {
-        await nativeSignIn(provider, provider === "google" ? googleBridge : undefined);
-        log(provider === "google" ? "Google result received" : "Apple result received");
-
-        const { data: sessionData, error: sessionError } = await supabase.auth.getSession();
-        if (sessionError) throw sessionError;
-        if (!sessionData.session)
-          throw new Error("Native authentication completed without a client session");
-        log("Supabase session created");
-        log("getSession confirmed");
+        const result = await nativeSignIn(
+          provider,
+          provider === "google" ? googleBridge : undefined,
+        );
+        log(`[${result.requestId}] ${provider} native result received`);
+        log(`[${result.requestId}] Supabase session confirmed`);
         capture(mode === "signup" ? AnalyticsEvent.UserSignedUp : AnalyticsEvent.UserSignedIn, {
           method: provider,
         });
         stopLoading();
-        log("loading cleared");
+        log(`[${result.requestId}] loading cleared`);
         markNativeAuthCompleted();
-        log("navigation to home started");
-        await navigate({ to: "/" });
+        log(`[${result.requestId}] home/root auth refresh requested`);
+        log(`[${result.requestId}] navigation to /plan started`);
+        console.log(`[Auth][${result.requestId}] RevenueCat identification started`);
+        void import("@/lib/revenuecat")
+          .then((module) => module.configureRevenueCat(result.session.user.id))
+          .then(() => log(`[${result.requestId}] RevenueCat identification completed`))
+          .catch((error: unknown) =>
+            console.warn(
+              `[Auth][${result.requestId}] RevenueCat identification non-fatal failure`,
+              error instanceof Error ? error.message : "unknown error",
+            ),
+          );
+        void navigate({ to: "/plan", replace: true }).then(
+          () => log(`[${result.requestId}] navigation to /plan completed`),
+          (error: unknown) =>
+            console.warn(
+              `[Auth][${result.requestId}] post-auth navigation failed`,
+              error instanceof Error ? error.message : "unknown error",
+            ),
+        );
         return;
       }
 

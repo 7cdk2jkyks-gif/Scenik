@@ -8,7 +8,7 @@ const config: CapacitorConfig = {
   appName: "Scenik",
   webDir: "dist",
   server: {
-    url: "https://goscenik.com",
+    url: "https://scenik-weld.vercel.app",
   },
 
   ios: {

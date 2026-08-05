@@ -4,7 +4,8 @@ import { MapPin, Heart, Mountain, Users } from "lucide-react";
 import { Logo } from "@/components/Logo";
 import { useEffect, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
-import { consumeNativeAuthCompleted } from "@/lib/native-auth-transition";
+import { consumeNativeAuthCompleted, restoreNativeSession } from "@/lib/native-auth-transition";
+import { isNativePlatform } from "@/lib/native";
 
 export const Route = createFileRoute("/")({
   head: () => ({
@@ -26,20 +27,16 @@ function useIsAuthed() {
     let mounted = true;
     const nativeCompletion = consumeNativeAuthCompleted();
     console.log("[Auth] home loaded");
-    supabase.auth
-      .getSession()
-      .then(({ data, error }) => {
+    const restore = isNativePlatform()
+      ? restoreNativeSession("home")
+      : supabase.auth.getSession().then(({ data, error }) => {
+          if (error) throw error;
+          return data.session;
+        });
+    restore
+      .then((session) => {
         if (!mounted) return;
-        if (error) {
-          console.error(
-            "[Auth] home session check failed",
-            error,
-            error.stack ?? "Source line unavailable",
-          );
-          setAuthed(false);
-          return;
-        }
-        setAuthed(Boolean(data.session?.user));
+        setAuthed(Boolean(session?.user));
         if (nativeCompletion) console.log("[Auth] auth context refreshed");
       })
       .catch((error: unknown) => {

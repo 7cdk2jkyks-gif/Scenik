@@ -4,14 +4,48 @@
 // fall back to the Lovable OAuth broker.
 import { isNativePlatform, isIOS } from "./native";
 import { supabase } from "@/integrations/supabase/client";
+import type { NativeAuthResult } from "@/lib/native-auth-transition";
 
 let initialized = false;
 
-const IOS_CLIENT_ID = import.meta.env.VITE_GOOGLE_IOS_CLIENT_ID as string | undefined;
-const WEB_CLIENT_ID = import.meta.env.VITE_GOOGLE_WEB_CLIENT_ID as string | undefined;
+const RAW_IOS_CLIENT_ID = import.meta.env.VITE_GOOGLE_IOS_CLIENT_ID as string | undefined;
+const RAW_WEB_CLIENT_ID = import.meta.env.VITE_GOOGLE_WEB_CLIENT_ID as string | undefined;
+
+const GOOGLE_CLIENT_ID_PATTERN = /\d+-[a-z0-9]+\.apps\.googleusercontent\.com/gi;
+
+function selectGoogleClientId(raw: string | undefined, exclude?: string): string | undefined {
+  const candidates = raw?.match(GOOGLE_CLIENT_ID_PATTERN) ?? [];
+  return candidates.find((candidate) => candidate !== exclude) ?? candidates[0];
+}
+
+const IOS_CLIENT_ID = selectGoogleClientId(RAW_IOS_CLIENT_ID);
+const WEB_CLIENT_ID = selectGoogleClientId(RAW_WEB_CLIENT_ID, IOS_CLIENT_ID);
+
+function logClientIdMetadata(
+  variableName: string,
+  raw: string | undefined,
+  selected: string | undefined,
+) {
+  console.log("[Auth] Google client configuration", {
+    variableName,
+    exists: Boolean(selected),
+    finalSix: selected?.slice(-6) ?? "none",
+    containsQuotes: /["']/.test(raw ?? ""),
+    containsSpaces: / /.test(raw ?? ""),
+    containsCommas: /,/.test(raw ?? ""),
+    containsNewlines: /[\r\n]/.test(raw ?? ""),
+  });
+}
 
 async function ensureInit() {
   if (initialized) return;
+  const platform = isNativePlatform() ? (isIOS() ? "ios" : "android") : "web";
+  console.log("[Auth] SocialLogin.initialize selected platform:", platform);
+  logClientIdMetadata("VITE_GOOGLE_IOS_CLIENT_ID", RAW_IOS_CLIENT_ID, IOS_CLIENT_ID);
+  logClientIdMetadata("VITE_GOOGLE_WEB_CLIENT_ID", RAW_WEB_CLIENT_ID, WEB_CLIENT_ID);
+  if (!IOS_CLIENT_ID || !WEB_CLIENT_ID) {
+    throw new Error("Native Google sign-in client configuration is missing or invalid");
+  }
   const { SocialLogin } = await import("@capgo/capacitor-social-login");
   await SocialLogin.initialize({
     google: {
@@ -96,7 +130,6 @@ async function doGoogleLoginOnce(reqId: string): Promise<{
   return { idToken, payload, rawNonce, hashedNonce };
 }
 
-
 // Timeouts are ONLY applied to native UI bridge calls (which can genuinely
 // hang on a dismissed sheet). Session-creating calls are never raced against a
 // timer: a timer that fires while the request is still in flight produces two
@@ -126,6 +159,13 @@ function alog(reqId: string, ...args: unknown[]) {
   console.log(`[Auth][${reqId}]`, ...args);
 }
 
+function logAudienceMetadata(reqId: string, audience: unknown) {
+  const value = typeof audience === "string" ? audience : undefined;
+  alog(reqId, "token audience metadata:", {
+    exists: Boolean(value),
+    finalSix: value?.slice(-6) ?? "none",
+  });
+}
 
 type NativeGoogleBridge = (input: { data: { idToken: string } }) => Promise<{
   tokenHash: string;
@@ -136,7 +176,7 @@ type NativeGoogleBridge = (input: { data: { idToken: string } }) => Promise<{
 export async function nativeSignIn(
   provider: "google" | "apple",
   googleBridge?: NativeGoogleBridge,
-): Promise<void> {
+): Promise<NativeAuthResult> {
   const reqId = newRequestId();
   alog(reqId, "platform:", isNativePlatform() ? (isIOS() ? "ios" : "android") : "web");
   alog(reqId, "provider and selected flow:", provider, "native");
@@ -181,7 +221,7 @@ export async function nativeSignIn(
     const payload = decodeJwtPayload(idToken);
     const tokenNonce = payload?.["nonce"] as string | undefined;
     const aud = payload?.["aud"];
-    alog(reqId, "token audience:", aud);
+    logAudienceMetadata(reqId, aud);
     alog(reqId, "apple: nonce claim matches hash?", tokenNonce === hashedNonce);
 
     const credentials: { provider: "apple"; token: string; nonce?: string } = {
@@ -192,10 +232,16 @@ export async function nativeSignIn(
       credentials.nonce = rawNonce;
     }
 
-    alog(reqId, "token exchange started (apple, nonce sent?", credentials.nonce !== undefined, ")");
+    alog(
+      reqId,
+      "apple: signInWithIdToken started (nonce sent?",
+      credentials.nonce !== undefined,
+      ")",
+    );
     // No timeout: this call creates the session. Racing it against a timer
     // produced a "timed out" failure followed by a later real session.
     const { data, error } = await supabase.auth.signInWithIdToken(credentials);
+    alog(reqId, "apple: Supabase response received");
     if (error) {
       alog(reqId, "token exchange error:", error.message);
       settle("failure", error.message);
@@ -212,17 +258,9 @@ export async function nativeSignIn(
       throw new Error("Apple sign-in completed but no session was returned");
     }
 
-    const { error: setErr } = await supabase.auth.setSession({
-      access_token: data.session.access_token,
-      refresh_token: data.session.refresh_token,
-    });
-    if (setErr) {
-      alog(reqId, "apple: setSession error:", setErr.message);
-      settle("failure", setErr.message);
-      throw setErr;
-    }
+    alog(reqId, "apple: session confirmed");
     settle("success", "apple session created");
-    return;
+    return { requestId: reqId, session: data.session };
   }
 
   // Google flow with nonce, retry once on stale/cached token mismatch.
@@ -246,7 +284,7 @@ export async function nativeSignIn(
   }
 
   const aud = attempt.payload?.["aud"];
-  alog(reqId, "token audience:", aud);
+  logAudienceMetadata(reqId, aud);
 
   const credentials: {
     provider: "google";
@@ -264,12 +302,15 @@ export async function nativeSignIn(
   alog(reqId, "signInWithIdToken started");
   // No timeout: session-creating call.
   const { data: primaryData, error } = await supabase.auth.signInWithIdToken(credentials);
-  const primaryCode = error?.code ?? error?.status ?? (primaryData.session ? "session_returned" : "no_session");
+  const primaryCode =
+    error?.code ?? error?.status ?? (primaryData.session ? "session_returned" : "no_session");
   alog(reqId, "primary exchange status:", primaryCode);
   if (error) {
     alog(reqId, "primary exchange error:", error.message);
     const errorCode = typeof error.code === "string" ? error.code.toLowerCase() : "";
-    const audienceMessage = /audience|unacceptable audience in id_token|invalid.*client/i.test(error.message);
+    const audienceMessage = /audience|unacceptable audience in id_token|invalid.*client/i.test(
+      error.message,
+    );
     const audienceCode = /identity|id_token|oauth|provider|bad_jwt/.test(errorCode);
     const acceptedIOSAudience = typeof aud === "string" && aud === IOS_CLIENT_ID;
 
@@ -290,7 +331,13 @@ export async function nativeSignIn(
           "Native Google bridge",
         );
         bridgeReached = true;
-        alog(reqId, "bridge returned; verification:", bridge.verificationSucceeded, "magic link:", bridge.magicLinkReturned);
+        alog(
+          reqId,
+          "bridge returned; verification:",
+          bridge.verificationSucceeded,
+          "magic link:",
+          bridge.magicLinkReturned,
+        );
         alog(reqId, "verifyOtp started");
         // No timeout: this is the call that actually creates the session. The
         // previous 30s race is exactly what produced "timed out" followed by a
@@ -304,7 +351,7 @@ export async function nativeSignIn(
         if (otpError) throw new Error(`verifyOtp failed: ${otpError.message}`);
         if (!otpData.session) throw new Error("verifyOtp completed without returning a session");
         settle("success", "google session created via bridge");
-        return;
+        return { requestId: reqId, session: otpData.session };
       } catch (fallbackError) {
         alog(reqId, "bridge request reached server:", bridgeReached);
         // Last check before declaring failure: if a session exists anyway,
@@ -312,9 +359,10 @@ export async function nativeSignIn(
         const { data: check } = await supabase.auth.getSession();
         if (check.session) {
           settle("success", "session present despite fallback error");
-          return;
+          return { requestId: reqId, session: check.session };
         }
-        const message = fallbackError instanceof Error ? fallbackError.message : "Native Google fallback failed";
+        const message =
+          fallbackError instanceof Error ? fallbackError.message : "Native Google fallback failed";
         settle("failure", message);
         throw new Error(`Native Google fallback failed: ${message}`);
       }
@@ -328,6 +376,5 @@ export async function nativeSignIn(
     throw new Error("Google sign-in completed without returning a session");
   }
   settle("success", "google session created");
+  return { requestId: reqId, session: primaryData.session };
 }
-
-

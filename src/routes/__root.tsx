@@ -140,6 +140,16 @@ function RootComponent() {
     return () => sub.subscription.unsubscribe();
   }, [router, queryClient]);
 
+  useEffect(() => {
+    const refreshNativeAuth = () => {
+      console.log("[Auth] root auth state refreshed after native completion");
+      void router.invalidate();
+      void queryClient.invalidateQueries();
+    };
+    window.addEventListener("scenik:native-auth-completed", refreshNativeAuth);
+    return () => window.removeEventListener("scenik:native-auth-completed", refreshNativeAuth);
+  }, [router, queryClient]);
+
   return (
     <QueryClientProvider client={queryClient}>
       <RevenueCatBoot />
