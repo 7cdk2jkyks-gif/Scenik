@@ -65,25 +65,28 @@ function selections(value: string): string[] {
     .filter(Boolean);
 }
 
+function preferenceScore(
+  selected: string[],
+  groups: readonly (readonly string[])[],
+  neutral: number,
+  single: number,
+  maximum: number,
+): number {
+  if (selected.length === 0) return neutral;
+  const representedGroups = new Set(
+    selected
+      .map((item) => groups.findIndex((group) => group.includes(item)))
+      .filter((index) => index >= 0),
+  ).size;
+  const compatibleBonus = Math.min(2, selected.length - 1);
+  const breadthPenalty = Math.max(0, representedGroups - 1) + Math.max(0, selected.length - 3);
+  return clamp(single + compatibleBonus - breadthPenalty, maximum);
+}
+
 function routeTitle(moods: string[], themes: string[], detourRatio: number): string {
-  const theme = themes[0];
-  const mood = moods[0];
-  const themeTitles: Record<string, string> = {
-    Coastal: "Coastal Passage",
-    Mountain: "Mountain Ramble",
-    Forest: "Forest Escape",
-    Countryside: "Country Meander",
-    Historic: "Heritage Journey",
-    Waterfalls: "Waterside Wander",
-    Villages: "Village Ramble",
-    "Scenic Viewpoints": "The Viewfinder Route",
-    "Lakes & Rivers": "Waterside Journey",
-    "Castles & Ruins": "Ruins & Roads",
-    Stargazing: "Starlight Drive",
-  };
-  if (theme && themeTitles[theme]) return themeTitles[theme];
-  if (mood) return `${mood} Road`;
-  return detourRatio >= 1.12 ? "The Long Way Round" : "The Open Road";
+  void moods;
+  void themes;
+  return detourRatio >= 1.12 ? "Scenic drive — longer route" : "Scenic drive";
 }
 
 function chooseBadges(input: {
@@ -100,10 +103,7 @@ function chooseBadges(input: {
     if (!badges.includes(badge) && badges.length < 3) badges.push(badge);
   };
 
-  if (hasTheme("Historic", "Castles & Ruins")) add("Historic Treasure");
-  if (hasTheme("Coastal")) add("Coastal Classic");
-  if (hasTheme("Forest")) add("Forest Escape");
-  if (hasTheme("Scenic Viewpoints")) add("Photographer’s Choice");
+  void hasTheme;
   if (hasMood("Romantic")) add("Couples Favourite");
   if (hasMood("Peaceful", "Relaxed", "Reflective", "Cosy")) add("Relaxed Escape");
   if (hasMood("Adventurous", "Energetic") && input.turnDensity >= 5) add("Motorcycle Heaven");
@@ -146,29 +146,57 @@ export function scoreScenicRoute(input: {
     ),
   ).size;
 
+  const moodPreference = preferenceScore(
+    moods,
+    [
+      ["Peaceful", "Relaxed", "Reflective", "Cosy"],
+      ["Adventurous", "Energetic", "Spontaneous", "Awestruck"],
+      ["Romantic", "Nostalgic", "Inspired"],
+      ["Curious", "Playful", "Joyful"],
+      ["Focused"],
+    ],
+    5,
+    6,
+    9,
+  );
+  const themePreference = preferenceScore(
+    themes,
+    [
+      ["Coastal", "Lakes & Rivers", "Waterfalls"],
+      ["Mountain", "Forest", "Wildlife", "Scenic Viewpoints", "Stargazing"],
+      ["Countryside", "Villages", "Dog Friendly"],
+      ["Historic", "Castles & Ruins", "Art & Culture"],
+      ["Foodie"],
+    ],
+    7,
+    8,
+    13,
+  );
+
   // V1 intentionally uses only request choices and measurable route structure.
-  // Natural features, verified POIs, elevation, land cover, and road classification
-  // are Phase B inputs; until then the evidence-poor categories remain conservative.
+  // Unknown environmental/POI evidence receives a neutral midpoint, not a fail.
+  // Terrain, verified POIs, elevation, land cover, and road classification are
+  // Phase B inputs that will create stronger separation later.
   const naturalBeauty = clamp(
-    5 + Math.min(3, (detourRatio - 1) * 10) + Math.min(2, input.stopCount),
+    13 + Math.min(4, (detourRatio - 1) * 10) + Math.min(2, input.stopCount),
     25,
   );
-  const pointsOfInterest = clamp(3 + Math.min(12, input.stopCount * 3), 20);
+  const pointsOfInterest = clamp(9 + Math.min(9, input.stopCount * 3), 20);
   const moodMatch = clamp(
-    (moods.length ? 4 : 2) +
-      Math.min(2, input.stopCount) +
+    moodPreference +
+      Math.min(1, input.stopCount) +
       (moods.some((mood) => ["Peaceful", "Relaxed", "Reflective"].includes(mood)) && turnDensity < 8
         ? 1
         : 0),
     10,
   );
   const roadCharacter = clamp(
-    4 + Math.min(8, turnDensity * 0.8) + shortStepRatio * 4 + Math.min(3, (detourRatio - 1) * 10),
+    6 + Math.min(7, turnDensity * 0.7) + shortStepRatio * 3 + Math.min(3, (detourRatio - 1) * 10),
     20,
   );
-  const themeMatch = clamp((themes.length ? 5 : 2) + Math.min(2, input.stopCount), 15);
+  const themeMatch = clamp(themePreference + Math.min(1, input.stopCount), 15);
   const diversity = clamp(
-    2 + Math.min(4, Math.max(0, distanceBins - 1) * 1.5) + Math.min(2, input.stopCount),
+    5 + Math.min(3, Math.max(0, distanceBins - 1)) + Math.min(2, input.stopCount),
     10,
   );
 
@@ -225,19 +253,19 @@ export function scoreScenicRoute(input: {
         "This score is based on route shape, selected mood and theme, stops, and road characteristics currently available.",
       explanations: {
         natural_beauty:
-          "Conservative until terrain and land-cover data are available; route deviation and stops provide limited evidence.",
+          "Environmental evidence is currently neutral; route deviation and stops provide the measurable variation.",
         points_of_interest:
           input.stopCount > 0
             ? `Reflects ${input.stopCount} deliberate user stop${input.stopCount === 1 ? "" : "s"}; nearby POIs are not yet measured.`
-            : "No user stops were added, and nearby points of interest are not yet measured.",
+            : "Nearby attractions are not yet measured, so unknown POI evidence is scored neutrally.",
         mood_match: moods.length
-          ? "Reflects your selected mood and the route variation currently measurable."
-          : "No mood was selected, so this category receives only a conservative baseline.",
+          ? `Reflects ${moods.length} selected mood${moods.length === 1 ? "" : "s"}, rewarding compatible combinations without assuming scenery.`
+          : "No mood was selected, so this category uses a neutral baseline.",
         road_character:
           "Uses turn density, step-length mix, and route deviation—not road surface or scenic-road classifications.",
         theme_match: themes.length
-          ? "Acknowledges your selected theme without claiming unverified themed features along the road."
-          : "No theme was selected, so no themed landscape or attraction is assumed.",
+          ? `Reflects ${themes.length} selected theme${themes.length === 1 ? "" : "s"}; broad combinations are moderated and features remain unverified.`
+          : "No theme was selected, so this category uses a neutral baseline without assuming features.",
         diversity:
           "Uses the mix of short and long route steps plus deliberate stops as a provisional variety signal.",
       },

@@ -39,7 +39,7 @@ export function useRevenueCatBootstrap() {
       const u = data.user;
       const stableId = u && !(u as { is_anonymous?: boolean }).is_anonymous ? u.id : undefined;
       if (unsubbed) return;
-      await initRevenueCat(stableId);
+      await initRevenueCat(stableId).catch(() => undefined);
       qc.invalidateQueries({ queryKey: ["rc-premium"] });
     })();
 

@@ -69,6 +69,37 @@ export type RCOffering = {
 
 let configured = false;
 let currentAppUserId: string | null = null;
+const RC_TIMEOUT_MS = 12_000;
+const SUBSCRIPTIONS_UNAVAILABLE = "Subscriptions aren’t available in this test build yet.";
+
+function diagnostic(
+  failureStage: string,
+  errorCode: string,
+  offeringExists = false,
+  monthlyPackageExists = false,
+  annualPackageExists = false,
+) {
+  console.info("[revenuecat]", {
+    platform: getPlatform(),
+    configured,
+    offeringExists,
+    monthlyPackageExists,
+    annualPackageExists,
+    failureStage,
+    errorCode,
+  });
+}
+
+function stableErrorCode(error: unknown, fallback: string): string {
+  return error instanceof Error && /^RC_[A-Z_]+$/.test(error.message) ? error.message : fallback;
+}
+
+function withTimeout<T>(promise: Promise<T>, code: string): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<T>((_, reject) => window.setTimeout(() => reject(new Error(code)), RC_TIMEOUT_MS)),
+  ]);
+}
 
 async function loadPurchases() {
   const mod = await import("@revenuecat/purchases-capacitor");
@@ -80,11 +111,13 @@ export async function initRevenueCat(appUserId?: string): Promise<void> {
   const apiKey = getRevenueCatApiKey();
   try {
     const Purchases = await loadPurchases();
-    await Purchases.configure({ apiKey, appUserID: appUserId });
+    await withTimeout(Purchases.configure({ apiKey, appUserID: appUserId }), "RC_CONFIG_TIMEOUT");
     configured = true;
     currentAppUserId = appUserId ?? null;
   } catch (err) {
-    console.warn("[revenuecat] configure failed", err);
+    configured = false;
+    diagnostic("configure", stableErrorCode(err, "RC_CONFIG_FAILED"));
+    throw new Error("RC_CONFIG_FAILED");
   }
 }
 
@@ -100,7 +133,7 @@ export async function rcLogIn(appUserId: string): Promise<void> {
     await Purchases.logIn({ appUserID: appUserId });
     currentAppUserId = appUserId;
   } catch (err) {
-    console.warn("[revenuecat] logIn failed", err);
+    diagnostic("login", "RC_LOGIN_FAILED");
   }
 }
 
@@ -112,22 +145,56 @@ export async function rcLogOut(): Promise<void> {
     currentAppUserId = null;
   } catch (err) {
     // logOut throws if already anonymous — harmless.
-    console.warn("[revenuecat] logOut warn", err);
+    diagnostic("logout", "RC_LOGOUT_FAILED");
   }
 }
 
-function normalisePackage(raw: any): RCPackage | null {
-  if (!raw) return null;
+type RevenueCatProductShape = {
+  identifier?: string;
+  title?: string;
+  description?: string;
+  priceString?: string;
+  price?: number;
+  currencyCode?: string;
+};
+
+type RevenueCatPackageShape = {
+  identifier?: string;
+  packageType?: string;
+  product?: RevenueCatProductShape;
+};
+
+type RevenueCatOfferingShape = {
+  identifier?: string;
+  monthly?: unknown;
+  annual?: unknown;
+  availablePackages?: unknown[];
+};
+
+type CustomerInfoShape = {
+  entitlements?: { active?: Record<string, RevenueCatEntitlementShape> };
+  managementURL?: string | null;
+};
+
+type RevenueCatEntitlementShape = {
+  willRenew?: boolean;
+  expirationDate?: string | null;
+  productIdentifier?: string | null;
+};
+
+function normalisePackage(value: unknown): RCPackage | null {
+  if (!value || typeof value !== "object") return null;
+  const raw = value as RevenueCatPackageShape;
   const product = raw.product ?? {};
   const packageType: string = raw.packageType ?? raw.identifier ?? "";
   const billing: RCPackage["billing"] =
     packageType === "MONTHLY" || raw.identifier === "$rc_monthly"
       ? "monthly"
       : packageType === "ANNUAL" || raw.identifier === "$rc_annual"
-      ? "annual"
-      : "other";
+        ? "annual"
+        : "other";
   return {
-    identifier: raw.identifier,
+    identifier: raw.identifier ?? "",
     packageType,
     billing,
     productIdentifier: product.identifier ?? "",
@@ -136,34 +203,46 @@ function normalisePackage(raw: any): RCPackage | null {
     priceString: product.priceString ?? "",
     price: typeof product.price === "number" ? product.price : 0,
     currencyCode: product.currencyCode ?? "",
-    raw,
+    raw: value,
   };
 }
 
 export async function getCurrentOffering(): Promise<RCOffering | null> {
   if (!isNativePlatform()) return null;
-  if (!configured) await initRevenueCat();
   try {
+    if (!configured) await initRevenueCat();
     const Purchases = await loadPurchases();
-    const res = await Purchases.getOfferings();
+    const res = await withTimeout(Purchases.getOfferings(), "RC_OFFERING_TIMEOUT");
     // Prefer explicitly-named "default" offering, fall back to `.current`.
-    const chosen =
-      (res.all && res.all[RC_OFFERING_ID]) || res.current || null;
-    if (!chosen) return null;
-    const monthly = normalisePackage((chosen as any).monthly);
-    const annual = normalisePackage((chosen as any).annual);
-    const all = ((chosen as any).availablePackages ?? [])
+    const chosen = (res.all && res.all[RC_OFFERING_ID]) || res.current || null;
+    if (!chosen) {
+      diagnostic("offering", "RC_OFFERING_MISSING");
+      return null;
+    }
+    const selected = chosen as unknown as RevenueCatOfferingShape;
+    const all = (selected.availablePackages ?? [])
       .map(normalisePackage)
       .filter((p: RCPackage | null): p is RCPackage => !!p);
-    return { identifier: (chosen as any).identifier ?? RC_OFFERING_ID, monthly, annual, all };
+    const monthly =
+      normalisePackage(selected.monthly) ??
+      all.find(
+        (pkg) => pkg.billing === "monthly" || pkg.productIdentifier === RC_PRODUCT_MONTHLY,
+      ) ??
+      null;
+    const annual =
+      normalisePackage(selected.annual) ??
+      all.find((pkg) => pkg.billing === "annual" || pkg.productIdentifier === RC_PRODUCT_ANNUAL) ??
+      null;
+    diagnostic("none", "OK", true, !!monthly, !!annual);
+    return { identifier: selected.identifier ?? RC_OFFERING_ID, monthly, annual, all };
   } catch (err) {
-    console.warn("[revenuecat] getOfferings failed", err);
+    diagnostic("offering", stableErrorCode(err, "RC_OFFERING_FAILED"));
     return null;
   }
 }
 
-function customerInfoIsPremium(info: any): boolean {
-  return !!info?.entitlements?.active?.[RC_ENTITLEMENT_ID];
+function customerInfoIsPremium(info: unknown): boolean {
+  return !!(info as CustomerInfoShape | null)?.entitlements?.active?.[RC_ENTITLEMENT_ID];
 }
 
 export type RCPremiumState = {
@@ -174,8 +253,9 @@ export type RCPremiumState = {
   managementURL: string | null;
 };
 
-function toPremiumState(info: any): RCPremiumState {
-  const ent = info?.entitlements?.active?.[RC_ENTITLEMENT_ID];
+function toPremiumState(value: unknown): RCPremiumState {
+  const info = (value ?? {}) as CustomerInfoShape;
+  const ent = info.entitlements?.active?.[RC_ENTITLEMENT_ID];
   return {
     isPremium: !!ent,
     willRenew: !!ent?.willRenew,
@@ -194,13 +274,14 @@ export async function getPremiumState(): Promise<RCPremiumState> {
     managementURL: null,
   };
   if (!isNativePlatform()) return empty;
-  if (!configured) await initRevenueCat();
   try {
+    if (!configured) await initRevenueCat();
     const Purchases = await loadPurchases();
-    const res = await Purchases.getCustomerInfo();
-    return toPremiumState((res as any).customerInfo ?? res);
+    const res = await withTimeout(Purchases.getCustomerInfo(), "RC_CUSTOMER_INFO_TIMEOUT");
+    const response = res as unknown as { customerInfo?: unknown };
+    return toPremiumState(response.customerInfo ?? res);
   } catch (err) {
-    console.warn("[revenuecat] getCustomerInfo failed", err);
+    diagnostic("customer_info", "RC_CUSTOMER_INFO_FAILED");
     return empty;
   }
 }
@@ -211,18 +292,49 @@ export type PurchaseOutcome =
   | { status: "error"; message: string };
 
 export async function purchaseRCPackage(pkg: RCPackage): Promise<PurchaseOutcome> {
-  if (!isNativePlatform()) return { status: "error", message: "Native platform required" };
+  if (!isNativePlatform()) return { status: "error", message: SUBSCRIPTIONS_UNAVAILABLE };
   try {
+    if (!configured) await initRevenueCat();
     const Purchases = await loadPurchases();
-    const result: any = await Purchases.purchasePackage({ aPackage: pkg.raw as any });
+    const purchaseArgs = { aPackage: pkg.raw } as Parameters<typeof Purchases.purchasePackage>[0];
+    const result = await withTimeout(
+      Purchases.purchasePackage(purchaseArgs),
+      "RC_PURCHASE_TIMEOUT",
+    );
     const state = toPremiumState(result.customerInfo);
     if (state.isPremium) return { status: "success", state };
-    return { status: "error", message: "Purchase completed but entitlement not active yet." };
-  } catch (e: any) {
-    if (e?.userCancelled || e?.code === "1" || /cancel/i.test(e?.message ?? "")) {
+    diagnostic(
+      "entitlement",
+      "RC_ENTITLEMENT_INACTIVE",
+      true,
+      pkg.billing === "monthly",
+      pkg.billing === "annual",
+    );
+    return { status: "error", message: SUBSCRIPTIONS_UNAVAILABLE };
+  } catch (e: unknown) {
+    const purchaseError = e as { userCancelled?: boolean; code?: string; message?: string };
+    if (
+      purchaseError.userCancelled ||
+      purchaseError.code === "1" ||
+      /cancel/i.test(purchaseError.message ?? "")
+    ) {
+      diagnostic(
+        "purchase",
+        "RC_PURCHASE_CANCELLED",
+        true,
+        pkg.billing === "monthly",
+        pkg.billing === "annual",
+      );
       return { status: "cancelled" };
     }
-    return { status: "error", message: e?.message ?? "Purchase failed" };
+    diagnostic(
+      "purchase",
+      stableErrorCode(e, "RC_PURCHASE_FAILED"),
+      true,
+      pkg.billing === "monthly",
+      pkg.billing === "annual",
+    );
+    return { status: "error", message: SUBSCRIPTIONS_UNAVAILABLE };
   }
 }
 
@@ -237,12 +349,14 @@ export async function restoreRC(): Promise<RCPremiumState> {
     };
   }
   try {
+    if (!configured) await initRevenueCat();
     const Purchases = await loadPurchases();
-    const res: any = await Purchases.restorePurchases();
-    return toPremiumState(res.customerInfo ?? res);
+    const res = await withTimeout(Purchases.restorePurchases(), "RC_RESTORE_TIMEOUT");
+    const response = res as unknown as { customerInfo?: unknown };
+    return toPremiumState(response.customerInfo ?? res);
   } catch (err) {
-    console.warn("[revenuecat] restore failed", err);
-    throw err;
+    diagnostic("restore", "RC_RESTORE_FAILED");
+    throw new Error("RC_RESTORE_FAILED");
   }
 }
 

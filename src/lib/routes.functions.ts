@@ -16,6 +16,10 @@ export const planScenicRoute = createServerFn({ method: "POST" })
   .inputValidator((input: unknown) => PlanInput.parse(input))
   .handler(async ({ data, context }) => {
     const { geocodeAddress, computeDirections } = await import("./google-maps.server");
+    const { isInternalTestUser } = await import("./internal-testers.server");
+    const internalTester = isInternalTestUser(context.userId);
+    const requestCorrelationId = crypto.randomUUID().slice(0, 8);
+    console.info("[route-generation-access]", { internalTester, requestCorrelationId });
 
     // Enforce free-tier cap (3 generations per calendar month)
     const monthStart = new Date();
@@ -43,7 +47,7 @@ export const planScenicRoute = createServerFn({ method: "POST" })
         (!subEndMs || subEndMs > nowMs)) ||
         (sub.status === "canceled" && !!subEndMs && subEndMs > nowMs));
     const FREE_LIMIT = 3;
-    if (!isPremium && (usedThisMonth ?? 0) >= FREE_LIMIT) {
+    if (!internalTester && !isPremium && (usedThisMonth ?? 0) >= FREE_LIMIT) {
       throw new Error(`FREE_LIMIT_REACHED:${FREE_LIMIT}`);
     }
     if (!isPremium && data.stops.length > 0) {

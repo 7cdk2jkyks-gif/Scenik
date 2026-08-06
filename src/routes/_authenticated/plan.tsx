@@ -317,6 +317,9 @@ function RouteFeedback({ routeKey }: { routeKey: string }) {
 }
 
 function friendlyError(msg: string): string {
+  if (/FREE_LIMIT_REACHED/.test(msg))
+    return "You've used all 3 free routes this month. Upgrade to Premium for unlimited routes.";
+  if (/PREMIUM_REQUIRED:multi_stop/.test(msg)) return "Multi-stop planning is a Premium feature.";
   if (/MAPS_NOT_CONFIGURED/.test(msg))
     return "Route service configuration error (MAPS_NOT_CONFIGURED). The server Google Maps key is unavailable.";
   if (/GEOCODING_ZERO_RESULTS/.test(msg))
@@ -1046,7 +1049,7 @@ function PlanPage() {
         setPlanError(
           "You've used all 3 free routes this month. Upgrade to Premium for unlimited routes.",
         );
-        toast.error("You've used all 3 free routes this month. Upgrade to Premium for unlimited.", {
+        toast.error("Monthly route limit reached.", {
           action: { label: "Upgrade", onClick: () => navigate({ to: "/pricing" }) },
         });
         return;
@@ -1054,7 +1057,7 @@ function PlanPage() {
       if (/PREMIUM_REQUIRED:multi_stop/.test(e.message)) {
         capture(AnalyticsEvent.PremiumGateHit, { feature: "multi_stop" });
         setPlanError("Multi-stop planning is a Premium feature.");
-        toast.error("Multi-stop planning is a Premium feature.", {
+        toast.error("Multi-stop requires Premium.", {
           action: { label: "Upgrade", onClick: () => navigate({ to: "/pricing" }) },
         });
         return;
@@ -1076,7 +1079,7 @@ function PlanPage() {
         message: e.message,
       });
       setPlanError(friendlyError(e.message));
-      toast.error(friendlyError(e.message));
+      toast.error("Route request failed.");
     },
   });
 
@@ -1829,7 +1832,7 @@ function PlanPage() {
               )}
             </Button>
 
-            {planError && (
+            {planError && !plan.isError && (
               <p
                 role="alert"
                 className="rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm leading-snug text-destructive"
@@ -2105,6 +2108,9 @@ function PlanPage() {
                   )}
                   <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
                     {result.worth_extra_time.explanation}
+                  </p>
+                  <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
+                    Provisional V1 score. Your extra-time budget does not yet alter Google routing.
                   </p>
                 </div>
               )}
