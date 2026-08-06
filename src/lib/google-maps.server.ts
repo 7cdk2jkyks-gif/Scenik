@@ -46,6 +46,7 @@ export interface ComputedDirections {
     distanceMeters: number;
     durationSeconds: number;
   }>;
+  candidates?: ComputedDirections[];
 }
 
 type GeocodingResult = {
@@ -201,6 +202,60 @@ function formatDuration(value: number): string {
   return hours > 0 ? `${hours} hr ${minutes} min` : `${minutes} min`;
 }
 
+function parseRoute(route: RawRoute | undefined): ComputedDirections | null {
+  const encodedPolyline = route?.polyline?.encodedPolyline;
+  const distanceMeters = route?.distanceMeters;
+  const durationSeconds = seconds(route?.duration);
+  if (
+    typeof encodedPolyline !== "string" ||
+    !encodedPolyline ||
+    !isFiniteNumber(distanceMeters) ||
+    distanceMeters < 0 ||
+    durationSeconds <= 0
+  ) {
+    return null;
+  }
+
+  const steps: NavStep[] = [];
+  for (const leg of route.legs ?? []) {
+    for (const step of leg.steps ?? []) {
+      const stepDistance = isFiniteNumber(step.distanceMeters) ? step.distanceMeters : 0;
+      const stepDuration = seconds(step.staticDuration);
+      const instruction = step.navigationInstruction?.instructions;
+      const maneuver = step.navigationInstruction?.maneuver;
+      steps.push({
+        instruction: typeof instruction === "string" ? instruction : "Continue",
+        maneuver: typeof maneuver === "string" ? maneuver : undefined,
+        distance: stepDistance ? formatMeters(stepDistance) : "",
+        duration: stepDuration ? formatDuration(stepDuration) : "",
+        distanceMeters: stepDistance,
+        durationSeconds: stepDuration,
+        startLat: isFiniteNumber(step.startLocation?.latLng?.latitude)
+          ? step.startLocation.latLng.latitude
+          : undefined,
+        startLng: isFiniteNumber(step.startLocation?.latLng?.longitude)
+          ? step.startLocation.latLng.longitude
+          : undefined,
+        endLat: isFiniteNumber(step.endLocation?.latLng?.latitude)
+          ? step.endLocation.latLng.latitude
+          : undefined,
+        endLng: isFiniteNumber(step.endLocation?.latLng?.longitude)
+          ? step.endLocation.latLng.longitude
+          : undefined,
+      });
+    }
+  }
+
+  return {
+    encodedPolyline,
+    distance: formatMeters(distanceMeters),
+    duration: formatDuration(durationSeconds),
+    distanceMeters,
+    durationSeconds,
+    steps,
+  };
+}
+
 export async function computeDirections(input: {
   origin: { lat: number; lng: number };
   destination: { lat: number; lng: number };
@@ -247,76 +302,29 @@ export async function computeDirections(input: {
   const data = (await response.json().catch(() => null)) as { routes?: unknown } | null;
   const routes = Array.isArray(data?.routes) ? (data.routes as RawRoute[]) : [];
   logRoutesSuccess(response.status, routes);
+  if (routes.length > 0 && routes.every((route) => seconds(route.duration) <= 0)) {
+    logMapsFailure("computeRoutes", response.status, "MALFORMED_ROUTE_DURATION");
+    throw new Error("MALFORMED_ROUTE_DURATION");
+  }
 
-  const route = routes[0];
-  const encodedPolyline = route?.polyline?.encodedPolyline;
-  const distanceMeters = route?.distanceMeters;
-  const durationSeconds = seconds(route?.duration);
-  if (
-    typeof encodedPolyline !== "string" ||
-    !encodedPolyline ||
-    !isFiniteNumber(distanceMeters) ||
-    durationSeconds <= 0
-  ) {
+  const parsedRoutes = routes
+    .map(parseRoute)
+    .filter((route): route is ComputedDirections => !!route);
+  const route = parsedRoutes[0];
+  if (!route) {
     logMapsFailure("computeRoutes", response.status, "DIRECTIONS_FAILED");
     throw new Error("DIRECTIONS_FAILED");
   }
 
-  const steps: NavStep[] = [];
-  for (const leg of route.legs ?? []) {
-    for (const step of leg.steps ?? []) {
-      const stepDistance = isFiniteNumber(step.distanceMeters) ? step.distanceMeters : 0;
-      const stepDuration = seconds(step.staticDuration);
-      const instruction = step.navigationInstruction?.instructions;
-      const maneuver = step.navigationInstruction?.maneuver;
-      steps.push({
-        instruction: typeof instruction === "string" ? instruction : "Continue",
-        maneuver: typeof maneuver === "string" ? maneuver : undefined,
-        distance: stepDistance ? formatMeters(stepDistance) : "",
-        duration: stepDuration ? formatDuration(stepDuration) : "",
-        distanceMeters: stepDistance,
-        durationSeconds: stepDuration,
-        startLat: isFiniteNumber(step.startLocation?.latLng?.latitude)
-          ? step.startLocation.latLng.latitude
-          : undefined,
-        startLng: isFiniteNumber(step.startLocation?.latLng?.longitude)
-          ? step.startLocation.latLng.longitude
-          : undefined,
-        endLat: isFiniteNumber(step.endLocation?.latLng?.latitude)
-          ? step.endLocation.latLng.latitude
-          : undefined,
-        endLng: isFiniteNumber(step.endLocation?.latLng?.longitude)
-          ? step.endLocation.latLng.longitude
-          : undefined,
-      });
-    }
-  }
-
-  const alternatives = routes.slice(1).flatMap((candidate) => {
-    const polyline = candidate.polyline?.encodedPolyline;
-    const candidateDistance = candidate.distanceMeters;
-    const candidateDuration = seconds(candidate.duration);
-    return typeof polyline === "string" &&
-      polyline &&
-      isFiniteNumber(candidateDistance) &&
-      candidateDuration > 0
-      ? [
-          {
-            encodedPolyline: polyline,
-            distanceMeters: candidateDistance,
-            durationSeconds: candidateDuration,
-          },
-        ]
-      : [];
-  });
+  const alternatives = parsedRoutes.slice(1).map((candidate) => ({
+    encodedPolyline: candidate.encodedPolyline,
+    distanceMeters: candidate.distanceMeters,
+    durationSeconds: candidate.durationSeconds,
+  }));
 
   return {
-    encodedPolyline,
-    distance: formatMeters(distanceMeters),
-    duration: formatDuration(durationSeconds),
-    distanceMeters,
-    durationSeconds,
-    steps,
+    ...route,
     alternatives: alternatives.length ? alternatives : undefined,
+    candidates: input.alternatives ? parsedRoutes : undefined,
   };
 }

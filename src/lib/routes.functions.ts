@@ -68,20 +68,95 @@ export const planScenicRoute = createServerFn({ method: "POST" })
       lng: stop.lng,
       description: "Required stop",
     }));
-    const directions = await computeDirections({
+    const routeInput = {
       origin: { lat: start.lat, lng: start.lng },
       destination: { lat: end.lat, lng: end.lng },
       waypoints: waypoints.map(({ lat, lng }) => ({ lat, lng })),
-    });
+    };
+    let baselineRequestSuccess = false;
+    let stableErrorCode = "OK";
+    let baseline;
+    try {
+      baseline = await computeDirections({ ...routeInput, alternatives: false });
+      baselineRequestSuccess = true;
+    } catch (error) {
+      stableErrorCode =
+        error instanceof Error && error.message === "MALFORMED_ROUTE_DURATION"
+          ? "MALFORMED_ROUTE_DURATION"
+          : "BASELINE_ROUTE_UNAVAILABLE";
+      console.info("[route-selection]", {
+        requestCorrelationId,
+        baselineRequestSuccess,
+        candidateCount: 0,
+        eligibleCount: 0,
+        requestedBudgetMinutes: data.extra_minutes,
+        selectedExtraTimeMinutes: 0,
+        errorCode: stableErrorCode,
+      });
+      if (error instanceof Error && error.message === "MAPS_NOT_CONFIGURED") throw error;
+      throw new Error(stableErrorCode);
+    }
+
+    let alternativesUnavailableReason: string | null = null;
+    let rawCandidates = [baseline];
+    if (waypoints.length > 0) {
+      alternativesUnavailableReason = "REQUIRED_STOPS";
+    } else {
+      try {
+        const alternativeResponse = await computeDirections({ ...routeInput, alternatives: true });
+        rawCandidates = [baseline, ...(alternativeResponse.candidates ?? [alternativeResponse])];
+      } catch {
+        alternativesUnavailableReason = "ALTERNATIVE_REQUEST_FAILED";
+        stableErrorCode = "ALTERNATIVE_REQUEST_FAILED_FALLBACK";
+      }
+    }
+
     const { scoreScenicRoute } = await import("./scenic-score");
-    const score = scoreScenicRoute({
-      start,
-      end,
-      mood: moodIn,
-      theme: themeIn,
-      extraMinutes: data.extra_minutes,
-      stopCount: waypoints.length,
-      directions,
+    const { selectRouteCandidate } = await import("./route-selection");
+    const scoredCandidates = rawCandidates.flatMap((directions, originalIndex) => {
+      try {
+        const scoreResult = scoreScenicRoute({
+          start,
+          end,
+          mood: moodIn,
+          theme: themeIn,
+          extraMinutes: data.extra_minutes,
+          stopCount: waypoints.length,
+          directions,
+        });
+        return [{ directions, score: scoreResult.total, scoreResult, originalIndex }];
+      } catch {
+        if (originalIndex === 0) {
+          console.info("[route-selection]", {
+            requestCorrelationId,
+            baselineRequestSuccess,
+            candidateCount: rawCandidates.length,
+            eligibleCount: 0,
+            requestedBudgetMinutes: data.extra_minutes,
+            selectedExtraTimeMinutes: 0,
+            errorCode: "SCORING_FAILED",
+          });
+          throw new Error("SCORING_FAILED");
+        }
+        stableErrorCode = "ALTERNATIVE_SCORING_FAILED_FALLBACK";
+        return [];
+      }
+    });
+    const selection = selectRouteCandidate(scoredCandidates, data.extra_minutes);
+    const directions = selection.selected.directions;
+    const score = selection.selected.scoreResult;
+    if (!alternativesUnavailableReason && selection.candidates.length <= 1) {
+      alternativesUnavailableReason = "NO_DISTINCT_ALTERNATIVES_RETURNED";
+    }
+    const timeBudgetApplied = selection.candidates.length > 1;
+    console.info("[route-selection]", {
+      requestCorrelationId,
+      baselineRequestSuccess,
+      candidateCount: selection.candidates.length,
+      eligibleCount: selection.eligible.length,
+      requestedBudgetMinutes: Math.round(selection.requestedExtraTimeBudgetSeconds / 60),
+      selectedExtraTimeMinutes: Math.round(selection.measuredExtraTimeSeconds / 60),
+      errorCode: stableErrorCode,
     });
 
     // Log generation for free-tier metering — surface failures so the cap is enforced
@@ -113,6 +188,15 @@ export const planScenicRoute = createServerFn({ method: "POST" })
       mood: moodIn || "Open",
       theme: themeIn || "Direct route",
       extra_minutes: data.extra_minutes,
+      fastestRouteDurationSeconds: selection.fastestDurationSeconds,
+      selectedRouteDurationSeconds: directions.durationSeconds,
+      measuredExtraTimeSeconds: selection.measuredExtraTimeSeconds,
+      requestedExtraTimeBudgetSeconds: selection.requestedExtraTimeBudgetSeconds,
+      candidateCount: selection.candidates.length,
+      eligibleCandidateCount: selection.eligible.length,
+      selectedCandidateIndex: selection.selected.originalIndex,
+      timeBudgetApplied,
+      alternativesUnavailableReason,
       directions,
     };
   });

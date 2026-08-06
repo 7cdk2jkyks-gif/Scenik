@@ -328,6 +328,10 @@ function friendlyError(msg: string): string {
     return "We couldn't look up those locations right now. Please try again.";
   if (/DIRECTIONS_FAILED/.test(msg))
     return "We couldn't calculate directions right now. Please try again.";
+  if (/BASELINE_ROUTE_UNAVAILABLE|MALFORMED_ROUTE_DURATION/.test(msg))
+    return "We couldn't measure a reliable fastest route right now. Please try again.";
+  if (/SCORING_FAILED/.test(msg))
+    return "We calculated the route but couldn't compare its scenic score. Please try again.";
   if (/Failed to fetch|NetworkError|network|fetch failed/i.test(msg)) {
     return "Please check your internet connection and try again.";
   }
@@ -2095,22 +2099,37 @@ function PlanPage() {
                 <div className="mt-5 rounded-xl border border-amber-700/25 bg-amber-50/60 p-4">
                   <div className="flex flex-wrap items-baseline justify-between gap-2">
                     <h3 className="font-serif text-lg font-semibold text-ink">
-                      Worth the extra time?
+                      {result.alternativesUnavailableReason === "REQUIRED_STOPS"
+                        ? "Required stops preserved"
+                        : result.measuredExtraTimeSeconds > 0
+                          ? "Worth the extra time?"
+                          : "Fastest route selected"}
                     </h3>
                     <span className="font-serif text-lg font-semibold text-primary">
-                      {result.worth_extra_time.verdict}
+                      {result.measuredExtraTimeSeconds > 0 ? "Yes" : "Best fit"}
                     </span>
                   </div>
-                  {result.worth_extra_time.extraMinutes !== null && (
-                    <p className="mt-1 text-xs font-semibold uppercase tracking-wider text-amber-900">
-                      Your budget: up to {result.worth_extra_time.extraMinutes} minutes
+                  <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
+                    {result.alternativesUnavailableReason === "REQUIRED_STOPS"
+                      ? "Your required stops were preserved. Google does not provide alternative route candidates for this journey, so the time allowance could not be used to compare routes."
+                      : result.alternativesUnavailableReason === "ALTERNATIVE_REQUEST_FAILED"
+                        ? "The fastest route was preserved because alternative routes were temporarily unavailable."
+                        : result.measuredExtraTimeSeconds > 0
+                          ? `Adds ${Math.round(result.measuredExtraTimeSeconds / 60)} minutes versus the fastest route.`
+                          : `No alternative scored higher within your ${Math.round(result.requestedExtraTimeBudgetSeconds / 60)}-minute allowance.`}
+                  </p>
+                  <p className="mt-1 text-xs font-semibold uppercase tracking-wider text-amber-900">
+                    Your allowance: up to {Math.round(result.requestedExtraTimeBudgetSeconds / 60)}
+                    minutes
+                  </p>
+                  {result.timeBudgetApplied && (
+                    <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
+                      Compared {result.candidateCount} routes · {result.eligibleCandidateCount} fit
+                      your time budget · Selected the highest-scoring option
                     </p>
                   )}
-                  <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
-                    {result.worth_extra_time.explanation}
-                  </p>
-                  <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
-                    Provisional V1 score. Your extra-time budget does not yet alter Google routing.
+                  <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+                    Provisional V1 score based on currently measurable route characteristics.
                   </p>
                 </div>
               )}

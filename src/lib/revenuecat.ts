@@ -78,6 +78,8 @@ function diagnostic(
   offeringExists = false,
   monthlyPackageExists = false,
   annualPackageExists = false,
+  productCount = 0,
+  selectedPackageLookup = false,
 ) {
   console.info("[revenuecat]", {
     platform: getPlatform(),
@@ -85,6 +87,8 @@ function diagnostic(
     offeringExists,
     monthlyPackageExists,
     annualPackageExists,
+    productCount,
+    selectedPackageLookup,
     failureStage,
     errorCode,
   });
@@ -233,7 +237,7 @@ export async function getCurrentOffering(): Promise<RCOffering | null> {
       normalisePackage(selected.annual) ??
       all.find((pkg) => pkg.billing === "annual" || pkg.productIdentifier === RC_PRODUCT_ANNUAL) ??
       null;
-    diagnostic("none", "OK", true, !!monthly, !!annual);
+    diagnostic("none", "OK", true, !!monthly, !!annual, all.length, !!monthly || !!annual);
     return { identifier: selected.identifier ?? RC_OFFERING_ID, monthly, annual, all };
   } catch (err) {
     diagnostic("offering", stableErrorCode(err, "RC_OFFERING_FAILED"));
