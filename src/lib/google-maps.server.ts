@@ -1,3 +1,5 @@
+import process from "node:process";
+
 const GEOCODING_URL = "https://maps.googleapis.com/maps/api/geocode/json";
 const ROUTES_URL = "https://routes.googleapis.com/directions/v2:computeRoutes";
 const REQUEST_TIMEOUT_MS = 10_000;
@@ -72,9 +74,19 @@ type RawRoute = {
 };
 
 function mapsKey(): string {
-  const key = process.env.GOOGLE_MAPS_API_KEY;
+  // Nitro exposes runtime bindings through node:process. Read inside the
+  // operation rather than at module evaluation time so request-time bindings
+  // are available in production runtimes.
+  const rawKey = process.env.GOOGLE_MAPS_API_KEY;
+  const key = rawKey?.trim() ?? "";
+  const errorCode = key ? null : "MAPS_NOT_CONFIGURED";
+  console.info("[google-maps-config]", {
+    operation: "configuration",
+    googleMapsApiKeyExists: rawKey !== undefined,
+    trimmedCharacterCount: key.length,
+    errorCode,
+  });
   if (!key) {
-    logMapsFailure("configuration", 0, "MAPS_NOT_CONFIGURED");
     throw new Error("MAPS_NOT_CONFIGURED");
   }
   return key;

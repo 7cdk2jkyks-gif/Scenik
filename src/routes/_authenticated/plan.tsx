@@ -1,6 +1,6 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useState, useRef, useEffect, useMemo } from "react";
-import { ChevronDown, ChevronUp, Lock } from "lucide-react";
+import { ChevronDown, Lock } from "lucide-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useServerFn } from "@tanstack/react-start";
 import {
@@ -89,6 +89,12 @@ import {
   Route as RouteIcon,
   Crosshair,
   Plus,
+  Leaf,
+  Landmark,
+  Heart,
+  Sparkles,
+  Shuffle,
+  Star,
 } from "lucide-react";
 import { Checkbox } from "@/components/ui/checkbox";
 import { formatDistance, formatSpeed, useUnits } from "@/lib/units";
@@ -312,7 +318,7 @@ function RouteFeedback({ routeKey }: { routeKey: string }) {
 
 function friendlyError(msg: string): string {
   if (/MAPS_NOT_CONFIGURED/.test(msg))
-    return "Route planning is not configured right now. Please try again later.";
+    return "Route service configuration error (MAPS_NOT_CONFIGURED). The server Google Maps key is unavailable.";
   if (/GEOCODING_ZERO_RESULTS/.test(msg))
     return "We couldn't find one of those locations. Please check the addresses and try again.";
   if (/GEOCODING_REQUEST_DENIED|GEOCODING_QUOTA_EXCEEDED|GEOCODING_FAILED/.test(msg))
@@ -402,6 +408,32 @@ const FREE_THEMES = new Set(THEMES.slice(0, FREE_THEME_COUNT));
 const GEO_RESTRICTED_THEMES = new Set<string>(["Coastal", "Mountain", "Waterfalls"]);
 
 type PlanResult = Awaited<ReturnType<typeof planScenicRoute>>;
+
+const LOADING_STAGES = [
+  "Finding scenic roads…",
+  "Comparing route options…",
+  "Matching your mood…",
+  "Scoring your drive…",
+  "Naming your journey…",
+  "Almost ready…",
+];
+
+function scoreLabel(score: number) {
+  if (score >= 90) return "Exceptional";
+  if (score >= 80) return "Outstanding";
+  if (score >= 70) return "Excellent";
+  if (score >= 60) return "Good";
+  if (score >= 40) return "Fair";
+  return "Limited";
+}
+
+function scoreBarClass(percentage: number) {
+  if (percentage >= 90) return "bg-emerald-800";
+  if (percentage >= 80) return "bg-emerald-600";
+  if (percentage >= 70) return "bg-amber-500";
+  if (percentage >= 60) return "bg-orange-500";
+  return "bg-red-700";
+}
 
 function PlanPage() {
   const navigate = useNavigate();
@@ -540,7 +572,6 @@ function PlanPage() {
     }
   }
 
-  const [descExpanded, setDescExpanded] = useState(false);
   const [waypointFact, setWaypointFact] = useState<{ name: string; text: string } | null>(null);
   const visitedWpRef = useRef<Set<number>>(new Set());
   const spokenRef = useRef<Set<string>>(new Set());
@@ -549,6 +580,7 @@ function PlanPage() {
   const altCheckingRef = useRef(false);
   const resultRef = useRef<HTMLDivElement | null>(null);
   const [routeCompleted, setRouteCompleted] = useState(false);
+  const [loadingStage, setLoadingStage] = useState(0);
 
   useEffect(() => {
     supabase.auth.getUser().then(({ data }) => setUserId(data.user?.id ?? null));
@@ -973,7 +1005,6 @@ function PlanPage() {
       );
       setProgress(null);
       setResult(r);
-      setDescExpanded(false);
       setRouteCompleted(false);
       visitedWpRef.current = new Set();
       setWaypointFact(null);
@@ -1048,6 +1079,21 @@ function PlanPage() {
       toast.error(friendlyError(e.message));
     },
   });
+
+  useEffect(() => {
+    if (!plan.isPending) {
+      setLoadingStage(0);
+      return;
+    }
+    setLoadingStage(0);
+    const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    if (reducedMotion) return;
+    const timer = window.setInterval(
+      () => setLoadingStage((stage) => Math.min(stage + 1, LOADING_STAGES.length - 1)),
+      1_400,
+    );
+    return () => window.clearInterval(timer);
+  }, [plan.isPending]);
 
   const save = useMutation({
     mutationFn: async () => {
@@ -1771,7 +1817,8 @@ function PlanPage() {
             <Button type="submit" className="w-full shadow-stamp" disabled={plan.isPending}>
               {plan.isPending ? (
                 <>
-                  <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Charting the long way…
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin motion-reduce:animate-none" />
+                  {LOADING_STAGES[loadingStage]}
                 </>
               ) : moods.length === 0 && themes.length === 0 ? (
                 <>
@@ -1911,130 +1958,169 @@ function PlanPage() {
         <div ref={resultRef} className="min-w-0 space-y-6 scroll-mt-24">
           {result && (
             <Card className="min-w-0 border-border bg-card p-4 shadow-paper sm:p-6">
-              <div className="flex flex-wrap items-start justify-between gap-3 sm:gap-4">
-                <div className="min-w-0 flex-1">
-                  <div className="text-[10px] font-medium uppercase tracking-widest text-muted-foreground">
-                    {result.mood} · {result.theme} · +{result.extra_minutes} min
-                  </div>
-                  <h2 className="mt-1 break-words font-serif text-2xl font-semibold text-ink sm:text-3xl">
-                    {result.title}
-                  </h2>
-                </div>
-                <div className="shrink-0 rounded-2xl border border-border bg-background px-3 py-2 text-center shadow-paper sm:px-4 sm:py-3">
-                  <div className="text-[10px] font-medium uppercase tracking-widest text-muted-foreground">
-                    Scenic
-                  </div>
-                  <div className="font-serif text-2xl font-semibold text-primary sm:text-3xl">
-                    {result.score_breakdown ? (
-                      <>
+              <div className="text-[10px] font-medium uppercase tracking-widest text-muted-foreground">
+                {result.mood} · {result.theme} · up to {result.extra_minutes} min
+              </div>
+              <h2 className="mt-1 break-words font-serif text-2xl font-semibold text-ink sm:text-3xl">
+                {result.title}
+              </h2>
+
+              <div className="mt-5 rounded-2xl border border-primary/25 bg-background p-4 shadow-paper sm:p-6">
+                <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+                  <div>
+                    <div className="flex flex-wrap items-end gap-x-2">
+                      <span className="font-serif text-6xl font-semibold leading-none text-primary sm:text-7xl">
                         {result.scenic_score}
-                        <span className="text-sm text-muted-foreground sm:text-base">/100</span>
-                      </>
-                    ) : (
-                      "Not scored"
-                    )}
+                      </span>
+                      <span className="pb-1 font-serif text-xl text-muted-foreground">/ 100</span>
+                    </div>
+                    <div className="mt-2 flex items-center gap-2">
+                      <div
+                        className="flex gap-0.5 text-amber-600"
+                        aria-label={`${(result.scenic_score / 20).toFixed(1)} out of 5 stars`}
+                      >
+                        {Array.from({ length: 5 }, (_, index) => (
+                          <Star
+                            key={index}
+                            aria-hidden="true"
+                            className={`h-4 w-4 ${result.scenic_score >= (index + 1) * 20 ? "fill-current" : "opacity-30"}`}
+                          />
+                        ))}
+                      </div>
+                      <span className="text-sm font-semibold text-ink">
+                        {scoreLabel(result.scenic_score)}
+                      </span>
+                    </div>
                   </div>
+                  <p className="max-w-md text-sm leading-relaxed text-muted-foreground">
+                    {result.narrative}
+                  </p>
                 </div>
+
+                {(result.badges?.length ?? 0) > 0 && (
+                  <div className="mt-4 flex flex-wrap gap-2" aria-label="Route badges">
+                    {result.badges?.map((badge) => (
+                      <span
+                        key={badge}
+                        className="rounded-full border border-primary/30 bg-primary/10 px-3 py-1 text-xs font-semibold text-primary"
+                      >
+                        {badge}
+                      </span>
+                    ))}
+                  </div>
+                )}
               </div>
 
-              {(() => {
-                const full = result.narrative ?? "";
-                const SHORT = 160;
-                const isLong = full.length > SHORT;
-                const shown = !isLong || descExpanded ? full : `${full.slice(0, SHORT).trimEnd()}…`;
-                return (
-                  <>
-                    <p className="mt-4 font-serif text-base italic leading-relaxed text-ink/85 sm:text-lg">
-                      "{shown}"
-                    </p>
-
-                    {descExpanded && result.score_breakdown && (
-                      <div className="mt-5 rounded-xl border border-border bg-background p-4">
-                        <h3 className="font-serif text-xs font-semibold uppercase tracking-widest text-muted-foreground">
-                          Why this score
-                        </h3>
-                        <div className="mt-3 grid grid-cols-2 gap-x-4 gap-y-2 md:grid-cols-3">
-                          {[
-                            {
-                              label: "Natural beauty",
-                              val: result.score_breakdown.natural_beauty,
-                              max: 25,
-                            },
-                            {
-                              label: "Road character",
-                              val: result.score_breakdown.road_character,
-                              max: 20,
-                            },
-                            {
-                              label: "Points of interest",
-                              val: result.score_breakdown.points_of_interest,
-                              max: 20,
-                            },
-                            {
-                              label: "Theme match",
-                              val: result.score_breakdown.theme_match,
-                              max: 15,
-                            },
-                            {
-                              label: "Mood match",
-                              val: result.score_breakdown.mood_match,
-                              max: 10,
-                            },
-                            { label: "Diversity", val: result.score_breakdown.diversity, max: 10 },
-                          ].map((s) => (
-                            <div key={s.label}>
-                              <div className="flex items-baseline justify-between text-xs">
-                                <span className="text-muted-foreground">{s.label}</span>
-                                <span className="font-serif font-semibold text-ink">
-                                  {s.val}
-                                  <span className="text-muted-foreground">/{s.max}</span>
-                                </span>
-                              </div>
-                              <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-muted">
-                                <div
-                                  className="h-full bg-primary"
-                                  style={{ width: `${(s.val / s.max) * 100}%` }}
-                                />
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-                        {result.score_breakdown.rationale && (
-                          <p className="mt-3 text-xs leading-relaxed text-muted-foreground">
-                            {result.score_breakdown.rationale}
-                          </p>
-                        )}
-                      </div>
-                    )}
-
-                    {(isLong || result.score_breakdown) && (
-                      <button
-                        type="button"
-                        onClick={() => setDescExpanded((v) => !v)}
-                        className="mt-3 inline-flex items-center gap-1 text-xs font-semibold text-primary hover:underline"
+              {result.score_breakdown && (
+                <div className="mt-5 grid gap-3 sm:grid-cols-2">
+                  {[
+                    [
+                      "Natural Beauty",
+                      result.score_breakdown.natural_beauty,
+                      25,
+                      Leaf,
+                      "natural_beauty",
+                    ],
+                    [
+                      "Points of Interest",
+                      result.score_breakdown.points_of_interest,
+                      20,
+                      Landmark,
+                      "points_of_interest",
+                    ],
+                    ["Mood Match", result.score_breakdown.mood_match, 10, Heart, "mood_match"],
+                    [
+                      "Road Character",
+                      result.score_breakdown.road_character,
+                      20,
+                      RouteIcon,
+                      "road_character",
+                    ],
+                    [
+                      "Theme Match",
+                      result.score_breakdown.theme_match,
+                      15,
+                      Sparkles,
+                      "theme_match",
+                    ],
+                    ["Diversity", result.score_breakdown.diversity, 10, Shuffle, "diversity"],
+                  ].map(([label, value, maximum, Icon, key]) => {
+                    const score = Number(value);
+                    const max = Number(maximum);
+                    const percentage = Math.round((score / max) * 100);
+                    const explanation =
+                      result.score_breakdown?.explanations?.[
+                        key as keyof typeof result.score_breakdown.explanations
+                      ] ?? result.score_breakdown.rationale;
+                    return (
+                      <div
+                        key={String(label)}
+                        className="rounded-xl border border-border bg-background p-3.5"
                       >
-                        {descExpanded ? (
-                          <>
-                            <ChevronUp className="h-3.5 w-3.5" /> Read less
-                          </>
-                        ) : (
-                          <>
-                            <ChevronDown className="h-3.5 w-3.5" /> Read more &amp; analytics
-                          </>
-                        )}
-                      </button>
-                    )}
-                  </>
-                );
-              })()}
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="flex min-w-0 items-center gap-2">
+                            <Icon aria-hidden="true" className="h-4 w-4 shrink-0 text-primary" />
+                            <span className="text-sm font-semibold text-ink">{String(label)}</span>
+                          </div>
+                          <span className="shrink-0 font-serif text-sm font-semibold text-ink">
+                            {score}/{max}
+                          </span>
+                        </div>
+                        <div
+                          className="mt-2 h-2 overflow-hidden rounded-full bg-muted"
+                          role="progressbar"
+                          aria-label={`${String(label)}: ${score} out of ${max}, ${scoreLabel(percentage)}`}
+                          aria-valuenow={score}
+                          aria-valuemin={0}
+                          aria-valuemax={max}
+                        >
+                          <div
+                            className={`h-full rounded-full ${scoreBarClass(percentage)}`}
+                            style={{ width: `${percentage}%` }}
+                          />
+                        </div>
+                        <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
+                          {explanation}
+                        </p>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+
+              {result.worth_extra_time && (
+                <div className="mt-5 rounded-xl border border-amber-700/25 bg-amber-50/60 p-4">
+                  <div className="flex flex-wrap items-baseline justify-between gap-2">
+                    <h3 className="font-serif text-lg font-semibold text-ink">
+                      Worth the extra time?
+                    </h3>
+                    <span className="font-serif text-lg font-semibold text-primary">
+                      {result.worth_extra_time.verdict}
+                    </span>
+                  </div>
+                  {result.worth_extra_time.extraMinutes !== null && (
+                    <p className="mt-1 text-xs font-semibold uppercase tracking-wider text-amber-900">
+                      Your budget: up to {result.worth_extra_time.extraMinutes} minutes
+                    </p>
+                  )}
+                  <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
+                    {result.worth_extra_time.explanation}
+                  </p>
+                </div>
+              )}
             </Card>
           )}
 
           <div className="relative aspect-[5/4] overflow-hidden rounded-2xl border border-border bg-muted shadow-paper sm:aspect-[16/10]">
             {plan.isPending ? (
               <div className="flex h-full flex-col items-center justify-center gap-3 text-center text-muted-foreground">
-                <Loader2 className="h-10 w-10 animate-spin opacity-60" strokeWidth={1.5} />
-                <p className="max-w-xs text-sm">Charting the long way home…</p>
+                <Loader2
+                  className="h-10 w-10 animate-spin opacity-60 motion-reduce:animate-none"
+                  strokeWidth={1.5}
+                />
+                <p className="max-w-xs text-sm" aria-live="polite">
+                  {LOADING_STAGES[loadingStage]}
+                </p>
               </div>
             ) : plan.isError ? (
               <div className="flex h-full flex-col items-center justify-center gap-3 px-6 text-center text-muted-foreground">

@@ -69,6 +69,16 @@ export const planScenicRoute = createServerFn({ method: "POST" })
       destination: { lat: end.lat, lng: end.lng },
       waypoints: waypoints.map(({ lat, lng }) => ({ lat, lng })),
     });
+    const { scoreScenicRoute } = await import("./scenic-score");
+    const score = scoreScenicRoute({
+      start,
+      end,
+      mood: moodIn,
+      theme: themeIn,
+      extraMinutes: data.extra_minutes,
+      stopCount: waypoints.length,
+      directions,
+    });
 
     // Log generation for free-tier metering — surface failures so the cap is enforced
     const { error: genErr } = await context.supabase
@@ -80,11 +90,13 @@ export const planScenicRoute = createServerFn({ method: "POST" })
     }
 
     return {
-      title: "Scenic drive",
-      narrative:
-        "This is a traffic-aware Google route. Scenic scoring and AI-generated explanations are unavailable during the Phase A migration.",
-      scenic_score: 0,
-      score_breakdown: undefined,
+      title: score.title,
+      narrative: score.overallVerdict,
+      scenic_score: score.total,
+      score_breakdown: score.breakdown,
+      badges: score.badges,
+      worth_extra_time: score.worthExtraTime,
+      scoring_version: "v1" as const,
       highlights: [
         "Traffic-aware route",
         ...(waypoints.length
@@ -96,7 +108,7 @@ export const planScenicRoute = createServerFn({ method: "POST" })
       end: { address: end.formatted, lat: end.lat, lng: end.lng },
       mood: moodIn || "Open",
       theme: themeIn || "Direct route",
-      extra_minutes: 0,
+      extra_minutes: data.extra_minutes,
       directions,
     };
   });
