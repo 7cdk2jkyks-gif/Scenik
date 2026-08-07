@@ -46,7 +46,8 @@ export interface ScenicScoreResult {
   title: string;
 }
 
-const clamp = (value: number, maximum: number) => Math.max(0, Math.min(maximum, Math.round(value)));
+const clamp = (value: number, maximum: number) =>
+  Math.max(0, Math.min(maximum, Math.round(value * 10) / 10));
 
 function haversineMeters(a: { lat: number; lng: number }, b: { lat: number; lng: number }) {
   const toRadians = (value: number) => (value * Math.PI) / 180;
@@ -200,9 +201,11 @@ export function scoreScenicRoute(input: {
     10,
   );
 
-  const total = clamp(
-    naturalBeauty + pointsOfInterest + moodMatch + roadCharacter + themeMatch + diversity,
-    100,
+  const total = Math.round(
+    clamp(
+      naturalBeauty + pointsOfInterest + moodMatch + roadCharacter + themeMatch + diversity,
+      100,
+    ),
   );
   const badges = chooseBadges({
     moods,

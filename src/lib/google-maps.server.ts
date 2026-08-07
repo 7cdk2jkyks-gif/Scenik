@@ -2,6 +2,7 @@ import process from "node:process";
 
 const GEOCODING_URL = "https://maps.googleapis.com/maps/api/geocode/json";
 const ROUTES_URL = "https://routes.googleapis.com/directions/v2:computeRoutes";
+const PLACES_NEARBY_URL = "https://places.googleapis.com/v1/places:searchNearby";
 const REQUEST_TIMEOUT_MS = 10_000;
 
 export const ROUTES_FIELD_MASK = [
@@ -47,6 +48,14 @@ export interface ComputedDirections {
     durationSeconds: number;
   }>;
   candidates?: ComputedDirections[];
+}
+
+export interface NearbyScenicPlace {
+  id: string;
+  lat: number;
+  lng: number;
+  primaryType: string;
+  types: string[];
 }
 
 type GeocodingResult = {
@@ -187,6 +196,66 @@ export async function reverseGeocodeLatLng(lat: number, lng: number): Promise<Ge
   return geocode(new URLSearchParams({ latlng: `${lat},${lng}` }), "reverseGeocode");
 }
 
+export async function searchNearbyScenicPlaces(input: {
+  center: { lat: number; lng: number };
+  radiusMeters: number;
+  includedTypes: string[];
+}): Promise<NearbyScenicPlace[]> {
+  if (input.includedTypes.length === 0) return [];
+  let response: Response;
+  try {
+    response = await fetchWithTimeout(PLACES_NEARBY_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Goog-Api-Key": mapsKey(),
+        "X-Goog-FieldMask": "places.id,places.location,places.primaryType,places.types",
+      },
+      body: JSON.stringify({
+        includedTypes: input.includedTypes,
+        maxResultCount: 10,
+        rankPreference: "DISTANCE",
+        locationRestriction: {
+          circle: {
+            center: { latitude: input.center.lat, longitude: input.center.lng },
+            radius: Math.max(500, Math.min(10_000, Math.round(input.radiusMeters))),
+          },
+        },
+        languageCode: "en",
+      }),
+    });
+  } catch (error) {
+    if (error instanceof Error && error.message === "MAPS_NOT_CONFIGURED") throw error;
+    throw new Error("PLACES_FAILED");
+  }
+  if (!response.ok) throw new Error("PLACES_FAILED");
+  const data = (await response.json().catch(() => null)) as { places?: unknown } | null;
+  const places = Array.isArray(data?.places) ? data.places : [];
+  return places.flatMap((value) => {
+    if (!value || typeof value !== "object") return [];
+    const place = value as {
+      id?: unknown;
+      location?: { latitude?: unknown; longitude?: unknown };
+      primaryType?: unknown;
+      types?: unknown;
+    };
+    const lat = place.location?.latitude;
+    const lng = place.location?.longitude;
+    if (typeof place.id !== "string" || !isFiniteNumber(lat) || !isFiniteNumber(lng)) return [];
+    return [
+      {
+        id: place.id,
+        lat,
+        lng,
+        primaryType: typeof place.primaryType === "string" ? place.primaryType : "",
+        types: Array.isArray(place.types)
+          ? place.types.filter((type): type is string => typeof type === "string")
+          : [],
+      },
+    ];
+  });
+}
+
 function seconds(value: unknown): number {
   if (typeof value !== "string" || !/^\d+(?:\.\d+)?s$/.test(value)) return 0;
   return Math.round(Number.parseFloat(value.slice(0, -1)));
@@ -261,6 +330,7 @@ export async function computeDirections(input: {
   destination: { lat: number; lng: number };
   waypoints: { lat: number; lng: number }[];
   alternatives?: boolean;
+  avoidHighways?: boolean;
 }): Promise<ComputedDirections> {
   const body: Record<string, unknown> = {
     origin: { location: { latLng: { latitude: input.origin.lat, longitude: input.origin.lng } } },
@@ -275,6 +345,7 @@ export async function computeDirections(input: {
     languageCode: "en-US",
     units: "METRIC",
   };
+  if (input.avoidHighways) body.routeModifiers = { avoidHighways: true };
   if (input.alternatives && input.waypoints.length === 0) body.computeAlternativeRoutes = true;
 
   let response: Response;

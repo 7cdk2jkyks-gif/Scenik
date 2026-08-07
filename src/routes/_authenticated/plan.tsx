@@ -1461,6 +1461,9 @@ function PlanPage() {
 
     setMapError(null);
     setPlanError(null);
+    setResult(null);
+    setRouteSummary(null);
+    setProgress(null);
     const m = overrides?.moods ?? moods;
     const t = overrides?.themes ?? themes;
     plan.mutate({ mood: m.join(", "), theme: t.join(", ") });
@@ -1971,6 +1974,19 @@ function PlanPage() {
               <h2 className="mt-1 break-words font-serif text-2xl font-semibold text-ink sm:text-3xl">
                 {result.title}
               </h2>
+              {result.selectedWinner === "scenik" && (
+                <div className="mt-2 flex flex-wrap items-center gap-2 text-sm">
+                  <span className="rounded-full bg-primary px-3 py-1 font-semibold text-primary-foreground">
+                    ✨ Scenik Recommended
+                  </span>
+                  {result.selectedWaypointReason && (
+                    <span className="text-muted-foreground">
+                      Added because:{" "}
+                      <strong className="text-ink">{result.selectedWaypointReason}</strong>
+                    </span>
+                  )}
+                </div>
+              )}
 
               <div className="mt-5 rounded-2xl border border-primary/25 bg-background p-4 shadow-paper sm:p-6">
                 <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
@@ -2099,7 +2115,8 @@ function PlanPage() {
                 <div className="mt-5 rounded-xl border border-amber-700/25 bg-amber-50/60 p-4">
                   <div className="flex flex-wrap items-baseline justify-between gap-2">
                     <h3 className="font-serif text-lg font-semibold text-ink">
-                      {result.alternativesUnavailableReason === "REQUIRED_STOPS"
+                      {result.alternativesUnavailableReason === "REQUIRED_STOPS" &&
+                      !result.timeBudgetApplied
                         ? "Required stops preserved"
                         : result.measuredExtraTimeSeconds > 0
                           ? "Worth the extra time?"
@@ -2110,7 +2127,8 @@ function PlanPage() {
                     </span>
                   </div>
                   <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
-                    {result.alternativesUnavailableReason === "REQUIRED_STOPS"
+                    {result.alternativesUnavailableReason === "REQUIRED_STOPS" &&
+                    !result.timeBudgetApplied
                       ? "Your required stops were preserved. Google does not provide alternative route candidates for this journey, so the time allowance could not be used to compare routes."
                       : result.alternativesUnavailableReason === "ALTERNATIVE_REQUEST_FAILED"
                         ? "The fastest route was preserved because alternative routes were temporarily unavailable."
@@ -2131,6 +2149,11 @@ function PlanPage() {
                   <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
                     Provisional V1 score based on currently measurable route characteristics.
                   </p>
+                  {(import.meta.env.DEV || result.scoringDiagnostics) && (
+                    <p className="mt-1 text-[10px] text-muted-foreground/80">
+                      {result.scoringDiagnostics?.scoringVersion ?? "v1.2-input-sensitive"}
+                    </p>
+                  )}
                 </div>
               )}
             </Card>

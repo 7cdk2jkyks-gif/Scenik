@@ -15,7 +15,8 @@ export const planScenicRoute = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
   .inputValidator((input: unknown) => PlanInput.parse(input))
   .handler(async ({ data, context }) => {
-    const { geocodeAddress, computeDirections } = await import("./google-maps.server");
+    const { geocodeAddress, computeDirections, searchNearbyScenicPlaces } =
+      await import("./google-maps.server");
     const { isInternalTestUser } = await import("./internal-testers.server");
     const internalTester = isInternalTestUser(context.userId);
     const requestCorrelationId = crypto.randomUUID().slice(0, 8);
@@ -98,22 +99,112 @@ export const planScenicRoute = createServerFn({ method: "POST" })
     }
 
     let alternativesUnavailableReason: string | null = null;
-    let rawCandidates = [baseline];
+    let googleDirections = [baseline];
     if (waypoints.length > 0) {
       alternativesUnavailableReason = "REQUIRED_STOPS";
     } else {
       try {
         const alternativeResponse = await computeDirections({ ...routeInput, alternatives: true });
-        rawCandidates = [baseline, ...(alternativeResponse.candidates ?? [alternativeResponse])];
+        googleDirections = [baseline, ...(alternativeResponse.candidates ?? [alternativeResponse])];
       } catch {
         alternativesUnavailableReason = "ALTERNATIVE_REQUEST_FAILED";
         stableErrorCode = "ALTERNATIVE_REQUEST_FAILED_FALLBACK";
       }
     }
 
+    const { routesAreNearIdentical, selectRouteCandidate } = await import("./route-selection");
+    const distinctGoogleDirections = googleDirections.filter(
+      (directions, index, all) =>
+        !all.slice(0, index).some((prior) => routesAreNearIdentical(prior, directions)),
+    );
+    const rawCandidates: Array<{
+      directions: typeof baseline;
+      source: "fastest" | "google" | "scenik";
+      selectedWaypointReason: string | null;
+      scenicWaypoint: { lat: number; lng: number; reason: string; insertionIndex: number } | null;
+    }> = distinctGoogleDirections.map((directions, index) => ({
+      directions,
+      source: index === 0 ? "fastest" : "google",
+      selectedWaypointReason: null,
+      scenicWaypoint: null,
+    }));
+
+    let scenikCandidateAdded = false;
+    if (distinctGoogleDirections.length === 1 && data.extra_minutes > 0) {
+      try {
+        const { candidateFitsTimeBudget, planScenicWaypoint, routeMidpoint, selectedPlaceTypes } =
+          await import("./scenic-waypoint");
+        const moods = moodIn
+          .split(",")
+          .map((value) => value.trim())
+          .filter(Boolean);
+        const themes = themeIn
+          .split(",")
+          .map((value) => value.trim())
+          .filter(Boolean);
+        const includedTypes = selectedPlaceTypes(moods, themes);
+        if (includedTypes.length > 0) {
+          const midpoint = routeMidpoint(routeInput.origin, routeInput.destination, baseline.steps);
+          const budgetSeconds = data.extra_minutes * 60;
+          const averageMetersPerSecond = baseline.distanceMeters / baseline.durationSeconds;
+          const places = await searchNearbyScenicPlaces({
+            center: midpoint,
+            radiusMeters: Math.min(
+              8_000,
+              Math.max(1_000, averageMetersPerSecond * budgetSeconds * 0.5),
+            ),
+            includedTypes,
+          });
+          const requiredCoordinates = routeInput.waypoints.map(({ lat, lng }) => ({ lat, lng }));
+          const scenicPlan = planScenicWaypoint(
+            places,
+            [routeInput.origin, ...requiredCoordinates, routeInput.destination],
+            averageMetersPerSecond * budgetSeconds * 0.75,
+          );
+          if (scenicPlan) {
+            const candidateWaypoints = [...requiredCoordinates];
+            candidateWaypoints.splice(scenicPlan.insertionIndex, 0, {
+              lat: scenicPlan.lat,
+              lng: scenicPlan.lng,
+            });
+            const scenikDirections = await computeDirections({
+              origin: routeInput.origin,
+              destination: routeInput.destination,
+              waypoints: candidateWaypoints,
+              alternatives: false,
+            });
+            const withinBudget = candidateFitsTimeBudget(
+              baseline.durationSeconds,
+              scenikDirections.durationSeconds,
+              data.extra_minutes,
+            );
+            const distinct = distinctGoogleDirections.every(
+              (candidate) => !routesAreNearIdentical(candidate, scenikDirections),
+            );
+            if (withinBudget && distinct) {
+              rawCandidates.push({
+                directions: scenikDirections,
+                source: "scenik",
+                selectedWaypointReason: scenicPlan.reason,
+                scenicWaypoint: {
+                  lat: scenicPlan.lat,
+                  lng: scenicPlan.lng,
+                  reason: scenicPlan.reason,
+                  insertionIndex: scenicPlan.insertionIndex,
+                },
+              });
+              scenikCandidateAdded = true;
+            }
+          }
+        }
+      } catch {
+        stableErrorCode = "SCENIK_CANDIDATE_UNAVAILABLE_FALLBACK";
+      }
+    }
+
     const { scoreScenicRoute } = await import("./scenic-score");
-    const { selectRouteCandidate } = await import("./route-selection");
-    const scoredCandidates = rawCandidates.flatMap((directions, originalIndex) => {
+    const scoredCandidates = rawCandidates.flatMap((candidate, originalIndex) => {
+      const { directions } = candidate;
       try {
         const scoreResult = scoreScenicRoute({
           start,
@@ -121,10 +212,19 @@ export const planScenicRoute = createServerFn({ method: "POST" })
           mood: moodIn,
           theme: themeIn,
           extraMinutes: data.extra_minutes,
-          stopCount: waypoints.length,
+          stopCount: waypoints.length + (candidate.source === "scenik" ? 1 : 0),
           directions,
         });
-        return [{ directions, score: scoreResult.total, scoreResult, originalIndex }];
+        return [
+          {
+            directions,
+            score: scoreResult.total,
+            scoreResult,
+            originalIndex,
+            source: candidate.source,
+            selectedWaypointReason: candidate.selectedWaypointReason,
+          },
+        ];
       } catch {
         if (originalIndex === 0) {
           console.info("[route-selection]", {
@@ -149,14 +249,25 @@ export const planScenicRoute = createServerFn({ method: "POST" })
       alternativesUnavailableReason = "NO_DISTINCT_ALTERNATIVES_RETURNED";
     }
     const timeBudgetApplied = selection.candidates.length > 1;
-    console.info("[route-selection]", {
-      requestCorrelationId,
-      baselineRequestSuccess,
+    const selectedRawCandidate = rawCandidates[selection.selected.originalIndex];
+    const selectedWaypointReason = selection.selected.selectedWaypointReason ?? null;
+    const selectedWinner = selection.selected.source ?? "fastest";
+    const selectedWaypoints = [...waypoints];
+    if (selectedWinner === "scenik" && selectedRawCandidate?.scenicWaypoint) {
+      selectedWaypoints.splice(selectedRawCandidate.scenicWaypoint.insertionIndex, 0, {
+        name: selectedRawCandidate.scenicWaypoint.reason,
+        lat: selectedRawCandidate.scenicWaypoint.lat,
+        lng: selectedRawCandidate.scenicWaypoint.lng,
+        description: selectedRawCandidate.scenicWaypoint.reason,
+      });
+    }
+    console.info("[scenik-route-engine]", {
       candidateCount: selection.candidates.length,
-      eligibleCount: selection.eligible.length,
-      requestedBudgetMinutes: Math.round(selection.requestedExtraTimeBudgetSeconds / 60),
-      selectedExtraTimeMinutes: Math.round(selection.measuredExtraTimeSeconds / 60),
-      errorCode: stableErrorCode,
+      googleCandidateCount: distinctGoogleDirections.length,
+      scenikCandidateAdded,
+      selectedWinner,
+      selectedWaypointReason,
+      budgetMinutes: Math.round(selection.requestedExtraTimeBudgetSeconds / 60),
     });
 
     // Log generation for free-tier metering — surface failures so the cap is enforced
@@ -170,19 +281,27 @@ export const planScenicRoute = createServerFn({ method: "POST" })
 
     return {
       title: score.title,
-      narrative: score.overallVerdict,
+      narrative:
+        selectedWinner === "scenik" && selectedWaypointReason
+          ? `This route adds ${Math.round(selection.measuredExtraTimeSeconds / 60)} minutes and includes a verified ${selectedWaypointReason.toLowerCase()}, while improving its measurable route score.`
+          : selection.measuredExtraTimeSeconds > 0
+            ? `This route remains within ${Math.round(selection.measuredExtraTimeSeconds / 60)} minutes of the fastest journey and scored higher on measurable route variety.`
+            : "This was the highest-scoring route within your allowance without adding journey time.",
       scenic_score: score.total,
       score_breakdown: score.breakdown,
       badges: score.badges,
       worth_extra_time: score.worthExtraTime,
-      scoring_version: "v1" as const,
+      scoring_version: "v1.2-input-sensitive" as const,
+      scoringDiagnostics: internalTester
+        ? { scoringVersion: "v1.2-input-sensitive" as const }
+        : undefined,
       highlights: [
         "Traffic-aware route",
         ...(waypoints.length
           ? [`Includes ${waypoints.length} required stop${waypoints.length === 1 ? "" : "s"}`]
           : []),
       ],
-      waypoints,
+      waypoints: selectedWaypoints,
       start: { address: start.formatted, lat: start.lat, lng: start.lng },
       end: { address: end.formatted, lat: end.lat, lng: end.lng },
       mood: moodIn || "Open",
@@ -195,6 +314,10 @@ export const planScenicRoute = createServerFn({ method: "POST" })
       candidateCount: selection.candidates.length,
       eligibleCandidateCount: selection.eligible.length,
       selectedCandidateIndex: selection.selected.originalIndex,
+      selectedWinner,
+      selectedWaypointReason,
+      scenikCandidateAdded,
+      googleCandidateCount: distinctGoogleDirections.length,
       timeBudgetApplied,
       alternativesUnavailableReason,
       directions,

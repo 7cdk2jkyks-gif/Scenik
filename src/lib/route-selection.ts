@@ -5,6 +5,8 @@ export type ScoredRouteCandidate<TScore> = {
   score: number;
   scoreResult: TScore;
   originalIndex: number;
+  source?: "fastest" | "google" | "scenik";
+  selectedWaypointReason?: string | null;
 };
 
 export type RouteSelection<TScore> = {
@@ -22,6 +24,17 @@ function validMetric(value: number): boolean {
   return Number.isFinite(value) && value >= 0;
 }
 
+export function routesAreNearIdentical(
+  first: ComputedDirections,
+  second: ComputedDirections,
+): boolean {
+  return (
+    first.encodedPolyline === second.encodedPolyline ||
+    (Math.abs(first.durationSeconds - second.durationSeconds) <= 30 &&
+      Math.abs(first.distanceMeters - second.distanceMeters) <= 100)
+  );
+}
+
 export function deduplicateCandidates<TScore>(
   candidates: ScoredRouteCandidate<TScore>[],
 ): ScoredRouteCandidate<TScore>[] {
@@ -35,12 +48,7 @@ export function deduplicateCandidates<TScore>(
       return false;
     }
     return !all.slice(0, index).some((prior) => {
-      const closeMetrics =
-        Math.abs(prior.directions.durationSeconds - candidate.directions.durationSeconds) <= 30 &&
-        Math.abs(prior.directions.distanceMeters - candidate.directions.distanceMeters) <= 100;
-      return (
-        prior.directions.encodedPolyline === candidate.directions.encodedPolyline || closeMetrics
-      );
+      return routesAreNearIdentical(prior.directions, candidate.directions);
     });
   });
 }
