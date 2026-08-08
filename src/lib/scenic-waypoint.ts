@@ -60,6 +60,8 @@ const TYPE_REASON: Record<string, string> = {
   observation_deck: "Scenic viewpoint",
   beach: "Coastal stop",
   marina: "Harbour",
+  lake: "Lake",
+  river: "River",
   locality: "Local town",
   hiking_area: "Hiking area",
   art_gallery: "Art gallery",
@@ -79,7 +81,7 @@ const THEME_TYPES: Record<string, string[]> = {
   Countryside: ["park", "nature_preserve", "state_park"],
   Mountain: ["scenic_spot", "national_park", "hiking_area"],
   Waterfalls: ["scenic_spot", "nature_preserve"],
-  "Lakes & Rivers": ["park", "nature_preserve", "marina"],
+  "Lakes & Rivers": ["lake", "river", "park", "nature_preserve", "marina"],
   "Castles & Ruins": ["castle", "historical_place", "historical_landmark"],
   "Art & Culture": ["cultural_landmark", "museum", "art_gallery"],
   Wildlife: ["wildlife_refuge", "wildlife_park", "nature_preserve"],
@@ -110,8 +112,15 @@ export function selectedPlaceTypes(moods: string[], themes: string[]): string[] 
     "tourist_attraction",
     "museum",
     "beach",
+    "lake",
+    "river",
+    "woods",
+    "marina",
+    "historical_place",
+    "locality",
+    "national_park",
   ];
-  return [...new Set([...preferenceTypes.slice(0, 14), ...coreEvidenceTypes])].slice(0, 20);
+  return [...new Set([...preferenceTypes.slice(0, 7), ...coreEvidenceTypes])].slice(0, 20);
 }
 
 export function haversineDistanceMeters(a: LatLng, b: LatLng): number {
@@ -317,6 +326,8 @@ const EVIDENCE_TYPES: Record<keyof ScenicEvidenceCounts, ReadonlySet<string>> = 
     "botanical_garden",
     "garden",
     "hiking_area",
+    "lake",
+    "river",
   ]),
   historic: new Set(["castle", "historical_place", "historical_landmark", "history_museum"]),
   cultural: new Set(["museum", "art_gallery", "cultural_landmark"]),

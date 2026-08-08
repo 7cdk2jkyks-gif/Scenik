@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 import type { ComputedDirections } from "./google-maps.server";
 import {
   maximumAllowedDurationSeconds,
+  routesAreMeaningfullyDifferent,
   selectRouteCandidate,
   type ScoredRouteCandidate,
 } from "./route-selection";
@@ -25,6 +26,33 @@ function candidate(
 }
 
 describe("selectRouteCandidate", () => {
+  it("recognises a separated corridor even when duration and distance are similar", () => {
+    const first = candidate(0, 900, 50).directions;
+    const second = candidate(1, 910, 50, first.distanceMeters + 100).directions;
+    first.steps = [
+      {
+        instruction: "Continue",
+        distance: "",
+        duration: "",
+        distanceMeters: 1_000,
+        durationSeconds: 60,
+        endLat: 51,
+        endLng: 0,
+      },
+    ];
+    second.steps = [
+      {
+        instruction: "Continue",
+        distance: "",
+        duration: "",
+        distanceMeters: 1_000,
+        durationSeconds: 60,
+        endLat: 51.02,
+        endLng: 0,
+      },
+    ];
+    assert.equal(routesAreMeaningfullyDifferent(first, second), true);
+  });
   it("expands the duration ceiling for 0, 10, 30 and 60 minutes", () => {
     assert.deepEqual(
       [0, 10, 30, 60].map((minutes) => maximumAllowedDurationSeconds(3_600, minutes)),

@@ -44,6 +44,42 @@ export function routesAreNearIdentical(
   );
 }
 
+export function routesAreMeaningfullyDifferent(
+  first: ComputedDirections,
+  second: ComputedDirections,
+): boolean {
+  const points = (directions: ComputedDirections) =>
+    directions.steps.flatMap((step) =>
+      Number.isFinite(step.endLat) && Number.isFinite(step.endLng)
+        ? [{ lat: step.endLat!, lng: step.endLng! }]
+        : [],
+    );
+  const radians = (value: number) => (value * Math.PI) / 180;
+  const distance = (a: { lat: number; lng: number }, b: { lat: number; lng: number }) => {
+    const dLat = radians(b.lat - a.lat);
+    const dLng = radians(b.lng - a.lng);
+    const value =
+      Math.sin(dLat / 2) ** 2 +
+      Math.cos(radians(a.lat)) * Math.cos(radians(b.lat)) * Math.sin(dLng / 2) ** 2;
+    return 6_371_000 * 2 * Math.asin(Math.sqrt(value));
+  };
+  const firstPoints = points(first);
+  const secondPoints = points(second);
+  const hasSeparatedGeometry =
+    firstPoints.length > 0 &&
+    secondPoints.length > 0 &&
+    [...firstPoints, ...secondPoints].some((point, index) => {
+      const comparison = index < firstPoints.length ? secondPoints : firstPoints;
+      return Math.min(...comparison.map((other) => distance(point, other))) >= 1_000;
+    });
+  return (
+    first.encodedPolyline !== second.encodedPolyline &&
+    (hasSeparatedGeometry ||
+      Math.abs(first.durationSeconds - second.durationSeconds) >= 120 ||
+      Math.abs(first.distanceMeters - second.distanceMeters) >= 1_500)
+  );
+}
+
 export function deduplicateCandidates<TScore>(
   candidates: ScoredRouteCandidate<TScore>[],
 ): ScoredRouteCandidate<TScore>[] {
