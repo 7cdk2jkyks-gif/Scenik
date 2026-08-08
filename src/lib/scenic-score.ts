@@ -1,4 +1,5 @@
 import type { ComputedDirections } from "./google-maps.server";
+import { EMPTY_SCENIC_EVIDENCE, type ScenicEvidenceCounts } from "./scenic-waypoint";
 
 export const SCENIC_BADGES = [
   "Hidden Gem",
@@ -66,24 +67,6 @@ function selections(value: string): string[] {
     .filter(Boolean);
 }
 
-function preferenceScore(
-  selected: string[],
-  groups: readonly (readonly string[])[],
-  neutral: number,
-  single: number,
-  maximum: number,
-): number {
-  if (selected.length === 0) return neutral;
-  const representedGroups = new Set(
-    selected
-      .map((item) => groups.findIndex((group) => group.includes(item)))
-      .filter((index) => index >= 0),
-  ).size;
-  const compatibleBonus = Math.min(2, selected.length - 1);
-  const breadthPenalty = Math.max(0, representedGroups - 1) + Math.max(0, selected.length - 3);
-  return clamp(single + compatibleBonus - breadthPenalty, maximum);
-}
-
 function routeTitle(moods: string[], themes: string[], detourRatio: number): string {
   void moods;
   void themes;
@@ -121,6 +104,8 @@ export function scoreScenicRoute(input: {
   extraMinutes: number;
   stopCount: number;
   directions: ComputedDirections;
+  evidence?: ScenicEvidenceCounts;
+  fastestDurationSeconds?: number;
 }): ScenicScoreResult {
   const moods = selections(input.mood);
   const themes = selections(input.theme);
@@ -146,58 +131,71 @@ export function scoreScenicRoute(input: {
             : "very-long",
     ),
   ).size;
+  const evidence = input.evidence ?? EMPTY_SCENIC_EVIDENCE;
+  const evidenceCategories = Object.values(evidence).filter((count) => count > 0).length;
+  const totalEvidence = Object.values(evidence).reduce((sum, count) => sum + count, 0);
+  const naturalEvidence =
+    evidence.natural * 3.2 + evidence.coastal * 3 + evidence.viewpoint * 3 + evidence.wildlife * 2;
+  const poiEvidence =
+    evidence.historic * 2.5 +
+    evidence.cultural * 2.2 +
+    evidence.viewpoint * 1.5 +
+    evidence.coastal * 1.2 +
+    evidence.food * 1.5 +
+    evidence.otherPoi * 1.2;
+  const themeEvidence = themes.reduce((sum, theme) => {
+    if (["Historic", "Castles & Ruins"].includes(theme)) return sum + evidence.historic;
+    if (theme === "Art & Culture") return sum + evidence.cultural + evidence.historic * 0.5;
+    if (["Coastal", "Lakes & Rivers", "Waterfalls"].includes(theme))
+      return sum + evidence.coastal + evidence.natural * 0.5;
+    if (["Forest", "Countryside", "Mountain", "Dog Friendly"].includes(theme))
+      return sum + evidence.natural;
+    if (["Scenic Viewpoints", "Stargazing"].includes(theme)) return sum + evidence.viewpoint;
+    if (theme === "Wildlife") return sum + evidence.wildlife + evidence.natural * 0.25;
+    if (theme === "Foodie") return sum + evidence.food;
+    if (theme === "Villages") return sum + evidence.otherPoi;
+    return sum;
+  }, 0);
+  const moodEvidence = moods.reduce((sum, mood) => {
+    if (["Peaceful", "Relaxed", "Reflective", "Cosy", "Romantic"].includes(mood))
+      return sum + evidence.natural + evidence.coastal + evidence.historic * 0.4;
+    if (["Adventurous", "Awestruck", "Energetic"].includes(mood))
+      return sum + evidence.viewpoint + evidence.natural * 0.5 + evidence.wildlife * 0.5;
+    if (["Curious", "Inspired", "Nostalgic"].includes(mood))
+      return sum + evidence.historic + evidence.cultural;
+    return sum;
+  }, 0);
 
-  const moodPreference = preferenceScore(
-    moods,
-    [
-      ["Peaceful", "Relaxed", "Reflective", "Cosy"],
-      ["Adventurous", "Energetic", "Spontaneous", "Awestruck"],
-      ["Romantic", "Nostalgic", "Inspired"],
-      ["Curious", "Playful", "Joyful"],
-      ["Focused"],
-    ],
-    5,
-    6,
-    9,
-  );
-  const themePreference = preferenceScore(
-    themes,
-    [
-      ["Coastal", "Lakes & Rivers", "Waterfalls"],
-      ["Mountain", "Forest", "Wildlife", "Scenic Viewpoints", "Stargazing"],
-      ["Countryside", "Villages", "Dog Friendly"],
-      ["Historic", "Castles & Ruins", "Art & Culture"],
-      ["Foodie"],
-    ],
-    7,
-    8,
-    13,
-  );
-
-  // V1 intentionally uses only request choices and measurable route structure.
-  // Unknown environmental/POI evidence receives a neutral midpoint, not a fail.
-  // Terrain, verified POIs, elevation, land cover, and road classification are
-  // Phase B inputs that will create stronger separation later.
   const naturalBeauty = clamp(
-    13 + Math.min(4, (detourRatio - 1) * 10) + Math.min(2, input.stopCount),
+    4 + Math.min(18, naturalEvidence) + Math.min(3, Math.max(0, detourRatio - 1) * 8),
     25,
   );
-  const pointsOfInterest = clamp(9 + Math.min(9, input.stopCount * 3), 20);
+  const pointsOfInterest = clamp(5 + Math.min(13, poiEvidence) + Math.min(2, input.stopCount), 20);
   const moodMatch = clamp(
-    moodPreference +
-      Math.min(1, input.stopCount) +
-      (moods.some((mood) => ["Peaceful", "Relaxed", "Reflective"].includes(mood)) && turnDensity < 8
-        ? 1
-        : 0),
+    (moods.length ? 2 + Math.min(0.5, (moods.length - 1) * 0.25) : 1) +
+      Math.min(8, moodEvidence * 1.4) +
+      Math.min(0.5, input.stopCount),
     10,
   );
   const roadCharacter = clamp(
-    6 + Math.min(7, turnDensity * 0.7) + shortStepRatio * 3 + Math.min(3, (detourRatio - 1) * 10),
+    7 +
+      Math.min(7, turnDensity * 0.75) +
+      shortStepRatio * 3 +
+      Math.min(2, distanceBins - 1) +
+      Math.min(2, (detourRatio - 1) * 8),
     20,
   );
-  const themeMatch = clamp(themePreference + Math.min(1, input.stopCount), 15);
+  const themeMatch = clamp(
+    (themes.length ? 3 + Math.min(0.75, (themes.length - 1) * 0.35) : 1) +
+      Math.min(12, themeEvidence * 2.1) +
+      Math.min(1, input.stopCount),
+    15,
+  );
   const diversity = clamp(
-    5 + Math.min(3, Math.max(0, distanceBins - 1)) + Math.min(2, input.stopCount),
+    4 +
+      Math.min(3, evidenceCategories * 0.8) +
+      Math.min(2, Math.max(0, distanceBins - 1)) +
+      Math.min(1, totalEvidence * 0.1),
     10,
   );
 
@@ -220,7 +218,13 @@ export function scoreScenicRoute(input: {
       : total >= 50
         ? "A promising drive, scored cautiously with the evidence available."
         : "A practical route with limited verified scenic evidence so far.";
-  const extraMinutes = input.extraMinutes > 0 ? input.extraMinutes : null;
+  const measuredExtraMinutes = input.fastestDurationSeconds
+    ? Math.max(
+        0,
+        Math.round((input.directions.durationSeconds - input.fastestDurationSeconds) / 60),
+      )
+    : 0;
+  const extraMinutes = measuredExtraMinutes > 0 ? measuredExtraMinutes : null;
   const worthExtraTime =
     input.extraMinutes === 0
       ? {
@@ -229,17 +233,16 @@ export function scoreScenicRoute(input: {
             "No extra-time budget was requested, so this route prioritises a direct drive.",
           extraMinutes,
         }
-      : detourRatio >= 1.1 || input.stopCount > 0
+      : measuredExtraMinutes > 0 && (totalEvidence > 0 || roadCharacter >= 12)
         ? {
             verdict: "Yes" as const,
-            explanation:
-              "The route has measurable variation or deliberate stops, while the time shown is your budget rather than a measured delay.",
+            explanation: `The route uses ${measuredExtraMinutes} measured extra minute${measuredExtraMinutes === 1 ? "" : "s"} and scored higher using verified evidence or route geometry.`,
             extraMinutes,
           }
         : {
             verdict: "Promising" as const,
             explanation:
-              "The route stays fairly direct; richer scenery and POI data will make this verdict more precise.",
+              "The route remains close to the fastest baseline and the available evidence does not justify a stronger claim.",
             extraMinutes,
           };
 
@@ -253,24 +256,29 @@ export function scoreScenicRoute(input: {
       theme_match: themeMatch,
       diversity,
       rationale:
-        "This score is based on route shape, selected mood and theme, stops, and road characteristics currently available.",
+        "This score uses verified Places categories near the sampled route corridor and measurable route geometry.",
       explanations: {
         natural_beauty:
-          "Environmental evidence is currently neutral; route deviation and stops provide the measurable variation.",
+          evidence.natural + evidence.coastal + evidence.viewpoint + evidence.wildlife > 0
+            ? `${evidence.natural + evidence.coastal + evidence.viewpoint + evidence.wildlife} verified natural, waterside, viewpoint or wildlife signal${evidence.natural + evidence.coastal + evidence.viewpoint + evidence.wildlife === 1 ? " appears" : "s appear"} near the sampled route corridor.`
+            : "No verified natural, waterside, viewpoint or wildlife evidence was found near the sampled corridor.",
         points_of_interest:
-          input.stopCount > 0
-            ? `Reflects ${input.stopCount} deliberate user stop${input.stopCount === 1 ? "" : "s"}; nearby POIs are not yet measured.`
-            : "Nearby attractions are not yet measured, so unknown POI evidence is scored neutrally.",
+          poiEvidence > 0
+            ? `${Math.round(poiEvidence)} weighted verified cultural, historic or attraction signals appear near the sampled corridor.`
+            : "No verified scenic points of interest were found near the sampled corridor.",
         mood_match: moods.length
-          ? `Reflects ${moods.length} selected mood${moods.length === 1 ? "" : "s"}, rewarding compatible combinations without assuming scenery.`
-          : "No mood was selected, so this category uses a neutral baseline.",
+          ? moodEvidence > 0
+            ? "Verified corridor evidence supports the selected mood."
+            : "The selected mood receives limited intent credit without supporting verified evidence."
+          : "No mood was selected.",
         road_character:
-          "Uses turn density, step-length mix, and route deviation—not road surface or scenic-road classifications.",
+          "Uses measured turn density, step-length variation and route deviation; it does not claim road surface or scenery.",
         theme_match: themes.length
-          ? `Reflects ${themes.length} selected theme${themes.length === 1 ? "" : "s"}; broad combinations are moderated and features remain unverified.`
-          : "No theme was selected, so this category uses a neutral baseline without assuming features.",
-        diversity:
-          "Uses the mix of short and long route steps plus deliberate stops as a provisional variety signal.",
+          ? themeEvidence > 0
+            ? `${Math.round(themeEvidence)} weighted verified evidence signal${themeEvidence === 1 ? " supports" : "s support"} the selected theme.`
+            : "The selected theme receives limited intent credit without supporting verified evidence."
+          : "No theme was selected.",
+        diversity: `Uses ${evidenceCategories} verified evidence categor${evidenceCategories === 1 ? "y" : "ies"} plus measured route-step variation.`,
       },
     },
     overallVerdict,

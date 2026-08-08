@@ -1,4 +1,5 @@
 import type { ComputedDirections } from "./google-maps.server";
+import type { ScenicEvidenceCounts } from "./scenic-waypoint";
 
 export type ScoredRouteCandidate<TScore> = {
   directions: ComputedDirections;
@@ -7,6 +8,7 @@ export type ScoredRouteCandidate<TScore> = {
   originalIndex: number;
   source?: "fastest" | "google" | "scenik";
   selectedWaypointReason?: string | null;
+  evidence?: ScenicEvidenceCounts;
 };
 
 export type RouteSelection<TScore> = {
@@ -18,7 +20,14 @@ export type RouteSelection<TScore> = {
   requestedExtraTimeBudgetSeconds: number;
 };
 
-const EQUIVALENT_DURATION_TOLERANCE_SECONDS = 30;
+export function maximumAllowedDurationSeconds(
+  fastestDurationSeconds: number,
+  requestedExtraMinutes: number,
+): number {
+  const baseline = Math.max(1, Math.round(fastestDurationSeconds));
+  const budgetSeconds = Math.max(0, Math.min(14_400, Math.round(requestedExtraMinutes * 60)));
+  return baseline + budgetSeconds;
+}
 
 function validMetric(value: number): boolean {
   return Number.isFinite(value) && value >= 0;
@@ -66,11 +75,7 @@ export function selectRouteCandidate<TScore>(
     0,
     Math.min(14_400, Math.round(requestedExtraMinutes * 60)),
   );
-  const ceiling =
-    fastestDurationSeconds +
-    (requestedExtraTimeBudgetSeconds === 0
-      ? EQUIVALENT_DURATION_TOLERANCE_SECONDS
-      : requestedExtraTimeBudgetSeconds);
+  const ceiling = maximumAllowedDurationSeconds(fastestDurationSeconds, requestedExtraMinutes);
   const eligible = candidates.filter(
     (candidate) => candidate.directions.durationSeconds <= ceiling,
   );

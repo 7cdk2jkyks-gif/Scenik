@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { ComputedDirections } from "./google-maps.server";
-import { selectRouteCandidate, type ScoredRouteCandidate } from "./route-selection";
+import {
+  maximumAllowedDurationSeconds,
+  selectRouteCandidate,
+  type ScoredRouteCandidate,
+} from "./route-selection";
 
 function candidate(
   originalIndex: number,
@@ -21,6 +25,12 @@ function candidate(
 }
 
 describe("selectRouteCandidate", () => {
+  it("expands the duration ceiling for 0, 10, 30 and 60 minutes", () => {
+    assert.deepEqual(
+      [0, 10, 30, 60].map((minutes) => maximumAllowedDurationSeconds(3_600, minutes)),
+      [3_600, 4_200, 5_400, 7_200],
+    );
+  });
   it("selects the fastest baseline for a zero-minute budget", () => {
     const result = selectRouteCandidate([candidate(0, 600, 50), candidate(1, 620, 90)], 0);
     assert.equal(result.selected.originalIndex, 0);

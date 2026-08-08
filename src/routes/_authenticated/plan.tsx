@@ -2147,7 +2147,8 @@ function PlanPage() {
                     </p>
                   )}
                   <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
-                    Provisional V1 score based on currently measurable route characteristics.
+                    Evidence-based score using verified corridor signals and measurable route
+                    characteristics.
                   </p>
                   {(import.meta.env.DEV || result.scoringDiagnostics) && (
                     <p className="mt-1 text-[10px] text-muted-foreground/80">
@@ -2155,6 +2156,71 @@ function PlanPage() {
                     </p>
                   )}
                 </div>
+              )}
+
+              {result.scoringDiagnostics && (
+                <details className="mt-5 rounded-xl border border-border bg-muted/30 p-4 text-xs">
+                  <summary className="cursor-pointer font-semibold text-ink">
+                    Journey Engine diagnostics
+                  </summary>
+                  <dl className="mt-3 grid gap-x-6 gap-y-2 sm:grid-cols-2">
+                    {[
+                      [
+                        "Extra-time budget",
+                        `${result.scoringDiagnostics.requestedExtraTimeMinutes} min`,
+                      ],
+                      [
+                        "Maximum duration",
+                        `${result.scoringDiagnostics.maximumAllowedDurationSeconds} sec`,
+                      ],
+                      ["Corridor samples", result.scoringDiagnostics.corridorSampleCount],
+                      ["Verified places found", result.scoringDiagnostics.deduplicatedPlaceCount],
+                      [
+                        "Waypoint plans considered",
+                        result.scoringDiagnostics.waypointPlansConsidered,
+                      ],
+                      [
+                        "Scenik candidates attempted",
+                        result.scoringDiagnostics.scenicRouteRequestsAttempted,
+                      ],
+                      [
+                        "Scenik candidates accepted",
+                        result.scoringDiagnostics.scenicRoutesAccepted,
+                      ],
+                      ["Eligible routes", result.scoringDiagnostics.eligibleCandidateCount],
+                      [
+                        "Score range",
+                        result.scoringDiagnostics.candidateScoreMin == null
+                          ? "Unavailable"
+                          : `${result.scoringDiagnostics.candidateScoreMin}–${result.scoringDiagnostics.candidateScoreMax}`,
+                      ],
+                      [
+                        "Winner",
+                        result.scoringDiagnostics.selectedWinnerType === "scenik"
+                          ? "Scenik candidate"
+                          : result.scoringDiagnostics.selectedWinnerType === "google"
+                            ? "Google alternative"
+                            : "Fastest route",
+                      ],
+                      [
+                        "Added time",
+                        `${result.scoringDiagnostics.selectedMeasuredExtraMinutes} min`,
+                      ],
+                      ["Main reason", result.scoringDiagnostics.mainRejectionReason ?? "NONE"],
+                      ["Geocoding calls", result.scoringDiagnostics.geocodingCallCount],
+                      ["Routes calls", result.scoringDiagnostics.routesCallCount],
+                      ["Places calls", result.scoringDiagnostics.placesCallCount],
+                    ].map(([label, value]) => (
+                      <div
+                        key={String(label)}
+                        className="flex justify-between gap-4 border-b border-border/60 py-1"
+                      >
+                        <dt className="text-muted-foreground">{label}</dt>
+                        <dd className="text-right font-medium text-ink">{value}</dd>
+                      </div>
+                    ))}
+                  </dl>
+                </details>
               )}
             </Card>
           )}
