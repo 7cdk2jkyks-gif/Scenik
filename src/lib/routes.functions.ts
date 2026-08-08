@@ -180,6 +180,7 @@ export const planScenicRoute = createServerFn({ method: "POST" })
           isTargetBudgetCandidate,
         } = await import("./corridor-exploration");
         const { scoreScenicRoute: scoreExploredRoute } = await import("./scenic-score");
+        const { upgradeOverrunToleranceSeconds } = await import("./route-upgrade");
         const moods = moodIn
           .split(",")
           .map((value) => value.trim())
@@ -275,6 +276,12 @@ export const planScenicRoute = createServerFn({ method: "POST" })
                 scenikDirections.durationSeconds,
                 data.extra_minutes,
               );
+              const withinUpgradeWindow =
+                !withinBudget &&
+                scenikDirections.durationSeconds <=
+                  baseline.durationSeconds +
+                    budgetSeconds +
+                    upgradeOverrunToleranceSeconds(data.extra_minutes);
               const meaningfullyDifferent = rawCandidates.every((candidate) =>
                 routesAreMeaningfullyDifferent(candidate.directions, scenikDirections),
               );
@@ -284,7 +291,7 @@ export const planScenicRoute = createServerFn({ method: "POST" })
               } else if (!meaningfullyDifferent) {
                 rejectionReasons.add("DUPLICATE_ROUTE");
               }
-              if (withinBudget && meaningfullyDifferent) {
+              if ((withinBudget || withinUpgradeWindow) && meaningfullyDifferent) {
                 rawCandidates.push({
                   directions: scenikDirections,
                   source: "scenik",
@@ -298,7 +305,7 @@ export const planScenicRoute = createServerFn({ method: "POST" })
                 });
                 scenikCandidateAdded = true;
                 scenicCandidateCount += 1;
-                scenicRoutesAccepted += 1;
+                if (withinBudget) scenicRoutesAccepted += 1;
                 const candidateSamples = routeCorridorSamples(
                   start,
                   end,
@@ -335,6 +342,7 @@ export const planScenicRoute = createServerFn({ method: "POST" })
                   fastestDurationSeconds: baseline.durationSeconds,
                 }).total;
                 targetCandidateFound ||=
+                  withinBudget &&
                   candidateScore > baselineScore &&
                   isTargetBudgetCandidate(
                     budgetUtilisation(
@@ -426,10 +434,11 @@ export const planScenicRoute = createServerFn({ method: "POST" })
     if (scenicRoutesAccepted > 0 && selectedWinner !== "scenik") {
       rejectionReasons.add("SCORE_NOT_BETTER");
     }
-    const selectedWaypoints = [...waypoints];
-    if (selectedWinner === "scenik" && selectedRawCandidate?.scenicWaypoints.length) {
+    const waypointsForCandidate = (candidate: (typeof rawCandidates)[number] | undefined) => {
+      const candidateWaypoints = [...waypoints];
+      if (!candidate?.scenicWaypoints.length) return candidateWaypoints;
       const anchors = [routeInput.origin, ...routeInput.waypoints, routeInput.destination];
-      [...selectedRawCandidate.scenicWaypoints]
+      [...candidate.scenicWaypoints]
         .sort(
           (a, b) =>
             a.insertionIndex - b.insertionIndex ||
@@ -437,14 +446,26 @@ export const planScenicRoute = createServerFn({ method: "POST" })
               haversineDistanceMeters(anchors[b.insertionIndex], b),
         )
         .forEach((waypoint, offset) => {
-          selectedWaypoints.splice(waypoint.insertionIndex + offset, 0, {
+          candidateWaypoints.splice(waypoint.insertionIndex + offset, 0, {
             name: waypoint.reason,
             lat: waypoint.lat,
             lng: waypoint.lng,
-            description: selectedWaypointReason ?? waypoint.reason,
+            description: candidate.selectedWaypointReason ?? waypoint.reason,
           });
         });
-    }
+      return candidateWaypoints;
+    };
+    const selectedWaypoints = waypointsForCandidate(selectedRawCandidate);
+    const { selectRouteUpgradeCandidate } = await import("./route-upgrade");
+    const upgradeSelection = selectRouteUpgradeCandidate({
+      selected: selection.selected,
+      candidates: selection.candidates,
+      fastestDurationSeconds: selection.fastestDurationSeconds,
+      requestedExtraMinutes: data.extra_minutes,
+    });
+    const upgradeRawCandidate = upgradeSelection
+      ? rawCandidates[upgradeSelection.candidate.originalIndex]
+      : undefined;
     const scores = selection.candidates.map((candidate) => candidate.score);
     const fastestScore = scoredCandidates.find((candidate) => candidate.originalIndex === 0)?.score;
     const maximumAllowedDurationSeconds = durationCeiling(
@@ -490,6 +511,54 @@ export const planScenicRoute = createServerFn({ method: "POST" })
       throw new Error("Failed to record route generation. Please try again.");
     }
 
+    const routeUpgradeCandidate = upgradeSelection
+      ? {
+          available: true as const,
+          additionalMinutesBeyondSelectedRoute: Math.max(
+            1,
+            Math.ceil(
+              (upgradeSelection.candidate.directions.durationSeconds - directions.durationSeconds) /
+                60,
+            ),
+          ),
+          additionalMinutesBeyondUserAllowance: Math.max(
+            1,
+            Math.ceil(
+              (upgradeSelection.candidate.directions.durationSeconds -
+                (selection.fastestDurationSeconds + data.extra_minutes * 60)) /
+                60,
+            ),
+          ),
+          currentScenicScore: score.total,
+          upgradeScenicScore: upgradeSelection.candidate.score,
+          scenicScoreImprovement: upgradeSelection.candidate.score - score.total,
+          verifiedReasons: upgradeSelection.reasons,
+          payload: {
+            title: upgradeSelection.candidate.scoreResult.title,
+            narrative: `This retained route scores ${upgradeSelection.candidate.score - score.total} points higher using verified evidence and measured route characteristics.`,
+            scenic_score: upgradeSelection.candidate.score,
+            score_breakdown: upgradeSelection.candidate.scoreResult.breakdown,
+            evidenceSummary: {
+              counts: upgradeSelection.candidate.evidence,
+              explanations: upgradeSelection.candidate.scoreResult.breakdown.explanations,
+            },
+            badges: upgradeSelection.candidate.scoreResult.badges,
+            worth_extra_time: upgradeSelection.candidate.scoreResult.worthExtraTime,
+            waypoints: waypointsForCandidate(upgradeRawCandidate),
+            selectedRouteDurationSeconds: upgradeSelection.candidate.directions.durationSeconds,
+            measuredExtraTimeSeconds: Math.max(
+              0,
+              upgradeSelection.candidate.directions.durationSeconds -
+                selection.fastestDurationSeconds,
+            ),
+            selectedCandidateIndex: upgradeSelection.candidate.originalIndex,
+            selectedWinner: upgradeRawCandidate?.source ?? "scenik",
+            selectedWaypointReason: upgradeRawCandidate?.selectedWaypointReason ?? null,
+            directions: upgradeSelection.candidate.directions,
+          },
+        }
+      : undefined;
+
     return {
       title: score.title,
       narrative:
@@ -508,10 +577,10 @@ export const planScenicRoute = createServerFn({ method: "POST" })
       },
       badges: score.badges,
       worth_extra_time: score.worthExtraTime,
-      scoring_version: "v2-evidence-corridor" as const,
+      scoring_version: "v3-category-10" as const,
       scoringDiagnostics: internalTester
         ? {
-            scoringVersion: "v2-evidence-corridor" as const,
+            scoringVersion: "v3-category-10" as const,
             requestedExtraTimeMinutes: data.extra_minutes,
             fastestDurationSeconds: selection.fastestDurationSeconds,
             maximumAllowedDurationSeconds,
@@ -566,6 +635,7 @@ export const planScenicRoute = createServerFn({ method: "POST" })
       googleCandidateCount: distinctGoogleDirections.length,
       timeBudgetApplied,
       alternativesUnavailableReason,
+      routeUpgradeCandidate,
       directions,
     };
   });

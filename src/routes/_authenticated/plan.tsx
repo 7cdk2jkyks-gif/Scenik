@@ -94,7 +94,6 @@ import {
   Heart,
   Sparkles,
   Shuffle,
-  Star,
 } from "lucide-react";
 import { Checkbox } from "@/components/ui/checkbox";
 import { formatDistance, formatSpeed, useUnits } from "@/lib/units";
@@ -108,6 +107,8 @@ import { getPlatform, isNativePlatform } from "@/lib/native";
 import { OfflineUpgradeBanner } from "@/components/OfflineUpgradeBanner";
 import { LocationDisclosure } from "@/components/LocationDisclosure";
 import { useSubscription } from "@/hooks/useSubscription";
+import { normalizeVisibleCategories } from "@/lib/scenic-score";
+import { applyRetainedRouteUpgrade } from "@/lib/route-upgrade";
 
 type Rating = "excellent" | "average" | "poor";
 const MISSING_OPTIONS = [
@@ -1139,6 +1140,25 @@ function PlanPage() {
     onError: (e: Error) => toast.error(friendlyError(e.message)),
   });
 
+  function acceptRouteUpgrade() {
+    if (!result?.routeUpgradeCandidate) return;
+    const payload = result.routeUpgradeCandidate.payload;
+    setResult(applyRetainedRouteUpgrade(result, payload));
+    setRouteSummary({
+      distance: payload.directions.distance,
+      duration: payload.directions.duration,
+      steps: payload.directions.steps,
+    });
+    setProgress(null);
+    setRouteCompleted(false);
+    toast.success("Better route selected");
+  }
+
+  function dismissRouteUpgrade() {
+    if (!result) return;
+    setResult({ ...result, routeUpgradeCandidate: undefined });
+  }
+
   function openNav() {
     setNavError(null);
     promptLocation("nav");
@@ -1998,18 +2018,6 @@ function PlanPage() {
                       <span className="pb-1 font-serif text-xl text-muted-foreground">/ 100</span>
                     </div>
                     <div className="mt-2 flex items-center gap-2">
-                      <div
-                        className="flex gap-0.5 text-amber-600"
-                        aria-label={`${(result.scenic_score / 20).toFixed(1)} out of 5 stars`}
-                      >
-                        {Array.from({ length: 5 }, (_, index) => (
-                          <Star
-                            key={index}
-                            aria-hidden="true"
-                            className={`h-4 w-4 ${result.scenic_score >= (index + 1) * 20 ? "fill-current" : "opacity-30"}`}
-                          />
-                        ))}
-                      </div>
                       <span className="text-sm font-semibold text-ink">
                         {scoreLabel(result.scenic_score)}
                       </span>
@@ -2034,127 +2042,108 @@ function PlanPage() {
                 )}
               </div>
 
-              {result.score_breakdown && (
-                <div className="mt-5 grid gap-3 sm:grid-cols-2">
-                  {[
-                    [
-                      "Natural Beauty",
-                      result.score_breakdown.natural_beauty,
-                      25,
-                      Leaf,
-                      "natural_beauty",
-                    ],
-                    [
-                      "Points of Interest",
-                      result.score_breakdown.points_of_interest,
-                      20,
-                      Landmark,
-                      "points_of_interest",
-                    ],
-                    ["Mood Match", result.score_breakdown.mood_match, 10, Heart, "mood_match"],
-                    [
-                      "Road Character",
-                      result.score_breakdown.road_character,
-                      20,
-                      RouteIcon,
-                      "road_character",
-                    ],
-                    [
-                      "Theme Match",
-                      result.score_breakdown.theme_match,
-                      15,
-                      Sparkles,
-                      "theme_match",
-                    ],
-                    ["Diversity", result.score_breakdown.diversity, 10, Shuffle, "diversity"],
-                  ].map(([label, value, maximum, Icon, key]) => {
-                    const score = Number(value);
-                    const max = Number(maximum);
-                    const percentage = Math.round((score / max) * 100);
-                    const explanation =
-                      result.score_breakdown?.explanations?.[
-                        key as keyof typeof result.score_breakdown.explanations
-                      ] ?? result.score_breakdown.rationale;
-                    return (
-                      <div
-                        key={String(label)}
-                        className="rounded-xl border border-border bg-background p-3.5"
-                      >
-                        <div className="flex items-center justify-between gap-3">
-                          <div className="flex min-w-0 items-center gap-2">
-                            <Icon aria-hidden="true" className="h-4 w-4 shrink-0 text-primary" />
-                            <span className="text-sm font-semibold text-ink">{String(label)}</span>
-                          </div>
-                          <span className="shrink-0 font-serif text-sm font-semibold text-ink">
-                            {score}/{max}
-                          </span>
-                        </div>
-                        <div
-                          className="mt-2 h-2 overflow-hidden rounded-full bg-muted"
-                          role="progressbar"
-                          aria-label={`${String(label)}: ${score} out of ${max}, ${scoreLabel(percentage)}`}
-                          aria-valuenow={score}
-                          aria-valuemin={0}
-                          aria-valuemax={max}
-                        >
+              {result.score_breakdown &&
+                (() => {
+                  const visible = normalizeVisibleCategories(
+                    result.score_breakdown,
+                    result.scoring_version === "v3-category-10" ? "ten" : "legacy",
+                  );
+                  return (
+                    <div className="mt-5 grid gap-3 sm:grid-cols-2">
+                      {[
+                        ["Natural Beauty", visible.natural_beauty, 10, Leaf, "natural_beauty"],
+                        [
+                          "Points of Interest",
+                          visible.points_of_interest,
+                          10,
+                          Landmark,
+                          "points_of_interest",
+                        ],
+                        ["Mood Match", visible.mood_match, 10, Heart, "mood_match"],
+                        ["Road Character", visible.road_character, 10, RouteIcon, "road_character"],
+                        ["Theme Match", visible.theme_match, 10, Sparkles, "theme_match"],
+                        ["Diversity", visible.diversity, 10, Shuffle, "diversity"],
+                      ].map(([label, value, maximum, Icon, key]) => {
+                        const score = Number(value);
+                        const max = Number(maximum);
+                        const percentage = Math.round((score / max) * 100);
+                        const explanation =
+                          result.score_breakdown?.explanations?.[
+                            key as keyof typeof result.score_breakdown.explanations
+                          ] ?? result.score_breakdown.rationale;
+                        return (
                           <div
-                            className={`h-full rounded-full ${scoreBarClass(percentage)}`}
-                            style={{ width: `${percentage}%` }}
-                          />
-                        </div>
-                        <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
-                          {explanation}
-                        </p>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
+                            key={String(label)}
+                            className="rounded-xl border border-border bg-background p-3.5"
+                          >
+                            <div className="flex items-center justify-between gap-3">
+                              <div className="flex min-w-0 items-center gap-2">
+                                <Icon
+                                  aria-hidden="true"
+                                  className="h-4 w-4 shrink-0 text-primary"
+                                />
+                                <span className="text-sm font-semibold text-ink">
+                                  {String(label)}
+                                </span>
+                              </div>
+                              <span className="shrink-0 font-serif text-sm font-semibold text-ink">
+                                {score}/{max}
+                              </span>
+                            </div>
+                            <div
+                              className="mt-2 h-2 overflow-hidden rounded-full bg-muted"
+                              role="progressbar"
+                              aria-label={`${String(label)}: ${score} out of ${max}, ${scoreLabel(percentage)}`}
+                              aria-valuenow={score}
+                              aria-valuemin={0}
+                              aria-valuemax={max}
+                            >
+                              <div
+                                className={`h-full rounded-full ${scoreBarClass(percentage)}`}
+                                style={{ width: `${percentage}%` }}
+                              />
+                            </div>
+                            <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
+                              {explanation}
+                            </p>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  );
+                })()}
 
-              {result.worth_extra_time && (
-                <div className="mt-5 rounded-xl border border-amber-700/25 bg-amber-50/60 p-4">
-                  <div className="flex flex-wrap items-baseline justify-between gap-2">
-                    <h3 className="font-serif text-lg font-semibold text-ink">
-                      {result.alternativesUnavailableReason === "REQUIRED_STOPS" &&
-                      !result.timeBudgetApplied
-                        ? "Required stops preserved"
-                        : result.measuredExtraTimeSeconds > 0
-                          ? "Worth the extra time?"
-                          : "Fastest route selected"}
-                    </h3>
-                    <span className="font-serif text-lg font-semibold text-primary">
-                      {result.measuredExtraTimeSeconds > 0 ? "Yes" : "Best fit"}
+              {result.routeUpgradeCandidate?.available && (
+                <div className="mt-5 rounded-xl border border-primary/30 bg-primary/5 p-4">
+                  <h3 className="font-serif text-lg font-semibold text-ink">
+                    Want an even better drive?
+                  </h3>
+                  <div className="mt-2 flex flex-wrap items-baseline gap-x-4 gap-y-1">
+                    <span className="font-serif text-xl font-semibold text-primary">
+                      Add {result.routeUpgradeCandidate.additionalMinutesBeyondSelectedRoute} more
+                      minutes
+                    </span>
+                    <span className="text-sm font-semibold text-ink">
+                      Scenic Score {result.routeUpgradeCandidate.currentScenicScore} →{" "}
+                      {result.routeUpgradeCandidate.upgradeScenicScore}
                     </span>
                   </div>
-                  <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
-                    {result.alternativesUnavailableReason === "REQUIRED_STOPS" &&
-                    !result.timeBudgetApplied
-                      ? "Your required stops were preserved. Google does not provide alternative route candidates for this journey, so the time allowance could not be used to compare routes."
-                      : result.alternativesUnavailableReason === "ALTERNATIVE_REQUEST_FAILED"
-                        ? "The fastest route was preserved because alternative routes were temporarily unavailable."
-                        : result.measuredExtraTimeSeconds > 0
-                          ? `Adds ${Math.round(result.measuredExtraTimeSeconds / 60)} minutes versus the fastest route.`
-                          : `No alternative scored higher within your ${Math.round(result.requestedExtraTimeBudgetSeconds / 60)}-minute allowance.`}
+                  <p className="mt-3 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                    Why it&apos;s better
                   </p>
-                  <p className="mt-1 text-xs font-semibold uppercase tracking-wider text-amber-900">
-                    Your allowance: up to {Math.round(result.requestedExtraTimeBudgetSeconds / 60)}
-                    minutes
-                  </p>
-                  {result.timeBudgetApplied && (
-                    <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
-                      Compared {result.candidateCount} routes · {result.eligibleCandidateCount} fit
-                      your time budget · Selected the highest-scoring option
-                    </p>
-                  )}
-                  <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
-                    Evidence-based score using verified corridor signals and measurable route
-                    characteristics.
-                  </p>
-                  {(import.meta.env.DEV || result.scoringDiagnostics) && (
-                    <p className="mt-1 text-[10px] text-muted-foreground/80">
-                      {result.scoringDiagnostics?.scoringVersion ?? "v1.2-input-sensitive"}
-                    </p>
-                  )}
+                  <ul className="mt-1.5 space-y-1 text-sm text-muted-foreground">
+                    {result.routeUpgradeCandidate.verifiedReasons.map((reason) => (
+                      <li key={reason}>• {reason}</li>
+                    ))}
+                  </ul>
+                  <div className="mt-4 flex flex-wrap gap-2">
+                    <Button type="button" onClick={acceptRouteUpgrade}>
+                      Take the better route
+                    </Button>
+                    <Button type="button" variant="ghost" onClick={dismissRouteUpgrade}>
+                      Keep current route
+                    </Button>
+                  </div>
                 </div>
               )}
 

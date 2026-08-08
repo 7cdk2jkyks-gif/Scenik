@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { ComputedDirections, NavStep } from "./google-maps.server";
-import { scoreScenicRoute } from "./scenic-score";
+import {
+  normalizeVisibleCategories,
+  SCENIC_CATEGORY_WEIGHTS,
+  scoreScenicRoute,
+} from "./scenic-score";
 import { safeMetricFingerprint } from "./scoring-fingerprint";
 
 function step(distanceMeters: number, maneuver = "straight"): NavStep {
@@ -58,6 +62,48 @@ describe("scoreScenicRoute input sensitivity", () => {
         second.breakdown.road_character,
         second.breakdown.diversity,
       ],
+    );
+  });
+
+  it("publishes all six categories on a 0–10 scale with weights totalling 100", () => {
+    const result = scoreScenicRoute({ ...baseInput, directions: varied });
+    const categories = [
+      result.breakdown.natural_beauty,
+      result.breakdown.points_of_interest,
+      result.breakdown.mood_match,
+      result.breakdown.road_character,
+      result.breakdown.theme_match,
+      result.breakdown.diversity,
+    ];
+    assert.ok(categories.every((value) => value >= 0 && value <= 10));
+    assert.ok(result.total >= 0 && result.total <= 100);
+    assert.equal(
+      Object.values(SCENIC_CATEGORY_WEIGHTS).reduce((sum, weight) => sum + weight, 0),
+      100,
+    );
+  });
+
+  it("normalizes legacy category maxima safely", () => {
+    assert.deepEqual(
+      normalizeVisibleCategories(
+        {
+          natural_beauty: 25,
+          points_of_interest: 10,
+          mood_match: 5,
+          road_character: 20,
+          theme_match: 7.5,
+          diversity: 10,
+        },
+        "legacy",
+      ),
+      {
+        natural_beauty: 10,
+        points_of_interest: 5,
+        mood_match: 5,
+        road_character: 10,
+        theme_match: 5,
+        diversity: 10,
+      },
     );
   });
 

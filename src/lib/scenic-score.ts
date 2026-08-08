@@ -47,6 +47,47 @@ export interface ScenicScoreResult {
   title: string;
 }
 
+export const SCENIC_CATEGORY_WEIGHTS = {
+  natural_beauty: 25,
+  points_of_interest: 20,
+  mood_match: 10,
+  road_character: 20,
+  theme_match: 15,
+  diversity: 10,
+} as const;
+
+const LEGACY_CATEGORY_MAXIMA = {
+  natural_beauty: 25,
+  points_of_interest: 20,
+  mood_match: 10,
+  road_character: 20,
+  theme_match: 15,
+  diversity: 10,
+} as const;
+
+type CategoryValues = Pick<
+  ScenicScoreBreakdown,
+  | "natural_beauty"
+  | "points_of_interest"
+  | "mood_match"
+  | "road_character"
+  | "theme_match"
+  | "diversity"
+>;
+
+export function normalizeVisibleCategories(
+  values: CategoryValues,
+  sourceScale: "legacy" | "ten" = "ten",
+): CategoryValues {
+  return Object.fromEntries(
+    Object.entries(LEGACY_CATEGORY_MAXIMA).map(([key, legacyMaximum]) => {
+      const category = key as keyof CategoryValues;
+      const value = Number.isFinite(values[category]) ? values[category] : 0;
+      return [category, clamp(sourceScale === "legacy" ? (value / legacyMaximum) * 10 : value, 10)];
+    }),
+  ) as unknown as CategoryValues;
+}
+
 const clamp = (value: number, maximum: number) =>
   Math.max(0, Math.min(maximum, Math.round(value * 10) / 10));
 
@@ -199,9 +240,25 @@ export function scoreScenicRoute(input: {
     10,
   );
 
+  const visibleCategories = normalizeVisibleCategories(
+    {
+      natural_beauty: naturalBeauty,
+      points_of_interest: pointsOfInterest,
+      mood_match: moodMatch,
+      road_character: roadCharacter,
+      theme_match: themeMatch,
+      diversity,
+    },
+    "legacy",
+  );
   const total = Math.round(
     clamp(
-      naturalBeauty + pointsOfInterest + moodMatch + roadCharacter + themeMatch + diversity,
+      (naturalBeauty / 25) * SCENIC_CATEGORY_WEIGHTS.natural_beauty +
+        (pointsOfInterest / 20) * SCENIC_CATEGORY_WEIGHTS.points_of_interest +
+        (moodMatch / 10) * SCENIC_CATEGORY_WEIGHTS.mood_match +
+        (roadCharacter / 20) * SCENIC_CATEGORY_WEIGHTS.road_character +
+        (themeMatch / 15) * SCENIC_CATEGORY_WEIGHTS.theme_match +
+        (diversity / 10) * SCENIC_CATEGORY_WEIGHTS.diversity,
       100,
     ),
   );
@@ -233,7 +290,7 @@ export function scoreScenicRoute(input: {
             "No extra-time budget was requested, so this route prioritises a direct drive.",
           extraMinutes,
         }
-      : measuredExtraMinutes > 0 && (totalEvidence > 0 || roadCharacter >= 12)
+      : measuredExtraMinutes > 0 && (totalEvidence > 0 || visibleCategories.road_character >= 6)
         ? {
             verdict: "Yes" as const,
             explanation: `The route uses ${measuredExtraMinutes} measured extra minute${measuredExtraMinutes === 1 ? "" : "s"} and scored higher using verified evidence or route geometry.`,
@@ -249,12 +306,7 @@ export function scoreScenicRoute(input: {
   return {
     total,
     breakdown: {
-      natural_beauty: naturalBeauty,
-      points_of_interest: pointsOfInterest,
-      mood_match: moodMatch,
-      road_character: roadCharacter,
-      theme_match: themeMatch,
-      diversity,
+      ...visibleCategories,
       rationale:
         "This score uses verified Places categories near the sampled route corridor and measurable route geometry.",
       explanations: {

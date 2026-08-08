@@ -84,8 +84,8 @@ describe("Journey Engine V2 evidence calibration", () => {
       directions: mixed,
       evidence: { ...EMPTY_SCENIC_EVIDENCE, natural: 4, historic: 3, viewpoint: 2 },
     });
-    assert.ok(rich.breakdown.natural_beauty - none.breakdown.natural_beauty >= 10);
-    assert.ok(rich.breakdown.points_of_interest - none.breakdown.points_of_interest >= 6);
+    assert.ok(rich.breakdown.natural_beauty - none.breakdown.natural_beauty >= 4);
+    assert.ok(rich.breakdown.points_of_interest - none.breakdown.points_of_interest >= 3);
   });
 
   it("verified matching evidence beats mismatched evidence", () => {
@@ -99,13 +99,13 @@ describe("Journey Engine V2 evidence calibration", () => {
       directions: mixed,
       evidence: { ...EMPTY_SCENIC_EVIDENCE, coastal: 4 },
     });
-    assert.ok(historic.breakdown.theme_match - mismatch.breakdown.theme_match >= 8);
+    assert.ok(historic.breakdown.theme_match - mismatch.breakdown.theme_match >= 5);
   });
 
   it("route geometry materially changes Road Character", () => {
     const plain = scoreScenicRoute({ ...common, directions: direct });
     const characterful = scoreScenicRoute({ ...common, directions: varied });
-    assert.ok(characterful.breakdown.road_character - plain.breakdown.road_character >= 4);
+    assert.ok(characterful.breakdown.road_character - plain.breakdown.road_character >= 2);
   });
 
   it("uses the budget to expand search and candidate eligibility", () => {
