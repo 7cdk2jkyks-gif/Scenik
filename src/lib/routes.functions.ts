@@ -142,10 +142,16 @@ export const planScenicRoute = createServerFn({ method: "POST" })
       source: "fastest" | "google" | "scenik";
       selectedWaypointReason: string | null;
       scenicWaypoints: Array<{
+        id: string;
         lat: number;
         lng: number;
         reason: string;
         insertionIndex: number;
+        estimatedDetourMeters: number;
+        primaryType: string;
+        types: string[];
+        displayName?: string;
+        categoryName?: string;
       }>;
     }> = distinctGoogleDirections.map((directions, index) => ({
       directions,
@@ -162,6 +168,8 @@ export const planScenicRoute = createServerFn({ method: "POST" })
       lng: number;
       primaryType: string;
       types: string[];
+      displayName?: string;
+      categoryName?: string;
     }> = [];
     if (data.extra_minutes > 0) {
       try {
@@ -176,6 +184,7 @@ export const planScenicRoute = createServerFn({ method: "POST" })
           budgetUtilisation,
           buildCorridorPlans,
           corridorWaypointsWithRequiredStops,
+          explorationShouldStop,
           explorationStages,
           isTargetBudgetCandidate,
         } = await import("./corridor-exploration");
@@ -197,7 +206,9 @@ export const planScenicRoute = createServerFn({ method: "POST" })
           const anchors = [routeInput.origin, ...requiredCoordinates, routeInput.destination];
           const uniquePlaces = new Map<string, (typeof evidencePlaces)[number]>();
           const attemptedSignatures = new Set<string>();
-          for (const stage of explorationStages(data.extra_minutes)) {
+          const stages = explorationStages(data.extra_minutes);
+          let bestExploredScore = 0;
+          for (const [stageIndex, stage] of stages.entries()) {
             const samples = routeCorridorSamples(
               routeInput.origin,
               routeInput.destination,
@@ -224,6 +235,24 @@ export const planScenicRoute = createServerFn({ method: "POST" })
             }
             evidencePlaces = [...uniquePlaces.values()];
             deduplicatedPlaceCount = evidencePlaces.length;
+            bestExploredScore = Math.max(
+              bestExploredScore,
+              scoreExploredRoute({
+                start,
+                end,
+                mood: moodIn,
+                theme: themeIn,
+                extraMinutes: data.extra_minutes,
+                stopCount: waypoints.length,
+                directions: baseline,
+                evidence: evidenceForExploration(
+                  evidencePlaces,
+                  routeCorridorSamples(start, end, baseline.steps, 7),
+                  750,
+                ),
+                fastestDurationSeconds: baseline.durationSeconds,
+              }).total,
+            );
             const remainingRouteCalls = Math.max(
               0,
               stage.cumulativeRouteCap - scenicRouteRequestsAttempted,
@@ -261,7 +290,7 @@ export const planScenicRoute = createServerFn({ method: "POST" })
             const candidateResults = await Promise.allSettled(
               candidateRequests.map(({ request }) => request),
             );
-            let targetCandidateFound = false;
+            let bestTargetCandidateScore = -1;
             for (const [index, result] of candidateResults.entries()) {
               if (result.status === "rejected") {
                 stableErrorCode = "SCENIK_CANDIDATE_UNAVAILABLE_FALLBACK";
@@ -295,13 +324,13 @@ export const planScenicRoute = createServerFn({ method: "POST" })
                 rawCandidates.push({
                   directions: scenikDirections,
                   source: "scenik",
-                  selectedWaypointReason: corridorPlan.reason,
-                  scenicWaypoints: corridorPlan.waypoints.map((waypoint) => ({
-                    lat: waypoint.lat,
-                    lng: waypoint.lng,
-                    reason: waypoint.reason,
-                    insertionIndex: waypoint.insertionIndex,
-                  })),
+                  selectedWaypointReason: corridorPlan.waypoints
+                    .map(
+                      (waypoint) =>
+                        waypoint.displayName ?? waypoint.categoryName ?? waypoint.reason,
+                    )
+                    .join(" and "),
+                  scenicWaypoints: corridorPlan.waypoints.map((waypoint) => ({ ...waypoint })),
                 });
                 scenikCandidateAdded = true;
                 scenicCandidateCount += 1;
@@ -326,34 +355,30 @@ export const planScenicRoute = createServerFn({ method: "POST" })
                   evidence: evidenceForExploration(evidencePlaces, candidateSamples, 750),
                   fastestDurationSeconds: baseline.durationSeconds,
                 }).total;
-                const baselineScore = scoreExploredRoute({
-                  start,
-                  end,
-                  mood: moodIn,
-                  theme: themeIn,
-                  extraMinutes: data.extra_minutes,
-                  stopCount: waypoints.length,
-                  directions: baseline,
-                  evidence: evidenceForExploration(
-                    evidencePlaces,
-                    routeCorridorSamples(start, end, baseline.steps, 7),
-                    750,
-                  ),
-                  fastestDurationSeconds: baseline.durationSeconds,
-                }).total;
-                targetCandidateFound ||=
+                bestExploredScore = Math.max(bestExploredScore, candidateScore);
+                if (
                   withinBudget &&
-                  candidateScore > baselineScore &&
                   isTargetBudgetCandidate(
                     budgetUtilisation(
                       baseline.durationSeconds,
                       scenikDirections.durationSeconds,
                       data.extra_minutes,
                     ),
-                  );
+                  )
+                ) {
+                  bestTargetCandidateScore = Math.max(bestTargetCandidateScore, candidateScore);
+                }
               }
             }
-            if (targetCandidateFound) break;
+            if (
+              explorationShouldStop({
+                bestScore: bestExploredScore,
+                hasTargetBudgetCandidate: bestTargetCandidateScore >= bestExploredScore - 0.001,
+                stagesExplored: stageIndex + 1,
+                stagesRemaining: stages.length - stageIndex - 1,
+              })
+            )
+              break;
           }
           if (evidencePlaces.length === 0) rejectionReasons.add("NO_PLACES_FOUND");
           else if (scenicRouteRequestsAttempted === 0)
@@ -431,6 +456,11 @@ export const planScenicRoute = createServerFn({ method: "POST" })
     const selectedRawCandidate = rawCandidates[selection.selected.originalIndex];
     const selectedWaypointReason = selection.selected.selectedWaypointReason ?? null;
     const selectedWinner = selection.selected.source ?? "fastest";
+    const { routeIdentityFingerprint } = await import("./route-presentation");
+    const selectedRouteIdentityFingerprint = routeIdentityFingerprint(
+      directions,
+      directions.durationSeconds,
+    );
     if (scenicRoutesAccepted > 0 && selectedWinner !== "scenik") {
       rejectionReasons.add("SCORE_NOT_BETTER");
     }
@@ -447,15 +477,23 @@ export const planScenicRoute = createServerFn({ method: "POST" })
         )
         .forEach((waypoint, offset) => {
           candidateWaypoints.splice(waypoint.insertionIndex + offset, 0, {
-            name: waypoint.reason,
+            name: waypoint.displayName ?? waypoint.reason,
             lat: waypoint.lat,
             lng: waypoint.lng,
-            description: candidate.selectedWaypointReason ?? waypoint.reason,
+            description: waypoint.categoryName
+              ? `Google Places lists this as ${waypoint.categoryName.toLowerCase()}.`
+              : waypoint.reason,
           });
         });
       return candidateWaypoints;
     };
     const selectedWaypoints = waypointsForCandidate(selectedRawCandidate);
+    const { buildDiscoveryNarration, buildJourneyTimeline } = await import("./journey-timeline");
+    const journeyTimeline = buildJourneyTimeline(
+      selectedRawCandidate?.scenicWaypoints ?? [],
+      directions.steps,
+    );
+    const narrationEvents = buildDiscoveryNarration(journeyTimeline);
     const { selectRouteUpgradeCandidate } = await import("./route-upgrade");
     const upgradeSelection = selectRouteUpgradeCandidate({
       selected: selection.selected,
@@ -466,6 +504,12 @@ export const planScenicRoute = createServerFn({ method: "POST" })
     const upgradeRawCandidate = upgradeSelection
       ? rawCandidates[upgradeSelection.candidate.originalIndex]
       : undefined;
+    const upgradeJourneyTimeline = upgradeSelection
+      ? buildJourneyTimeline(
+          upgradeRawCandidate?.scenicWaypoints ?? [],
+          upgradeSelection.candidate.directions.steps,
+        )
+      : [];
     const scores = selection.candidates.map((candidate) => candidate.score);
     const fastestScore = scoredCandidates.find((candidate) => candidate.originalIndex === 0)?.score;
     const maximumAllowedDurationSeconds = durationCeiling(
@@ -554,6 +598,11 @@ export const planScenicRoute = createServerFn({ method: "POST" })
             selectedCandidateIndex: upgradeSelection.candidate.originalIndex,
             selectedWinner: upgradeRawCandidate?.source ?? "scenik",
             selectedWaypointReason: upgradeRawCandidate?.selectedWaypointReason ?? null,
+            highlights: upgradeJourneyTimeline.map(
+              (highlight) => `${highlight.name} · ${highlight.category}`,
+            ),
+            journeyTimeline: upgradeJourneyTimeline,
+            narrationEvents: buildDiscoveryNarration(upgradeJourneyTimeline),
             directions: upgradeSelection.candidate.directions,
           },
         }
@@ -583,6 +632,10 @@ export const planScenicRoute = createServerFn({ method: "POST" })
             scoringVersion: "v3-category-10" as const,
             requestedExtraTimeMinutes: data.extra_minutes,
             fastestDurationSeconds: selection.fastestDurationSeconds,
+            fastestDurationMinutes: Math.round(selection.fastestDurationSeconds / 60),
+            selectedDurationMinutes: Math.round(directions.durationSeconds / 60),
+            mapDisplayedDurationMinutes: Math.round(directions.durationSeconds / 60),
+            routeIdentityFingerprint: selectedRouteIdentityFingerprint,
             maximumAllowedDurationSeconds,
             corridorSampleCount: corridorSamplesUsed,
             placesSearchCount: placesCallCount,
@@ -609,12 +662,9 @@ export const planScenicRoute = createServerFn({ method: "POST" })
             placesCallCount,
           }
         : undefined,
-      highlights: [
-        "Traffic-aware route",
-        ...(waypoints.length
-          ? [`Includes ${waypoints.length} required stop${waypoints.length === 1 ? "" : "s"}`]
-          : []),
-      ],
+      highlights: journeyTimeline.map((highlight) => `${highlight.name} · ${highlight.category}`),
+      journeyTimeline,
+      narrationEvents,
       waypoints: selectedWaypoints,
       start: { address: start.formatted, lat: start.lat, lng: start.lng },
       end: { address: end.formatted, lat: end.lat, lng: end.lng },

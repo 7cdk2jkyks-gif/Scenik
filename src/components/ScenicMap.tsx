@@ -12,13 +12,19 @@ declare global {
     google?: {
       maps: {
         LatLngBounds: new () => { extend: (p: LatLngLiteral) => void };
-        Map: new (el: HTMLElement, opts: Record<string, unknown>) => {
+        Map: new (
+          el: HTMLElement,
+          opts: Record<string, unknown>,
+        ) => {
           fitBounds: (b: unknown, padding?: number) => void;
           panTo: (p: LatLngLiteral) => void;
           setCenter: (p: LatLngLiteral) => void;
           setZoom: (z: number) => void;
           setOptions: (opts: Record<string, unknown>) => void;
-          addListener: (ev: string, cb: (e: { latLng?: { lat: () => number; lng: () => number } }) => void) => { remove?: () => void };
+          addListener: (
+            ev: string,
+            cb: (e: { latLng?: { lat: () => number; lng: () => number } }) => void,
+          ) => { remove?: () => void };
         };
         Marker: new (opts: Record<string, unknown>) => {
           setMap: (m: unknown | null) => void;
@@ -42,7 +48,9 @@ declare global {
         SymbolPath: { CIRCLE: number };
         event: { removeListener: (l: unknown) => void };
         geometry?: {
-          encoding: { decodePath: (encoded: string) => Array<{ lat: () => number; lng: () => number }> };
+          encoding: {
+            decodePath: (encoded: string) => Array<{ lat: () => number; lng: () => number }>;
+          };
         };
       };
     };
@@ -57,7 +65,6 @@ export interface RoadReportMarker {
   note?: string;
   mine?: boolean;
 }
-
 
 export interface MapPoint {
   lat: number;
@@ -82,7 +89,7 @@ export type LocationPermission = "prompt" | "granted" | "denied" | "unsupported"
 
 export interface RouteProgress {
   onRoute: boolean;
-  percent: number;            // 0-100
+  percent: number; // 0-100
   remainingMeters: number;
   remainingSeconds: number;
   distanceFromRouteMeters: number;
@@ -157,9 +164,16 @@ export function ScenicMap({
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const mapRef = useRef<InstanceType<NonNullable<Window["google"]>["maps"]["Map"]> | null>(null);
-  const userMarkerRef = useRef<InstanceType<NonNullable<Window["google"]>["maps"]["Marker"]> | null>(null);
-  const accuracyCircleRef = useRef<InstanceType<NonNullable<Window["google"]>["maps"]["Circle"]> | null>(null);
-  const completedLineRef = useRef<{ setMap: (m: unknown | null) => void; setPath?: (p: LatLngLiteral[]) => void } | null>(null);
+  const userMarkerRef = useRef<InstanceType<
+    NonNullable<Window["google"]>["maps"]["Marker"]
+  > | null>(null);
+  const accuracyCircleRef = useRef<InstanceType<
+    NonNullable<Window["google"]>["maps"]["Circle"]
+  > | null>(null);
+  const completedLineRef = useRef<{
+    setMap: (m: unknown | null) => void;
+    setPath?: (p: LatLngLiteral[]) => void;
+  } | null>(null);
   const pathRef = useRef<LatLngLiteral[]>([]);
   const cumDistRef = useRef<number[]>([]);
   const totalPathDistRef = useRef<number>(0);
@@ -172,6 +186,10 @@ export function ScenicMap({
   const stepCumRef = useRef<number[]>([]);
   const stepsRef = useRef<NavStepInput[] | undefined>(steps);
   stepsRef.current = steps;
+  const routeDistanceMetersRef = useRef(routeDistanceMeters);
+  routeDistanceMetersRef.current = routeDistanceMeters;
+  const routeDurationSecondsRef = useRef(routeDurationSeconds);
+  routeDurationSecondsRef.current = routeDurationSeconds;
   const offRouteSinceRef = useRef<number | null>(null);
   const lastRerouteAtRef = useRef<number>(0);
   const navModeRef = useRef(navMode);
@@ -184,12 +202,12 @@ export function ScenicMap({
   onUserLocationChangeRef.current = onUserLocationChange;
   const lastTickAtRef = useRef<number>(0);
   // GPS smoothing state
-  const smoothedRef = useRef<{ lat: number; lng: number; accuracy: number; t: number } | null>(null);
+  const smoothedRef = useRef<{ lat: number; lng: number; accuracy: number; t: number } | null>(
+    null,
+  );
   const lastDisplayRef = useRef<LatLngLiteral | null>(null);
   const animFrameRef = useRef<number | null>(null);
   const [mapReady, setMapReady] = useState(false);
-
-
 
   useEffect(() => {
     let cancelled = false;
@@ -214,7 +232,9 @@ export function ScenicMap({
             cumDistRef.current = cum;
             totalPathDistRef.current = total;
           }
-        } catch { /* noop — progress will simply be inert */ }
+        } catch {
+          /* noop — progress will simply be inert */
+        }
       }
       return () => {
         cancelled = true;
@@ -231,9 +251,12 @@ export function ScenicMap({
 
         // When entering nav mode with a known last position, boot the map
         // already centred+zoomed on the user so there's no visible camera jump.
-        const knownUserLocation = lastDisplayRef.current ?? latestKnownUserLocation ?? initialUserLocation;
+        const knownUserLocation =
+          lastDisplayRef.current ?? latestKnownUserLocation ?? initialUserLocation;
         const bootAtUser = navModeRef.current && knownUserLocation;
-        const center = bootAtUser ? knownUserLocation! : (points[0] ?? { lat: 37.7749, lng: -122.4194 });
+        const center = bootAtUser
+          ? knownUserLocation!
+          : (points[0] ?? { lat: 37.7749, lng: -122.4194 });
         const map = new g.maps.Map(ref.current, {
           center: { lat: center.lat, lng: center.lng },
           zoom: navModeRef.current ? 17 : 8,
@@ -247,7 +270,11 @@ export function ScenicMap({
             { elementType: "labels.text.fill", stylers: [{ color: "#5a4632" }] },
             { featureType: "water", stylers: [{ color: "#a8c8c4" }] },
             { featureType: "road", elementType: "geometry", stylers: [{ color: "#e8d6b0" }] },
-            { featureType: "road.highway", elementType: "geometry", stylers: [{ color: "#d9b27a" }] },
+            {
+              featureType: "road.highway",
+              elementType: "geometry",
+              stylers: [{ color: "#d9b27a" }],
+            },
             { featureType: "landscape.natural", stylers: [{ color: "#e9dcb6" }] },
             { featureType: "poi.park", stylers: [{ color: "#c7d2a6" }] },
             { featureType: "transit", stylers: [{ visibility: "off" }] },
@@ -423,7 +450,11 @@ export function ScenicMap({
       const nowTick = Date.now();
       if (onLocationTickRef.current && nowTick - lastTickAtRef.current > 15000) {
         lastTickAtRef.current = nowTick;
-        try { onLocationTickRef.current(smoothedPt); } catch { /* noop */ }
+        try {
+          onLocationTickRef.current(smoothedPt);
+        } catch {
+          /* noop */
+        }
       }
 
       const g = window.google;
@@ -501,21 +532,23 @@ export function ScenicMap({
         lastDisplayRef.current = smoothedPt;
       }
 
-
-
       // Route progress
       if (pathRef.current.length >= 2 && totalPathDistRef.current > 0) {
         const snap = snapToPath(pt, pathRef.current, cumDistRef.current);
-        const totalRouteMeters = routeDistanceMeters && routeDistanceMeters > 0
-          ? routeDistanceMeters
-          : totalPathDistRef.current;
+        const currentRouteDistanceMeters = routeDistanceMetersRef.current;
+        const currentRouteDurationSeconds = routeDurationSecondsRef.current;
+        const totalRouteMeters =
+          currentRouteDistanceMeters && currentRouteDistanceMeters > 0
+            ? currentRouteDistanceMeters
+            : totalPathDistRef.current;
         const traveled = (snap.traveledMeters / totalPathDistRef.current) * totalRouteMeters;
         const remaining = Math.max(0, totalRouteMeters - traveled);
         const percent = Math.max(0, Math.min(100, (traveled / totalRouteMeters) * 100));
         const onRoute = snap.distanceMeters < Math.max(80, (pos.coords.accuracy ?? 0) + 50);
-        const remainingSec = routeDurationSeconds && totalRouteMeters > 0
-          ? (remaining / totalRouteMeters) * routeDurationSeconds
-          : 0;
+        const remainingSec =
+          currentRouteDurationSeconds && totalRouteMeters > 0
+            ? (remaining / totalRouteMeters) * currentRouteDurationSeconds
+            : 0;
 
         if (onRoute && completedLineRef.current?.setPath) {
           const completed = pathRef.current.slice(0, snap.segmentIndex + 1).concat([snap.snapped]);
@@ -565,10 +598,8 @@ export function ScenicMap({
             offRouteSinceRef.current = null;
           }
         }
-
       }
     };
-
 
     const handleError = (err: GeolocationPositionError) => {
       if (err.code === err.PERMISSION_DENIED) {
@@ -583,14 +614,28 @@ export function ScenicMap({
           permQuery
             .then((status) => {
               if (status.state === "denied") {
-                onLocationStatus?.("denied", "Location permission is blocked for this site. Enable it in your browser's site settings, then tap Try again.");
+                onLocationStatus?.(
+                  "denied",
+                  "Location permission is blocked for this site. Enable it in your browser's site settings, then tap Try again.",
+                );
               } else {
-                onLocationStatus?.("denied", "This page couldn't access your location. If you're viewing Scenik inside a preview or embed, open it in a new tab and try again.");
+                onLocationStatus?.(
+                  "denied",
+                  "This page couldn't access your location. If you're viewing Scenik inside a preview or embed, open it in a new tab and try again.",
+                );
               }
             })
-            .catch(() => onLocationStatus?.("denied", "Location permission was denied. Tap Try again to request it once more."));
+            .catch(() =>
+              onLocationStatus?.(
+                "denied",
+                "Location permission was denied. Tap Try again to request it once more.",
+              ),
+            );
         } else {
-          onLocationStatus?.("denied", "Location permission was denied. Tap Try again to request it once more.");
+          onLocationStatus?.(
+            "denied",
+            "Location permission was denied. Tap Try again to request it once more.",
+          );
         }
       } else if (err.code === err.POSITION_UNAVAILABLE) {
         onLocationStatus?.("error", "Your location is unavailable right now. Tap Try again.");
@@ -619,7 +664,6 @@ export function ScenicMap({
       smoothedRef.current = null;
       lastDisplayRef.current = null;
     };
-
   }, [showUserLocation, points.length === 0, locationRetryKey]);
 
   // If GPS returns before the map is ready, paint the latest fix immediately
@@ -669,7 +713,8 @@ export function ScenicMap({
       return;
     }
     const totalSteps = steps.reduce((a, s) => a + (s.distanceMeters || 0), 0);
-    const totalRoute = routeDistanceMeters && routeDistanceMeters > 0 ? routeDistanceMeters : totalSteps;
+    const totalRoute =
+      routeDistanceMeters && routeDistanceMeters > 0 ? routeDistanceMeters : totalSteps;
     const scale = totalSteps > 0 ? totalRoute / totalSteps : 1;
     const cum: number[] = [];
     let acc = 0;
@@ -689,7 +734,8 @@ export function ScenicMap({
     if (!mapReady || !mapRef.current) return;
     if (cameraInitRef.current) return;
     // If any map instance already has a location fix, jump instantly.
-    const knownUserLocation = lastDisplayRef.current ?? latestKnownUserLocation ?? initialUserLocation;
+    const knownUserLocation =
+      lastDisplayRef.current ?? latestKnownUserLocation ?? initialUserLocation;
     if (knownUserLocation) {
       cameraInitRef.current = true;
       mapRef.current.setCenter(knownUserLocation);
@@ -707,7 +753,9 @@ export function ScenicMap({
           mapRef.current.setCenter(pt);
           mapRef.current.setZoom(17);
         },
-        () => { /* ignore — watchPosition will catch up */ },
+        () => {
+          /* ignore — watchPosition will catch up */
+        },
         { maximumAge: Infinity, timeout: 0, enableHighAccuracy: false },
       );
     }
@@ -717,13 +765,25 @@ export function ScenicMap({
   useEffect(() => {
     if (!navMode) return;
     let lock: { release: () => Promise<void> } | null = null;
-    const nav = navigator as Navigator & { wakeLock?: { request: (t: "screen") => Promise<{ release: () => Promise<void> }> } };
+    const nav = navigator as Navigator & {
+      wakeLock?: { request: (t: "screen") => Promise<{ release: () => Promise<void> }> };
+    };
     if (nav.wakeLock?.request) {
-      nav.wakeLock.request("screen").then((l) => { lock = l; }).catch(() => {});
+      nav.wakeLock
+        .request("screen")
+        .then((l) => {
+          lock = l;
+        })
+        .catch(() => {});
     }
     const onVis = () => {
       if (document.visibilityState === "visible" && nav.wakeLock?.request && !lock) {
-        nav.wakeLock.request("screen").then((l) => { lock = l; }).catch(() => {});
+        nav.wakeLock
+          .request("screen")
+          .then((l) => {
+            lock = l;
+          })
+          .catch(() => {});
       }
     };
     document.addEventListener("visibilitychange", onVis);
@@ -751,7 +811,11 @@ export function ScenicMap({
       onMapClick({ lat: e.latLng.lat(), lng: e.latLng.lng() });
     });
     return () => {
-      try { window.google?.maps.event.removeListener(listener); } catch { /* noop */ }
+      try {
+        window.google?.maps.event.removeListener(listener);
+      } catch {
+        /* noop */
+      }
     };
   }, [mapReady, onMapClick]);
 
@@ -792,7 +856,10 @@ export function ScenicMap({
         zIndex: 5000,
       });
       m.addListener?.("click", () => {
-        const safeNote = (r.note ?? "").replace(/[<>&"']/g, (c) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;", '"': "&quot;", "'": "&#39;" }[c] ?? c));
+        const safeNote = (r.note ?? "").replace(
+          /[<>&"']/g,
+          (c) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;", '"': "&quot;", "'": "&#39;" })[c] ?? c,
+        );
         const html = `
           <div style="font-family: inherit; font-size: 12px; max-width: 200px;">
             <div style="font-weight:600; text-transform:capitalize; margin-bottom:4px;">${r.kind}</div>
@@ -804,7 +871,14 @@ export function ScenicMap({
         if (r.mine && onReportDelete) {
           setTimeout(() => {
             const btn = document.getElementById(`del-${r.id}`);
-            btn?.addEventListener("click", () => { onReportDelete(r.id); info.close(); }, { once: true });
+            btn?.addEventListener(
+              "click",
+              () => {
+                onReportDelete(r.id);
+                info.close();
+              },
+              { once: true },
+            );
           }, 0);
         }
       });
@@ -812,7 +886,11 @@ export function ScenicMap({
     });
     return () => {
       markers.forEach((m) => m.setMap(null));
-      try { info.close(); } catch { /* noop */ }
+      try {
+        info.close();
+      } catch {
+        /* noop */
+      }
     };
   }, [mapReady, reportsKey, onReportDelete]);
 
@@ -837,17 +915,26 @@ export function ScenicMap({
           geodesic: true,
           clickable: !!onAlternateClick,
           zIndex: 45,
-          icons: [{
-            icon: { path: "M 0,-1 0,1", strokeOpacity: 0.7, strokeWeight: 4, scale: 3 },
-            offset: "0",
-            repeat: "14px",
-          }],
-        }) as { setMap: (m: unknown | null) => void; addListener?: (ev: string, cb: () => void) => void };
+          icons: [
+            {
+              icon: { path: "M 0,-1 0,1", strokeOpacity: 0.7, strokeWeight: 4, scale: 3 },
+              offset: "0",
+              repeat: "14px",
+            },
+          ],
+        }) as {
+          setMap: (m: unknown | null) => void;
+          addListener?: (ev: string, cb: () => void) => void;
+        };
         line.addListener?.("click", () => onAlternateClick?.(alt.id));
         lines.push(line);
-      } catch { /* noop */ }
+      } catch {
+        /* noop */
+      }
     });
-    return () => { lines.forEach((l) => l.setMap(null)); };
+    return () => {
+      lines.forEach((l) => l.setMap(null));
+    };
   }, [mapReady, altKey, onAlternateClick]);
 
   if (offline) {
@@ -878,10 +965,11 @@ export function ScenicMap({
   return <div ref={ref} className={className ?? "h-full w-full rounded-2xl border bg-muted"} />;
 }
 
-
 // ---- Geo helpers ----
 const R_EARTH = 6371000;
-function toRad(d: number) { return (d * Math.PI) / 180; }
+function toRad(d: number) {
+  return (d * Math.PI) / 180;
+}
 function haversineMeters(a: LatLngLiteral, b: LatLngLiteral): number {
   const dLat = toRad(b.lat - a.lat);
   const dLng = toRad(b.lng - a.lng);
@@ -892,12 +980,20 @@ function haversineMeters(a: LatLngLiteral, b: LatLngLiteral): number {
 }
 
 // Project point onto segment AB in a local equirectangular plane, return snapped point + t in [0,1]
-function projectOnSegment(p: LatLngLiteral, a: LatLngLiteral, b: LatLngLiteral): { snapped: LatLngLiteral; t: number } {
+function projectOnSegment(
+  p: LatLngLiteral,
+  a: LatLngLiteral,
+  b: LatLngLiteral,
+): { snapped: LatLngLiteral; t: number } {
   const latRef = toRad((a.lat + b.lat) / 2);
-  const ax = a.lng * Math.cos(latRef), ay = a.lat;
-  const bx = b.lng * Math.cos(latRef), by = b.lat;
-  const px = p.lng * Math.cos(latRef), py = p.lat;
-  const dx = bx - ax, dy = by - ay;
+  const ax = a.lng * Math.cos(latRef),
+    ay = a.lat;
+  const bx = b.lng * Math.cos(latRef),
+    by = b.lat;
+  const px = p.lng * Math.cos(latRef),
+    py = p.lat;
+  const dx = bx - ax,
+    dy = by - ay;
   const len2 = dx * dx + dy * dy;
   if (len2 === 0) return { snapped: a, t: 0 };
   let t = ((px - ax) * dx + (py - ay) * dy) / len2;
@@ -909,10 +1005,16 @@ function snapToPath(
   p: LatLngLiteral,
   path: LatLngLiteral[],
   cum: number[],
-): { snapped: LatLngLiteral; segmentIndex: number; traveledMeters: number; distanceMeters: number } {
+): {
+  snapped: LatLngLiteral;
+  segmentIndex: number;
+  traveledMeters: number;
+  distanceMeters: number;
+} {
   let best = { snapped: path[0], segmentIndex: 0, traveledMeters: 0, distanceMeters: Infinity };
   for (let i = 0; i < path.length - 1; i++) {
-    const a = path[i], b = path[i + 1];
+    const a = path[i],
+      b = path[i + 1];
     const { snapped, t } = projectOnSegment(p, a, b);
     const d = haversineMeters(p, snapped);
     if (d < best.distanceMeters) {

@@ -109,6 +109,7 @@ import { LocationDisclosure } from "@/components/LocationDisclosure";
 import { useSubscription } from "@/hooks/useSubscription";
 import { normalizeVisibleCategories } from "@/lib/scenic-score";
 import { applyRetainedRouteUpgrade } from "@/lib/route-upgrade";
+import { mapRemainingDurationSeconds, selectedRoutePresentation } from "@/lib/route-presentation";
 
 type Rating = "excellent" | "average" | "poor";
 const MISSING_OPTIONS = [
@@ -477,6 +478,7 @@ function PlanPage() {
   const [themes, setThemes] = useState<string[]>([]);
   const [extra, setExtra] = useState(30);
   const [result, setResult] = useState<PlanResult | null>(null);
+  const selectedRoute = useMemo(() => selectedRoutePresentation(result), [result]);
   const [routeSummary, setRouteSummary] = useState<RouteSummary | null>(null);
   const [navOpen, setNavOpen] = useState(false);
   const [mapError, setMapError] = useState<string | null>(null);
@@ -591,6 +593,16 @@ function PlanPage() {
   const [loadingStage, setLoadingStage] = useState(0);
 
   useEffect(() => {
+    setProgress(null);
+    setStepProgress(null);
+    setAltOffer(null);
+    setRouteCompleted(false);
+    spokenRef.current = new Set();
+    visitedWpRef.current = new Set();
+    lastStepIdxRef.current = -1;
+  }, [selectedRoute?.identityFingerprint]);
+
+  useEffect(() => {
     supabase.auth.getUser().then(({ data }) => setUserId(data.user?.id ?? null));
   }, []);
 
@@ -610,10 +622,11 @@ function PlanPage() {
     const cached = loadLastPlan<PlanResult>();
     if (!cached?.result) return;
     setResult(cached.result);
-    if (cached.result.directions) {
+    const cachedRoute = selectedRoutePresentation(cached.result);
+    if (cachedRoute && cached.result.directions) {
       setRouteSummary({
-        distance: cached.result.directions.distance,
-        duration: cached.result.directions.duration,
+        distance: cachedRoute.distance,
+        duration: cachedRoute.duration,
         steps: cached.result.directions.steps,
       });
     }
@@ -1015,6 +1028,7 @@ function PlanPage() {
       setResult(r);
       setRouteCompleted(false);
       visitedWpRef.current = new Set();
+      spokenRef.current = new Set();
       setWaypointFact(null);
       capture(AnalyticsEvent.RouteGenerated, {
         title: r.title,
@@ -1143,7 +1157,21 @@ function PlanPage() {
   function acceptRouteUpgrade() {
     if (!result?.routeUpgradeCandidate) return;
     const payload = result.routeUpgradeCandidate.payload;
-    setResult(applyRetainedRouteUpgrade(result, payload));
+    const upgraded = applyRetainedRouteUpgrade(result, payload);
+    const upgradedRoute = selectedRoutePresentation(upgraded);
+    setResult({
+      ...upgraded,
+      scoringDiagnostics:
+        upgraded.scoringDiagnostics && upgradedRoute
+          ? {
+              ...upgraded.scoringDiagnostics,
+              selectedDurationMinutes: Math.round(upgradedRoute.durationSeconds / 60),
+              mapDisplayedDurationMinutes: Math.round(upgradedRoute.durationSeconds / 60),
+              selectedMeasuredExtraMinutes: Math.round(payload.measuredExtraTimeSeconds / 60),
+              routeIdentityFingerprint: upgradedRoute.identityFingerprint,
+            }
+          : upgraded.scoringDiagnostics,
+    });
     setRouteSummary({
       distance: payload.directions.distance,
       duration: payload.directions.duration,
@@ -1201,8 +1229,8 @@ function PlanPage() {
     capture(AnalyticsEvent.NavigationStarted, {
       title: result?.title,
       scenic_score: result?.scenic_score,
-      distance_meters: result?.directions?.distanceMeters ?? null,
-      duration_seconds: result?.directions?.durationSeconds ?? null,
+      distance_meters: selectedRoute?.distanceMeters ?? null,
+      duration_seconds: selectedRoute?.durationSeconds ?? null,
       waypoint_count: result?.waypoints.length ?? 0,
       mood: result?.mood,
       theme: result?.theme,
@@ -1255,7 +1283,13 @@ function PlanPage() {
           waypoints: [],
         },
       });
-      setResult({ ...result, directions: fresh });
+      setResult({
+        ...result,
+        directions: fresh,
+        selectedRouteDurationSeconds: fresh.durationSeconds,
+        journeyTimeline: [],
+        narrationEvents: [],
+      });
       setRouteSummary({ distance: fresh.distance, duration: fresh.duration, steps: fresh.steps });
       spokenRef.current = new Set();
       lastStepIdxRef.current = -1;
@@ -1279,7 +1313,7 @@ function PlanPage() {
       .then((r) => setSpeedKmh(r.kmh))
       .catch(() => setSpeedKmh(null));
     // Scenic-point facts: when navigating, fire a short guide when we arrive near a waypoint
-    if (result && navOpen) {
+    if (result && navOpen && !result.narrationEvents?.length) {
       const R = 6371000;
       const toRad = (n: number) => (n * Math.PI) / 180;
       result.waypoints.forEach((w, idx) => {
@@ -1325,7 +1359,10 @@ function PlanPage() {
           alternatives: true,
         },
       });
-      const remainingSec = progress?.remainingSeconds ?? result.directions?.durationSeconds ?? 0;
+      const remainingSec = mapRemainingDurationSeconds(
+        selectedRoute?.durationSeconds ?? 0,
+        progress,
+      );
       const candidates = [
         {
           encodedPolyline: fresh.encodedPolyline,
@@ -1364,7 +1401,13 @@ function PlanPage() {
       duration: `${Math.round(altOffer.durationSeconds / 60)} min`,
       steps: result.directions?.steps ?? [],
     };
-    setResult({ ...result, directions: fresh });
+    setResult({
+      ...result,
+      directions: fresh,
+      selectedRouteDurationSeconds: fresh.durationSeconds,
+      journeyTimeline: [],
+      narrationEvents: [],
+    });
     setRouteSummary({ distance: fresh.distance, duration: fresh.duration, steps: fresh.steps });
     spokenRef.current = new Set();
     lastStepIdxRef.current = -1;
@@ -1412,6 +1455,32 @@ function PlanPage() {
       units === "mi" ? "In about a third of a mile" : "In about 500 metres",
     );
   }, [stepProgress, navOpen, units]);
+
+  // Factual discovery cues are returned with route-relative timestamps and share
+  // the same speech channel as turn instructions. Old cached routes simply have no events.
+  useEffect(() => {
+    if (!navOpen || !progress || !result?.narrationEvents?.length) return;
+    if (stepProgress && stepProgress.distanceToManeuverMeters <= 500) return;
+    const elapsedSeconds = Math.max(
+      0,
+      (selectedRoute?.durationSeconds ?? 0) - progress.remainingSeconds,
+    );
+    const event = result.narrationEvents.find((candidate, index) => {
+      const key = `discovery-${index}`;
+      return (
+        !spokenRef.current.has(key) &&
+        elapsedSeconds >= Math.max(0, candidate.atSeconds - 30) &&
+        elapsedSeconds <= candidate.atSeconds + 60
+      );
+    });
+    if (!event) return;
+    const index = result.narrationEvents.indexOf(event);
+    spokenRef.current.add(`discovery-${index}`);
+    speak(event.text);
+    // `speak` intentionally reads the current voice settings; making it a dependency
+    // would reschedule discovery cues on every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [navOpen, progress, result, selectedRoute?.durationSeconds, stepProgress]);
 
   // Mark route as completed when the user reaches (or nearly reaches) the destination while navigating.
   useEffect(() => {
@@ -2162,6 +2231,31 @@ function PlanPage() {
                         "Maximum duration",
                         `${result.scoringDiagnostics.maximumAllowedDurationSeconds} sec`,
                       ],
+                      [
+                        "Fastest duration",
+                        `${result.scoringDiagnostics.fastestDurationMinutes} min`,
+                      ],
+                      [
+                        "Selected duration",
+                        `${result.scoringDiagnostics.selectedDurationMinutes} min`,
+                      ],
+                      [
+                        "Measured extra",
+                        `${result.scoringDiagnostics.selectedMeasuredExtraMinutes} min`,
+                      ],
+                      [
+                        "Map displayed duration",
+                        `${Math.round((selectedRoute?.durationSeconds ?? 0) / 60)} min`,
+                      ],
+                      [
+                        "Route identity",
+                        `${result.scoringDiagnostics.routeIdentityFingerprint}${
+                          selectedRoute?.identityFingerprint ===
+                          result.scoringDiagnostics.routeIdentityFingerprint
+                            ? " · matched"
+                            : " · mismatch"
+                        }`,
+                      ],
                       ["Corridor samples", result.scoringDiagnostics.corridorSampleCount],
                       ["Verified places found", result.scoringDiagnostics.deduplicatedPlaceCount],
                       [
@@ -2241,10 +2335,11 @@ function PlanPage() {
             ) : points.length > 0 ? (
               <>
                 <ScenicMap
+                  key={`plan-${selectedRoute?.identityFingerprint ?? "empty"}`}
                   points={points}
-                  encodedPolyline={result?.directions?.encodedPolyline}
-                  routeDistanceMeters={result?.directions?.distanceMeters}
-                  routeDurationSeconds={result?.directions?.durationSeconds}
+                  encodedPolyline={selectedRoute?.encodedPolyline}
+                  routeDistanceMeters={selectedRoute?.distanceMeters}
+                  routeDurationSeconds={selectedRoute?.durationSeconds}
                   onProgress={setProgress}
                   className="h-full w-full"
                   onError={(m) => setMapError(m)}
@@ -2371,6 +2466,11 @@ function PlanPage() {
                     )}
                   </div>
                 )}
+                {result && (!progress || !progress.onRoute) && selectedRoute && (
+                  <div className="absolute bottom-4 left-4 rounded-xl border border-border bg-background/95 px-3 py-2 text-xs shadow-paper">
+                    ETA {formatEta(mapRemainingDurationSeconds(selectedRoute.durationSeconds))}
+                  </div>
+                )}
               </>
             ) : (
               <div className="flex h-full flex-col items-center justify-center gap-3 text-center text-muted-foreground">
@@ -2467,10 +2567,11 @@ function PlanPage() {
                       </div>
                     ) : (
                       <ScenicMap
+                        key={`navigation-${selectedRoute?.identityFingerprint ?? "empty"}`}
                         points={points}
-                        encodedPolyline={result?.directions?.encodedPolyline}
-                        routeDistanceMeters={result?.directions?.distanceMeters}
-                        routeDurationSeconds={result?.directions?.durationSeconds}
+                        encodedPolyline={selectedRoute?.encodedPolyline}
+                        routeDistanceMeters={selectedRoute?.distanceMeters}
+                        routeDurationSeconds={selectedRoute?.durationSeconds}
                         onProgress={setProgress}
                         className="h-full w-full"
                         onError={() =>
@@ -2651,16 +2752,32 @@ function PlanPage() {
               <div className="grid gap-6 md:grid-cols-2">
                 <div>
                   <h3 className="font-serif text-sm font-semibold uppercase tracking-widest text-muted-foreground">
-                    Highlights
+                    Journey timeline
                   </h3>
-                  <ul className="mt-3 space-y-2">
-                    {result.highlights.map((h, i) => (
-                      <li key={i} className="flex gap-2 text-sm">
-                        <span className="font-serif text-primary">·</span>
-                        <span>{h}</span>
-                      </li>
-                    ))}
-                  </ul>
+                  {result.journeyTimeline?.length ? (
+                    <ol className="mt-3 space-y-3">
+                      {result.journeyTimeline.map((event, i) => (
+                        <li key={`${event.name}-${i}`} className="flex gap-3 text-sm">
+                          <span className="min-w-14 font-medium text-primary">
+                            {Math.max(1, Math.round(event.atSeconds / 60))} min
+                          </span>
+                          <span>
+                            <strong className="block text-ink">{event.name}</strong>
+                            <span className="text-muted-foreground">{event.description}</span>
+                          </span>
+                        </li>
+                      ))}
+                    </ol>
+                  ) : (
+                    <ul className="mt-3 space-y-2">
+                      {result.highlights.map((h, i) => (
+                        <li key={i} className="flex gap-2 text-sm">
+                          <span className="font-serif text-primary">·</span>
+                          <span>{h}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
                 </div>
                 <div>
                   <h3 className="font-serif text-sm font-semibold uppercase tracking-widest text-muted-foreground">

@@ -6,6 +6,7 @@ import {
   selectRouteUpgradeCandidate,
   upgradeOverrunToleranceSeconds,
 } from "./route-upgrade";
+import { selectedRoutePresentation } from "./route-presentation";
 import type { ScenicScoreResult } from "./scenic-score";
 import { EMPTY_SCENIC_EVIDENCE } from "./scenic-waypoint";
 
@@ -104,11 +105,37 @@ describe("route upgrade selection", () => {
 
   it("applies a retained payload without invoking another generation", () => {
     const generationCount = 0;
-    const current = { scenic_score: 60, directions: { encodedPolyline: "current" } };
-    const payload = { scenic_score: 68, directions: { encodedPolyline: "upgrade" } };
+    const current = {
+      scenic_score: 60,
+      selectedRouteDurationSeconds: 22_860,
+      directions: {
+        encodedPolyline: "current",
+        durationSeconds: 22_860,
+        distanceMeters: 100_000,
+        steps: [{ instruction: "Current step" }],
+      },
+    };
+    const payload = {
+      scenic_score: 68,
+      selectedRouteDurationSeconds: 25_740,
+      directions: {
+        encodedPolyline: "upgrade",
+        durationSeconds: 25_740,
+        distanceMeters: 120_000,
+        steps: [{ instruction: "Upgrade step" }],
+      },
+    };
     const result = applyRetainedRouteUpgrade(current, payload);
     assert.equal(result.scenic_score, 68);
     assert.equal(result.directions.encodedPolyline, "upgrade");
+    assert.equal(result.selectedRouteDurationSeconds, 25_740);
+    assert.equal(result.directions.durationSeconds, 25_740);
+    assert.equal(result.directions.distanceMeters, 120_000);
+    assert.equal(result.directions.steps[0].instruction, "Upgrade step");
+    const mapAndNavigation = selectedRoutePresentation(result);
+    assert.equal(mapAndNavigation?.durationSeconds, 25_740);
+    assert.equal(mapAndNavigation?.distanceMeters, 120_000);
+    assert.equal(mapAndNavigation?.steps[0].instruction, "Upgrade step");
     assert.equal(generationCount, 0);
   });
 });
