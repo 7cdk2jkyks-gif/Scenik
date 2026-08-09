@@ -4,6 +4,7 @@ import {
   mapRemainingDurationSeconds,
   selectedRouteDurationSeconds,
   selectedRoutePresentation,
+  timeBudgetExplanation,
 } from "./route-presentation";
 
 function result(selectedMinutes: number, polyline: string) {
@@ -43,5 +44,17 @@ describe("selected route presentation", () => {
 
   it("supports legacy routes with only the older duration field", () => {
     assert.equal(selectedRouteDurationSeconds({ directions: { duration: "6 hr 21 min" } }), 22_860);
+  });
+
+  it("explains strong, balanced and low allowance utilisation without implying failure", () => {
+    assert.equal(
+      timeBudgetExplanation(48 * 60, 60).explanation,
+      "Your larger allowance unlocked this route.",
+    );
+    assert.equal(
+      timeBudgetExplanation(30 * 60, 60).explanation,
+      "This was the best balance of scenery and journey time.",
+    );
+    assert.match(timeBudgetExplanation(18 * 60, 60).explanation, /longer options didn’t improve/);
   });
 });

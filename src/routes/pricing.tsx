@@ -268,7 +268,7 @@ function PricingPage() {
   }
 
   return (
-    <div className="min-h-screen">
+    <div className="app-screen">
       <PaymentTestModeBanner />
       <header className="mx-auto flex max-w-6xl items-center justify-between px-4 py-5 sm:px-6 sm:py-6">
         <Link to="/" className="flex items-center gap-2">

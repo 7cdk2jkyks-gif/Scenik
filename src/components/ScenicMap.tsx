@@ -200,6 +200,18 @@ export function ScenicMap({
   onLocationTickRef.current = onLocationTick;
   const onUserLocationChangeRef = useRef(onUserLocationChange);
   onUserLocationChangeRef.current = onUserLocationChange;
+  const onErrorRef = useRef(onError);
+  onErrorRef.current = onError;
+  const onLocationStatusRef = useRef(onLocationStatus);
+  onLocationStatusRef.current = onLocationStatus;
+  const initialUserLocationRef = useRef(initialUserLocation);
+  initialUserLocationRef.current = initialUserLocation;
+  const pointsRef = useRef(points);
+  pointsRef.current = points;
+  const reportsRef = useRef(reports);
+  reportsRef.current = reports;
+  const alternateRoutesRef = useRef(alternateRoutes);
+  alternateRoutesRef.current = alternateRoutes;
   const lastTickAtRef = useRef<number>(0);
   // GPS smoothing state
   const smoothedRef = useRef<{ lat: number; lng: number; accuracy: number; t: number } | null>(
@@ -208,6 +220,9 @@ export function ScenicMap({
   const lastDisplayRef = useRef<LatLngLiteral | null>(null);
   const animFrameRef = useRef<number | null>(null);
   const [mapReady, setMapReady] = useState(false);
+  const pointsKey = points
+    .map((point) => `${point.kind ?? "waypoint"}:${point.lat}:${point.lng}:${point.label ?? ""}`)
+    .join("|");
 
   useEffect(() => {
     let cancelled = false;
@@ -252,11 +267,11 @@ export function ScenicMap({
         // When entering nav mode with a known last position, boot the map
         // already centred+zoomed on the user so there's no visible camera jump.
         const knownUserLocation =
-          lastDisplayRef.current ?? latestKnownUserLocation ?? initialUserLocation;
+          lastDisplayRef.current ?? latestKnownUserLocation ?? initialUserLocationRef.current;
         const bootAtUser = navModeRef.current && knownUserLocation;
         const center = bootAtUser
           ? knownUserLocation!
-          : (points[0] ?? { lat: 37.7749, lng: -122.4194 });
+          : (pointsRef.current[0] ?? { lat: 37.7749, lng: -122.4194 });
         const map = new g.maps.Map(ref.current, {
           center: { lat: center.lat, lng: center.lng },
           zoom: navModeRef.current ? 17 : 8,
@@ -282,11 +297,12 @@ export function ScenicMap({
         });
         mapRef.current = map;
 
-        if (points.length > 0) {
+        const mapPoints = pointsRef.current;
+        if (mapPoints.length > 0) {
           const bounds = new g.maps.LatLngBounds();
-          points.forEach((p) => bounds.extend({ lat: p.lat, lng: p.lng }));
+          mapPoints.forEach((p) => bounds.extend({ lat: p.lat, lng: p.lng }));
 
-          points.forEach((p, i) => {
+          mapPoints.forEach((p, i) => {
             const isStart = p.kind === "start";
             const isEnd = p.kind === "end";
             const m = new g.maps.Marker({
@@ -358,7 +374,7 @@ export function ScenicMap({
                 zIndex: 51,
               }) as { setMap: (m: unknown | null) => void; setPath?: (p: LatLngLiteral[]) => void };
             } catch {
-              onError?.("Unable to draw route on map.");
+              onErrorRef.current?.("Unable to draw route on map.");
             }
           }
 
@@ -370,7 +386,7 @@ export function ScenicMap({
       })
       .catch((err) => {
         console.error(err);
-        onError?.("Unable to load map. Please try again.");
+        onErrorRef.current?.("Unable to load map. Please try again.");
       });
 
     return () => {
@@ -389,20 +405,20 @@ export function ScenicMap({
       setMapReady(false);
       mapRef.current = null;
     };
-  }, [JSON.stringify(points), encodedPolyline, offline]);
+  }, [pointsKey, encodedPolyline, offline]);
 
   // User location tracking — start the browser GPS watch as soon as the caller
   // asks for location, even if Google Maps is still loading.
   useEffect(() => {
     if (!showUserLocation) return;
     if (typeof navigator === "undefined" || !navigator.geolocation) {
-      onLocationStatus?.("unsupported", "Location is not supported on this device.");
+      onLocationStatusRef.current?.("unsupported", "Location is not supported on this device.");
       return;
     }
 
     let watchId: number | null = null;
     let firstFix = true;
-    const hasRoute = points.length > 0;
+    const hasRoute = pointsRef.current.length > 0;
     noRoutePannedRef.current = false;
 
     const updatePosition = (pos: GeolocationPosition) => {
@@ -443,7 +459,7 @@ export function ScenicMap({
 
       if (firstFix) {
         firstFix = false;
-        onLocationStatus?.("granted");
+        onLocationStatusRef.current?.("granted");
       }
 
       // Notify callers immediately on GPS fixes, even while the map is still booting.
@@ -614,39 +630,42 @@ export function ScenicMap({
           permQuery
             .then((status) => {
               if (status.state === "denied") {
-                onLocationStatus?.(
+                onLocationStatusRef.current?.(
                   "denied",
                   "Location permission is blocked for this site. Enable it in your browser's site settings, then tap Try again.",
                 );
               } else {
-                onLocationStatus?.(
+                onLocationStatusRef.current?.(
                   "denied",
                   "This page couldn't access your location. If you're viewing Scenik inside a preview or embed, open it in a new tab and try again.",
                 );
               }
             })
             .catch(() =>
-              onLocationStatus?.(
+              onLocationStatusRef.current?.(
                 "denied",
                 "Location permission was denied. Tap Try again to request it once more.",
               ),
             );
         } else {
-          onLocationStatus?.(
+          onLocationStatusRef.current?.(
             "denied",
             "Location permission was denied. Tap Try again to request it once more.",
           );
         }
       } else if (err.code === err.POSITION_UNAVAILABLE) {
-        onLocationStatus?.("error", "Your location is unavailable right now. Tap Try again.");
+        onLocationStatusRef.current?.(
+          "error",
+          "Your location is unavailable right now. Tap Try again.",
+        );
       } else if (err.code === err.TIMEOUT) {
-        onLocationStatus?.("error", "Locating you took too long. Tap Try again.");
+        onLocationStatusRef.current?.("error", "Locating you took too long. Tap Try again.");
       } else {
-        onLocationStatus?.("error", "Unable to access your location. Tap Try again.");
+        onLocationStatusRef.current?.("error", "Unable to access your location. Tap Try again.");
       }
     };
 
-    onLocationStatus?.("prompt");
+    onLocationStatusRef.current?.("prompt");
     watchId = navigator.geolocation.watchPosition(updatePosition, handleError, {
       enableHighAccuracy: true,
       maximumAge: 1000,
@@ -664,13 +683,13 @@ export function ScenicMap({
       smoothedRef.current = null;
       lastDisplayRef.current = null;
     };
-  }, [showUserLocation, points.length === 0, locationRetryKey]);
+  }, [showUserLocation, pointsKey, locationRetryKey]);
 
   // If GPS returns before the map is ready, paint the latest fix immediately
   // once the map exists instead of waiting for the next watchPosition tick.
   useEffect(() => {
     if (!showUserLocation || !mapReady || !mapRef.current || !window.google) return;
-    const pt = lastDisplayRef.current ?? latestKnownUserLocation ?? initialUserLocation;
+    const pt = lastDisplayRef.current ?? latestKnownUserLocation ?? initialUserLocationRef.current;
     if (!pt || userMarkerRef.current) return;
     const g = window.google;
     const map = mapRef.current;
@@ -735,7 +754,7 @@ export function ScenicMap({
     if (cameraInitRef.current) return;
     // If any map instance already has a location fix, jump instantly.
     const knownUserLocation =
-      lastDisplayRef.current ?? latestKnownUserLocation ?? initialUserLocation;
+      lastDisplayRef.current ?? latestKnownUserLocation ?? initialUserLocationRef.current;
     if (knownUserLocation) {
       cameraInitRef.current = true;
       mapRef.current.setCenter(knownUserLocation);
@@ -839,7 +858,7 @@ export function ScenicMap({
       works: "🚧",
       hazard: "⚠️",
     };
-    reports.forEach((r) => {
+    reportsRef.current.forEach((r) => {
       const m = new g.maps.Marker({
         map,
         position: { lat: r.lat, lng: r.lng },
@@ -901,7 +920,7 @@ export function ScenicMap({
     const g = window.google;
     const map = mapRef.current;
     const lines: Array<{ setMap: (m: unknown | null) => void }> = [];
-    alternateRoutes.forEach((alt) => {
+    alternateRoutesRef.current.forEach((alt) => {
       try {
         const path = g.maps.geometry!.encoding.decodePath(alt.encodedPolyline);
         const latLngs = path.map((p) => ({ lat: p.lat(), lng: p.lng() }));

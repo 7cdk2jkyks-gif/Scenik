@@ -9,7 +9,6 @@ import {
   recomputeDirections,
   fetchSpeedLimit,
   reverseGeocode,
-  waypointFacts,
   recommendThemesFn,
 } from "@/lib/routes.functions";
 import { reverseGeocodeInBrowser } from "@/lib/google-maps-loader";
@@ -94,6 +93,11 @@ import {
   Heart,
   Sparkles,
   Shuffle,
+  Share2,
+  Compass,
+  MapPinned,
+  Star,
+  Award,
 } from "lucide-react";
 import { Checkbox } from "@/components/ui/checkbox";
 import { formatDistance, formatSpeed, useUnits } from "@/lib/units";
@@ -104,12 +108,35 @@ import { saveLastPlan, loadLastPlan } from "@/lib/offline-cache";
 import { OfflineBanner } from "@/components/OfflineBanner";
 import { getFastLocation } from "@/lib/geolocation";
 import { getPlatform, isNativePlatform } from "@/lib/native";
+import { playHaptic } from "@/lib/haptics";
 import { OfflineUpgradeBanner } from "@/components/OfflineUpgradeBanner";
 import { LocationDisclosure } from "@/components/LocationDisclosure";
 import { useSubscription } from "@/hooks/useSubscription";
 import { normalizeVisibleCategories } from "@/lib/scenic-score";
 import { applyRetainedRouteUpgrade } from "@/lib/route-upgrade";
-import { mapRemainingDurationSeconds, selectedRoutePresentation } from "@/lib/route-presentation";
+import {
+  mapRemainingDurationSeconds,
+  selectedRoutePresentation,
+  timeBudgetExplanation,
+} from "@/lib/route-presentation";
+import { journeyEvidenceLine } from "@/lib/journey-naming";
+import { JOURNEY_REVEAL_STAGE_COUNT, journeyRevealDelays } from "@/lib/journey-reveal";
+import { discoveryPresentationState, rankJourneyDiscoveries } from "@/lib/journey-timeline";
+import { beginArrivalTracking, observeArrival } from "@/lib/journey-completion";
+import {
+  applyJourneyCompletion,
+  loadAchievementProgress,
+  saveAchievementProgress,
+  type JourneyAchievement,
+} from "@/lib/journey-achievements";
+import { buildJourneySummary, type JourneySummary } from "@/lib/journey-summary";
+import {
+  loadNarrationPreferences,
+  selectNarrationEvent,
+  selectSpeechVoice,
+  speechTuning,
+  type NarrationPreferences,
+} from "@/lib/scenic-narration";
 
 type Rating = "excellent" | "average" | "poor";
 const MISSING_OPTIONS = [
@@ -419,13 +446,47 @@ const GEO_RESTRICTED_THEMES = new Set<string>(["Coastal", "Mountain", "Waterfall
 type PlanResult = Awaited<ReturnType<typeof planScenicRoute>>;
 
 const LOADING_STAGES = [
-  "Finding scenic roads…",
-  "Comparing route options…",
-  "Matching your mood…",
-  "Scoring your drive…",
-  "Naming your journey…",
-  "Almost ready…",
+  "Tracing the fastest route",
+  "Exploring scenic corridors",
+  "Verifying discoveries",
+  "Comparing journey options",
+  "Composing your journey",
+  "Preparing the road ahead",
 ];
+
+function revealClass(visible: boolean) {
+  return visible
+    ? "translate-y-0 scale-100 opacity-100"
+    : "pointer-events-none translate-y-2 scale-[0.99] opacity-0";
+}
+
+function JourneyLoadingExperience({ stage }: { stage: number }) {
+  return (
+    <div className="flex h-full min-h-72 flex-col items-center justify-center px-6 text-center">
+      <div className="relative flex h-20 w-20 items-center justify-center">
+        <div className="absolute inset-0 animate-ping rounded-full bg-primary/10 motion-reduce:animate-none" />
+        <div className="absolute inset-2 animate-pulse rounded-full border border-primary/30 bg-background motion-reduce:animate-none" />
+        <Compass className="relative h-8 w-8 animate-[spin_8s_linear_infinite] text-primary motion-reduce:animate-none" />
+      </div>
+      <p className="mt-5 font-serif text-xl font-semibold text-ink" aria-live="polite">
+        {LOADING_STAGES[stage]}
+      </p>
+      <div className="mt-5 flex gap-2" aria-hidden="true">
+        {LOADING_STAGES.map((_, index) => (
+          <span
+            key={index}
+            className={`h-1.5 rounded-full transition-all duration-500 ${
+              index <= stage ? "w-7 bg-primary" : "w-2 bg-border"
+            }`}
+          />
+        ))}
+      </div>
+      <p className="mt-4 max-w-sm text-xs leading-relaxed text-muted-foreground">
+        Scenik is comparing verified places, route character and your time allowance.
+      </p>
+    </div>
+  );
+}
 
 function scoreLabel(score: number) {
   if (score >= 90) return "Exceptional";
@@ -434,6 +495,26 @@ function scoreLabel(score: number) {
   if (score >= 60) return "Good";
   if (score >= 40) return "Fair";
   return "Limited";
+}
+
+function journeyTimeLabel(seconds: number) {
+  const minutes = Math.max(1, Math.round(seconds / 60));
+  const hours = Math.floor(minutes / 60);
+  const remainder = minutes % 60;
+  if (hours === 0) return `${minutes} min`;
+  return remainder === 0 ? `${hours} hr` : `${hours} hr ${remainder} min`;
+}
+
+function completedDurationLabel(seconds: number) {
+  const minutes = Math.max(0, Math.round(seconds / 60));
+  const hours = Math.floor(minutes / 60);
+  const remainder = minutes % 60;
+  if (hours === 0) return `${remainder} min`;
+  return `${hours} hr ${remainder.toString().padStart(2, "0")} min`;
+}
+
+function journeyEndpointLabel(address: string, fallback: string) {
+  return address.split(",")[0]?.trim() || fallback;
 }
 
 function scoreBarClass(percentage: number) {
@@ -463,7 +544,6 @@ function PlanPage() {
   const createReportFn = useServerFn(createRoadReport);
   const listReportsFn = useServerFn(listRoadReports);
   const deleteReportFn = useServerFn(deleteRoadReport);
-  const waypointFactsFn = useServerFn(waypointFacts);
   const recommendThemesServer = useServerFn(recommendThemesFn);
 
   const [start, setStart] = useState("");
@@ -478,7 +558,45 @@ function PlanPage() {
   const [themes, setThemes] = useState<string[]>([]);
   const [extra, setExtra] = useState(30);
   const [result, setResult] = useState<PlanResult | null>(null);
+  const [journeyIntroOpen, setJourneyIntroOpen] = useState(false);
+  const [revealStage, setRevealStage] = useState(JOURNEY_REVEAL_STAGE_COUNT - 1);
   const selectedRoute = useMemo(() => selectedRoutePresentation(result), [result]);
+  const selectedRouteIdentity = selectedRoute?.identityFingerprint;
+  const budgetExplanation = useMemo(
+    () =>
+      result
+        ? timeBudgetExplanation(
+            result.measuredExtraTimeSeconds,
+            result.extra_minutes,
+            result.explorationExhausted,
+          )
+        : null,
+    [result],
+  );
+  const evidenceLine = useMemo(
+    () =>
+      result
+        ? journeyEvidenceLine({
+            evidence: result.evidenceSummary?.counts,
+            themes: result.theme,
+            discoveries: result.journeyTimeline,
+          })
+        : "",
+    [result],
+  );
+  const topDiscoveries = useMemo(
+    () =>
+      rankJourneyDiscoveries(
+        result?.journeyTimeline,
+        { moods: result?.mood, themes: result?.theme },
+        4,
+      ),
+    [result],
+  );
+  const discoveryPresentation = useMemo(
+    () => discoveryPresentationState(result?.journeyTimeline, result?.highlights),
+    [result],
+  );
   const [routeSummary, setRouteSummary] = useState<RouteSummary | null>(null);
   const [navOpen, setNavOpen] = useState(false);
   const [mapError, setMapError] = useState<string | null>(null);
@@ -494,6 +612,9 @@ function PlanPage() {
   const [progress, setProgress] = useState<RouteProgress | null>(null);
   const [stepProgress, setStepProgress] = useState<StepProgress | null>(null);
   const [voiceOn, setVoiceOn] = useState(true);
+  const [narrationPreferences, setNarrationPreferences] = useState<NarrationPreferences>(() =>
+    loadNarrationPreferences(typeof window === "undefined" ? null : window.localStorage),
+  );
   const [rerouting, setRerouting] = useState(false);
   const [showTraffic, setShowTraffic] = useState(true);
   const [reportTarget, setReportTarget] = useState<{ lat: number; lng: number } | null>(null);
@@ -583,13 +704,18 @@ function PlanPage() {
   }
 
   const [waypointFact, setWaypointFact] = useState<{ name: string; text: string } | null>(null);
-  const visitedWpRef = useRef<Set<number>>(new Set());
   const spokenRef = useRef<Set<string>>(new Set());
+  const narrationSpokenRef = useRef<Set<string>>(new Set());
+  const lastNarrationAtRef = useRef<number | null>(null);
+  const speechKindRef = useRef<"navigation" | "narration" | null>(null);
   const lastStepIdxRef = useRef<number>(-1);
   const warmVoiceRef = useRef<SpeechSynthesisVoice | null>(null);
   const altCheckingRef = useRef(false);
   const resultRef = useRef<HTMLDivElement | null>(null);
   const [routeCompleted, setRouteCompleted] = useState(false);
+  const [completionSummary, setCompletionSummary] = useState<JourneySummary | null>(null);
+  const [unlockedAchievements, setUnlockedAchievements] = useState<JourneyAchievement[]>([]);
+  const arrivalRef = useRef(beginArrivalTracking(""));
   const [loadingStage, setLoadingStage] = useState(0);
 
   useEffect(() => {
@@ -597,8 +723,12 @@ function PlanPage() {
     setStepProgress(null);
     setAltOffer(null);
     setRouteCompleted(false);
+    setCompletionSummary(null);
+    setUnlockedAchievements([]);
+    arrivalRef.current = beginArrivalTracking(selectedRoute?.identityFingerprint ?? "");
     spokenRef.current = new Set();
-    visitedWpRef.current = new Set();
+    narrationSpokenRef.current = new Set();
+    lastNarrationAtRef.current = null;
     lastStepIdxRef.current = -1;
   }, [selectedRoute?.identityFingerprint]);
 
@@ -609,6 +739,28 @@ function PlanPage() {
   const online = useOnlineStatus();
   const { data: subData } = useSubscription();
   const isPremium = !!subData?.isPremium;
+  const effectiveNarrationMode =
+    narrationPreferences.mode === "full" && !isPremium ? "highlights" : narrationPreferences.mode;
+  const elapsedNavigationSeconds =
+    progress && selectedRoute
+      ? Math.max(0, selectedRoute.durationSeconds - progress.remainingSeconds)
+      : 0;
+  const nextDiscovery = useMemo(() => {
+    if (effectiveNarrationMode === "off" || !progress || !result?.narrationEvents?.length)
+      return null;
+    return (
+      result.narrationEvents
+        .filter((event, index) => {
+          const id = event.identity || `event-${index}`;
+          return (
+            !event.hasBeenSpoken &&
+            !narrationSpokenRef.current.has(id) &&
+            event.atSeconds >= elapsedNavigationSeconds
+          );
+        })
+        .sort((a, b) => a.atSeconds - b.atSeconds)[0] ?? null
+    );
+  }, [effectiveNarrationMode, elapsedNavigationSeconds, progress, result]);
   const offlineActive = !online && isPremium;
 
   // Hydrate from offline cache on first mount so navigation keeps working
@@ -809,50 +961,30 @@ function PlanPage() {
     }
   }
 
-  // Pick a warm, natural-sounding voice in the user's chosen language.
-  // We prefer modern neural / premium voices and fall back to classic warm defaults.
+  useEffect(() => {
+    const syncPreferences = () => setNarrationPreferences(loadNarrationPreferences(localStorage));
+    window.addEventListener("storage", syncPreferences);
+    return () => window.removeEventListener("storage", syncPreferences);
+  }, []);
+
+  // Prefer a high-quality local voice in the device locale, while allowing every
+  // platform to fall back to its own default voice inventory.
   useEffect(() => {
     if (typeof window === "undefined" || !("speechSynthesis" in window)) return;
     const pick = () => {
       const voices = window.speechSynthesis.getVoices();
-      if (!voices.length) return;
-      const prefix = "en";
-      const inLang = voices.filter((v) => v.lang?.toLowerCase().startsWith(prefix));
-      const pool = inLang.length ? inLang : voices;
-
-      // Higher score = more natural / likeable. Prefer neural, premium, enhanced voices.
-      const score = (v: SpeechSynthesisVoice) => {
-        const name = v.name.toLowerCase();
-        let s = 0;
-        if (/neural|premium|enhanced|wavenet|natural/.test(name)) s += 40;
-        if (/google uk english female|google us english/.test(name)) s += 30;
-        if (/samantha|karen|moira|serena|tessa|joanna|allison/.test(name)) s += 25;
-        if (
-          /microsoft aria|microsoft jenny|microsoft sonia|microsoft ana|microsoft michelle/.test(
-            name,
-          )
-        )
-          s += 20;
-        if (/female/.test(name)) s += 5;
-        if (/male/.test(name)) s -= 2;
-        // Deprioritise clearly robotic / default voices
-        if (/default|zira|david|mark|fred/.test(name)) s -= 15;
-        return s;
-      };
-
-      const sorted = [...pool].sort((a, b) => score(b) - score(a));
-      warmVoiceRef.current = sorted[0] ?? voices[0] ?? null;
+      warmVoiceRef.current = selectSpeechVoice(
+        voices,
+        navigator.language || "en-US",
+        narrationPreferences.voice,
+      );
     };
     pick();
-    window.speechSynthesis.onvoiceschanged = pick;
+    window.speechSynthesis.addEventListener?.("voiceschanged", pick);
     return () => {
-      try {
-        window.speechSynthesis.onvoiceschanged = null;
-      } catch {
-        /* noop */
-      }
+      window.speechSynthesis.removeEventListener?.("voiceschanged", pick);
     };
-  }, []);
+  }, [narrationPreferences.voice]);
 
   const searchesQuery = useQuery({
     queryKey: ["saved-searches"],
@@ -1013,6 +1145,7 @@ function PlanPage() {
       ]);
     },
     onSuccess: (r, vars) => {
+      void playHaptic("success");
       console.log("[Route] API response status: ok");
       setPlanError(null);
       setRouteSummary(
@@ -1026,8 +1159,8 @@ function PlanPage() {
       );
       setProgress(null);
       setResult(r);
+      setJourneyIntroOpen(true);
       setRouteCompleted(false);
-      visitedWpRef.current = new Set();
       spokenRef.current = new Set();
       setWaypointFact(null);
       capture(AnalyticsEvent.RouteGenerated, {
@@ -1117,6 +1250,25 @@ function PlanPage() {
     return () => window.clearInterval(timer);
   }, [plan.isPending]);
 
+  useEffect(() => {
+    if (!selectedRouteIdentity) return;
+    const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const delays = journeyRevealDelays(reducedMotion);
+    if (delays.length === 0) {
+      setRevealStage(JOURNEY_REVEAL_STAGE_COUNT - 1);
+      return;
+    }
+
+    setRevealStage(0);
+    const timers = delays.map((delay, index) =>
+      window.setTimeout(() => {
+        const nextStage = index + 1;
+        setRevealStage(nextStage);
+      }, delay),
+    );
+    return () => timers.forEach((timer) => window.clearTimeout(timer));
+  }, [selectedRouteIdentity]);
+
   const save = useMutation({
     mutationFn: async () => {
       if (!result) throw new Error("Nothing to save");
@@ -1140,6 +1292,7 @@ function PlanPage() {
       });
     },
     onSuccess: (saved) => {
+      void playHaptic("save");
       capture(AnalyticsEvent.RouteSaved, {
         route_id: (saved as { id?: string })?.id,
         title: result?.title,
@@ -1179,6 +1332,7 @@ function PlanPage() {
     });
     setProgress(null);
     setRouteCompleted(false);
+    void playHaptic("selection");
     toast.success("Better route selected");
   }
 
@@ -1192,12 +1346,30 @@ function PlanPage() {
     promptLocation("nav");
   }
 
+  async function shareJourney() {
+    if (!result || !selectedRoute || !budgetExplanation) return;
+    const summary = completionSummary ?? buildJourneySummary(result);
+    const text = summary?.shareText ?? `${result.title} · Scenic Score ${result.scenic_score}/100`;
+    try {
+      if (navigator.share) {
+        await navigator.share({ title: summary?.title ?? result.title, text });
+      } else {
+        await navigator.clipboard.writeText(text);
+        toast.success("Journey summary copied");
+      }
+    } catch {
+      /* cancelled or unavailable */
+    }
+  }
+
   function actuallyOpenNav() {
     spokenRef.current = new Set();
-    visitedWpRef.current = new Set();
+    narrationSpokenRef.current = new Set();
+    lastNarrationAtRef.current = null;
     setWaypointFact(null);
     setNavLocGateDismissed(false);
     lastStepIdxRef.current = -1;
+    arrivalRef.current = beginArrivalTracking(selectedRoute?.identityFingerprint ?? "");
     const firstStep = result?.directions?.steps?.[0];
     setStepProgress(
       firstStep
@@ -1226,6 +1398,7 @@ function PlanPage() {
       }
     }
     setNavOpen(true);
+    void playHaptic("start");
     capture(AnalyticsEvent.NavigationStarted, {
       title: result?.title,
       scenic_score: result?.scenic_score,
@@ -1242,10 +1415,15 @@ function PlanPage() {
       });
   }
 
-  function speak(text: string) {
-    if (!voiceOn) return;
-    if (typeof window === "undefined" || !("speechSynthesis" in window)) return;
+  function speak(text: string, kind: "navigation" | "narration" = "navigation") {
+    if (!voiceOn) return false;
+    if (typeof window === "undefined" || !("speechSynthesis" in window)) return false;
     try {
+      if (
+        kind === "narration" &&
+        (speechKindRef.current != null || window.speechSynthesis.speaking)
+      )
+        return false;
       let clean = text
         .replace(/<[^>]+>/g, "")
         .replace(/\s+/g, " ")
@@ -1259,16 +1437,36 @@ function PlanPage() {
 
       const u = new SpeechSynthesisUtterance(clean);
       if (warmVoiceRef.current) u.voice = warmVoiceRef.current;
-      u.rate = 0.96; // natural conversational pace
-      u.pitch = 1.05; // warm, friendly tone without sounding chipmunk
-      u.volume = 1;
-      u.lang = warmVoiceRef.current?.lang ?? "en-US";
-      window.speechSynthesis.cancel();
+      const tuning = speechTuning(narrationPreferences.voice);
+      u.rate = tuning.rate;
+      u.pitch = tuning.pitch;
+      u.volume = kind === "narration" ? narrationPreferences.volume : 1;
+      u.lang = warmVoiceRef.current?.lang ?? navigator.language ?? "en-US";
+      u.onstart = () => {
+        speechKindRef.current = kind;
+      };
+      const clearSpeechState = () => {
+        if (speechKindRef.current === kind) speechKindRef.current = null;
+      };
+      u.onend = clearSpeechState;
+      u.onerror = clearSpeechState;
+      if (kind === "navigation") window.speechSynthesis.cancel();
       if (window.speechSynthesis.paused) window.speechSynthesis.resume();
       window.speechSynthesis.speak(u);
+      return true;
     } catch {
-      /* ignore */
+      return false;
     }
+  }
+
+  function toggleNavigationVoice() {
+    setVoiceOn((enabled) => {
+      if (enabled && typeof window !== "undefined" && "speechSynthesis" in window) {
+        window.speechSynthesis.cancel();
+        speechKindRef.current = null;
+      }
+      return !enabled;
+    });
   }
 
   async function handleReroute(pos: { lat: number; lng: number }) {
@@ -1312,39 +1510,6 @@ function PlanPage() {
     fetchSpeedFn({ data: pos })
       .then((r) => setSpeedKmh(r.kmh))
       .catch(() => setSpeedKmh(null));
-    // Scenic-point facts: when navigating, fire a short guide when we arrive near a waypoint
-    if (result && navOpen && !result.narrationEvents?.length) {
-      const R = 6371000;
-      const toRad = (n: number) => (n * Math.PI) / 180;
-      result.waypoints.forEach((w, idx) => {
-        if (visitedWpRef.current.has(idx)) return;
-        const dLat = toRad(w.lat - pos.lat);
-        const dLng = toRad(w.lng - pos.lng);
-        const a =
-          Math.sin(dLat / 2) ** 2 +
-          Math.cos(toRad(pos.lat)) * Math.cos(toRad(w.lat)) * Math.sin(dLng / 2) ** 2;
-        const dist = 2 * R * Math.asin(Math.sqrt(a));
-        if (dist < 250) {
-          visitedWpRef.current.add(idx);
-          waypointFactsFn({
-            data: {
-              name: w.name,
-              lat: w.lat,
-              lng: w.lng,
-              theme: result.theme,
-              language: "English",
-            },
-          })
-            .then((r) => {
-              setWaypointFact({ name: w.name, text: r.facts });
-              speak(`${w.name}. ${r.facts}`);
-            })
-            .catch(() => {
-              /* silent */
-            });
-        }
-      });
-    }
 
     // Traffic-aware alternates — only while navigating, on route, not currently rerouting
     if (!result || !navOpen || rerouting || altCheckingRef.current) return;
@@ -1441,8 +1606,7 @@ function PlanPage() {
     const cue = (threshold: number, prefix: string) => {
       const key = `${stepIndex}-${threshold}`;
       if (dist <= threshold && !spokenRef.current.has(key)) {
-        spokenRef.current.add(key);
-        speak(`${prefix}, ${instr}`);
+        if (speak(`${prefix}, ${instr}`, "navigation")) spokenRef.current.add(key);
       }
     };
     cue(20, "Okay, now");
@@ -1454,51 +1618,81 @@ function PlanPage() {
       units === "mi" ? 500 : 500,
       units === "mi" ? "In about a third of a mile" : "In about 500 metres",
     );
+    // `speak` reads the latest voice preferences; cue scheduling is driven only by route progress.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [stepProgress, navOpen, units]);
 
-  // Factual discovery cues are returned with route-relative timestamps and share
-  // the same speech channel as turn instructions. Old cached routes simply have no events.
+  // Discovery cues yield to manoeuvres and navigation speech. Stale events are
+  // discarded so a blocked cue never turns into a backlog later in the drive.
   useEffect(() => {
     if (!navOpen || !progress || !result?.narrationEvents?.length) return;
-    if (stepProgress && stepProgress.distanceToManeuverMeters <= 500) return;
     const elapsedSeconds = Math.max(
       0,
       (selectedRoute?.durationSeconds ?? 0) - progress.remainingSeconds,
     );
-    const event = result.narrationEvents.find((candidate, index) => {
-      const key = `discovery-${index}`;
-      return (
-        !spokenRef.current.has(key) &&
-        elapsedSeconds >= Math.max(0, candidate.atSeconds - 30) &&
-        elapsedSeconds <= candidate.atSeconds + 60
-      );
+    const decision = selectNarrationEvent({
+      events: result.narrationEvents,
+      elapsedSeconds,
+      mode: effectiveNarrationMode,
+      spokenEventIds: narrationSpokenRef.current,
+      lastNarrationAtSeconds: lastNarrationAtRef.current,
+      manoeuvreImminent: !!stepProgress && stepProgress.distanceToManeuverMeters <= 700,
+      navigationSpeaking:
+        speechKindRef.current === "navigation" ||
+        (typeof window !== "undefined" && window.speechSynthesis?.speaking),
+      rerouting,
+      navigationCertain: progress.onRoute,
     });
-    if (!event) return;
-    const index = result.narrationEvents.indexOf(event);
-    spokenRef.current.add(`discovery-${index}`);
-    speak(event.text);
-    // `speak` intentionally reads the current voice settings; making it a dependency
-    // would reschedule discovery cues on every render.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [navOpen, progress, result, selectedRoute?.durationSeconds, stepProgress]);
-
-  // Mark route as completed when the user reaches (or nearly reaches) the destination while navigating.
-  useEffect(() => {
-    if (!navOpen || !progress || !progress.onRoute) return;
-    if (progress.percent >= 99 || progress.remainingMeters <= 60) {
-      if (!routeCompleted) {
-        capture(AnalyticsEvent.RouteCompleted, {
-          title: result?.title,
-          scenic_score: result?.scenic_score,
-          completion_percent: Math.round(progress.percent),
-          distance_meters: result?.directions?.distanceMeters ?? null,
-          duration_seconds: result?.directions?.durationSeconds ?? null,
-          waypoint_count: result?.waypoints.length ?? 0,
-        });
-      }
-      setRouteCompleted(true);
+    decision.skippedEventIds.forEach((id) => narrationSpokenRef.current.add(id));
+    if (!decision.event || !decision.eventId) return;
+    if (speak(decision.event.text, "narration")) {
+      narrationSpokenRef.current.add(decision.eventId);
+      lastNarrationAtRef.current = elapsedSeconds;
+      setWaypointFact({
+        name: decision.event.name ?? "Featured discovery",
+        text: decision.event.text,
+      });
     }
-  }, [navOpen, progress, result, routeCompleted]);
+    // `speak` reads the current local voice and volume settings without rescheduling old events.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    effectiveNarrationMode,
+    navOpen,
+    progress,
+    rerouting,
+    result,
+    selectedRoute?.durationSeconds,
+    stepProgress,
+  ]);
+
+  // Mark complete only after this navigation session observes genuine progress and
+  // two consecutive on-route arrival fixes for the currently selected route.
+  useEffect(() => {
+    if (!navOpen || !progress || !result || !selectedRouteIdentity || routeCompleted) return;
+    const next = observeArrival(arrivalRef.current, selectedRouteIdentity, progress);
+    arrivalRef.current = next;
+    if (!next.completed) return;
+
+    const summary = buildJourneySummary(result);
+    if (!summary) return;
+    const achievementResult = applyJourneyCompletion(loadAchievementProgress(userId), {
+      distanceMiles: summary.distanceMeters / 1609.344,
+      discoveries: summary.discoveries,
+    });
+    saveAchievementProgress(userId, achievementResult.progress);
+    setCompletionSummary(summary);
+    setUnlockedAchievements(achievementResult.unlocked);
+    setRouteCompleted(true);
+    capture(AnalyticsEvent.RouteCompleted, {
+      title: summary.title,
+      scenic_score: summary.scenicScore,
+      completion_percent: Math.round(progress.percent),
+      distance_meters: summary.distanceMeters,
+      duration_seconds: summary.durationSeconds,
+      waypoint_count: result.waypoints.length,
+    });
+    void playHaptic("completion");
+  }, [navOpen, progress, result, routeCompleted, selectedRouteIdentity, userId]);
 
   // Route Abandoned: navigation closed before completion.
   const abandonRef = useRef<{ armed: boolean; lastPercent: number }>({
@@ -2057,28 +2251,34 @@ function PlanPage() {
         <div ref={resultRef} className="min-w-0 space-y-6 scroll-mt-24">
           {result && (
             <Card className="min-w-0 border-border bg-card p-4 shadow-paper sm:p-6">
-              <div className="text-[10px] font-medium uppercase tracking-widest text-muted-foreground">
-                {result.mood} · {result.theme} · up to {result.extra_minutes} min
-              </div>
-              <h2 className="mt-1 break-words font-serif text-2xl font-semibold text-ink sm:text-3xl">
-                {result.title}
-              </h2>
-              {result.selectedWinner === "scenik" && (
-                <div className="mt-2 flex flex-wrap items-center gap-2 text-sm">
-                  <span className="rounded-full bg-primary px-3 py-1 font-semibold text-primary-foreground">
-                    ✨ Scenik Recommended
-                  </span>
-                  {result.selectedWaypointReason && (
-                    <span className="text-muted-foreground">
-                      Added because:{" "}
-                      <strong className="text-ink">{result.selectedWaypointReason}</strong>
-                    </span>
-                  )}
+              <div
+                className={`transition-all duration-500 ease-out motion-reduce:transition-none ${revealClass(revealStage >= 0)}`}
+              >
+                <div className="text-[10px] font-semibold uppercase tracking-[0.22em] text-primary">
+                  Today&apos;s journey
                 </div>
-              )}
+                <h2 className="mt-2 break-words font-serif text-3xl font-semibold text-ink sm:text-4xl">
+                  {result.title}
+                </h2>
+                {result.selectedWinner === "scenik" && (
+                  <div className="mt-3 flex flex-wrap items-center gap-2 text-sm">
+                    <span className="rounded-full bg-primary px-3 py-1 font-semibold text-primary-foreground">
+                      ✨ Scenik Recommended
+                    </span>
+                    {result.selectedWaypointReason && (
+                      <span className="text-muted-foreground">
+                        Added because:{" "}
+                        <strong className="text-ink">{result.selectedWaypointReason}</strong>
+                      </span>
+                    )}
+                  </div>
+                )}
+              </div>
 
               <div className="mt-5 rounded-2xl border border-primary/25 bg-background p-4 shadow-paper sm:p-6">
-                <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+                <div
+                  className={`flex flex-col gap-4 transition-all duration-500 ease-out motion-reduce:transition-none sm:flex-row sm:items-center sm:justify-between ${revealClass(revealStage >= 1)}`}
+                >
                   <div>
                     <div className="flex flex-wrap items-end gap-x-2">
                       <span className="font-serif text-6xl font-semibold leading-none text-primary sm:text-7xl">
@@ -2092,9 +2292,12 @@ function PlanPage() {
                       </span>
                     </div>
                   </div>
-                  <p className="max-w-md text-sm leading-relaxed text-muted-foreground">
-                    {result.narrative}
-                  </p>
+                  <div className="max-w-md">
+                    <p className="text-sm font-medium leading-relaxed text-ink">{evidenceLine}</p>
+                    <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
+                      {result.journeyTimeline?.length ?? 0} verified discoveries
+                    </p>
+                  </div>
                 </div>
 
                 {(result.badges?.length ?? 0) > 0 && (
@@ -2109,6 +2312,31 @@ function PlanPage() {
                     ))}
                   </div>
                 )}
+                {selectedRoute && budgetExplanation && (
+                  <div
+                    className={`mt-4 border-t border-border pt-4 transition-all duration-500 ease-out motion-reduce:transition-none ${revealClass(revealStage >= 2)}`}
+                  >
+                    <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1">
+                      <strong className="font-serif text-xl text-ink">
+                        {selectedRoute.duration ||
+                          `${Math.round(selectedRoute.durationSeconds / 60)} min`}
+                      </strong>
+                      <span className="text-sm font-semibold text-primary">
+                        +{budgetExplanation.usedMinutes} min vs fastest
+                      </span>
+                      <span className="text-sm text-muted-foreground">
+                        Your allowance: up to {budgetExplanation.allowanceMinutes} min
+                      </span>
+                    </div>
+                    {budgetExplanation.allowanceMinutes > 0 && (
+                      <p className="mt-2 text-sm text-muted-foreground">
+                        We used {budgetExplanation.usedMinutes} of your{" "}
+                        {budgetExplanation.allowanceMinutes} extra minutes.{" "}
+                        {budgetExplanation.explanation}
+                      </p>
+                    )}
+                  </div>
+                )}
               </div>
 
               {result.score_breakdown &&
@@ -2118,7 +2346,9 @@ function PlanPage() {
                     result.scoring_version === "v3-category-10" ? "ten" : "legacy",
                   );
                   return (
-                    <div className="mt-5 grid gap-3 sm:grid-cols-2">
+                    <div
+                      className={`mt-5 grid gap-3 transition-all duration-500 ease-out motion-reduce:transition-none sm:grid-cols-2 ${revealClass(revealStage >= 5)}`}
+                    >
                       {[
                         ["Natural Beauty", visible.natural_beauty, 10, Leaf, "natural_beauty"],
                         [
@@ -2308,17 +2538,11 @@ function PlanPage() {
             </Card>
           )}
 
-          <div className="relative aspect-[5/4] overflow-hidden rounded-2xl border border-border bg-muted shadow-paper sm:aspect-[16/10]">
+          <div
+            className={`relative aspect-[5/4] overflow-hidden rounded-2xl border border-border bg-muted shadow-paper transition-all duration-700 ease-out motion-reduce:transition-none sm:aspect-[16/10] ${revealClass(!result || revealStage >= 4)}`}
+          >
             {plan.isPending ? (
-              <div className="flex h-full flex-col items-center justify-center gap-3 text-center text-muted-foreground">
-                <Loader2
-                  className="h-10 w-10 animate-spin opacity-60 motion-reduce:animate-none"
-                  strokeWidth={1.5}
-                />
-                <p className="max-w-xs text-sm" aria-live="polite">
-                  {LOADING_STAGES[loadingStage]}
-                </p>
-              </div>
+              <JourneyLoadingExperience stage={loadingStage} />
             ) : plan.isError ? (
               <div className="flex h-full flex-col items-center justify-center gap-3 px-6 text-center text-muted-foreground">
                 <AlertTriangle
@@ -2482,6 +2706,108 @@ function PlanPage() {
             )}
           </div>
 
+          {result && selectedRoute && budgetExplanation && (
+            <Dialog open={journeyIntroOpen} onOpenChange={setJourneyIntroOpen}>
+              <DialogContent className="overflow-hidden border-primary/20 bg-background p-0 sm:max-w-2xl">
+                <div className="relative bg-gradient-to-br from-primary via-primary/90 to-amber-800 px-6 pb-7 pt-10 text-primary-foreground sm:px-9">
+                  <div className="absolute -right-10 -top-12 h-40 w-40 rounded-full bg-white/10 blur-2xl" />
+                  <div
+                    className={`transition-all duration-500 ease-out motion-reduce:transition-none ${revealClass(revealStage >= 0)}`}
+                  >
+                    <p className="text-xs font-semibold uppercase tracking-[0.25em] text-white/75">
+                      Today&apos;s journey
+                    </p>
+                    <DialogTitle className="mt-3 max-w-xl font-serif text-3xl leading-tight sm:text-4xl">
+                      {result.title}
+                    </DialogTitle>
+                  </div>
+                  <div className="mt-6 flex flex-wrap items-end gap-5">
+                    <div
+                      className={`transition-all duration-500 ease-out motion-reduce:transition-none ${revealClass(revealStage >= 1)}`}
+                    >
+                      <div className="flex items-end gap-2">
+                        <div className="font-serif text-5xl font-semibold leading-none">
+                          {result.scenic_score}
+                        </div>
+                        <div className="pb-1 font-serif text-lg text-white/75">/ 100</div>
+                      </div>
+                      <div className="mt-1 text-xs font-medium text-white/85">
+                        {scoreLabel(result.scenic_score)}
+                      </div>
+                    </div>
+                    <div className="h-10 w-px bg-white/25" />
+                    <div
+                      className={`transition-all duration-500 ease-out motion-reduce:transition-none ${revealClass(revealStage >= 2)}`}
+                    >
+                      <div className="font-serif text-xl font-semibold">
+                        {selectedRoute.duration}
+                      </div>
+                      <div className="mt-1 text-xs text-white/75">
+                        +{budgetExplanation.usedMinutes} min vs fastest
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                <div className="space-y-5 px-6 py-6 sm:px-9">
+                  <div
+                    className={`transition-all duration-500 ease-out motion-reduce:transition-none ${revealClass(revealStage >= 2)}`}
+                  >
+                    <p className="text-sm font-medium leading-relaxed text-ink">{evidenceLine}</p>
+                    <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
+                      We used {budgetExplanation.usedMinutes} of your{" "}
+                      {budgetExplanation.allowanceMinutes} extra minutes.{" "}
+                      {budgetExplanation.explanation}
+                    </p>
+                  </div>
+                  {topDiscoveries.length > 0 && (
+                    <div
+                      className={`transition-all duration-500 ease-out motion-reduce:transition-none ${revealClass(revealStage >= 3)}`}
+                    >
+                      <p className="text-xs font-semibold uppercase tracking-widest text-muted-foreground">
+                        {result.journeyTimeline.length} verified discoveries
+                      </p>
+                      <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                        {topDiscoveries.map((discovery, index) => (
+                          <div
+                            key={
+                              discovery.identity ??
+                              `${discovery.name}-${discovery.category}-${index}`
+                            }
+                            className="rounded-2xl border border-border bg-muted/30 p-3 transition duration-300 hover:-translate-y-0.5 hover:shadow-paper"
+                          >
+                            <MapPinned className="h-4 w-4 text-primary" />
+                            <div className="mt-2 font-serif text-sm font-semibold text-ink">
+                              {discovery.name}
+                            </div>
+                            <div className="mt-1 text-[11px] text-muted-foreground">
+                              {discovery.category}
+                            </div>
+                            <div className="mt-2 text-[10px] font-medium text-primary/90">
+                              Around {journeyTimeLabel(discovery.atSeconds)} into your journey
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  <DialogFooter className="gap-2 sm:gap-2">
+                    <Button variant="outline" onClick={() => setJourneyIntroOpen(false)}>
+                      Explore details
+                    </Button>
+                    <Button
+                      onClick={() => {
+                        setJourneyIntroOpen(false);
+                        openNav();
+                      }}
+                    >
+                      <Navigation className="mr-2 h-4 w-4" /> Begin journey
+                    </Button>
+                  </DialogFooter>
+                </div>
+              </DialogContent>
+            </Dialog>
+          )}
+
           {result && (
             <Dialog open={navOpen} onOpenChange={setNavOpen}>
               <DialogContent className="!max-w-none !w-screen !h-[100dvh] !left-0 !top-0 !translate-x-0 !translate-y-0 !rounded-none !p-0 !border-0 !gap-0 flex flex-col overflow-hidden">
@@ -2511,7 +2837,7 @@ function PlanPage() {
                       </div>
                       <button
                         type="button"
-                        onClick={() => setVoiceOn((v) => !v)}
+                        onClick={toggleNavigationVoice}
                         title={voiceOn ? "Mute voice" : "Unmute voice"}
                         className="shrink-0 rounded-full border border-border bg-background p-2 text-ink hover:border-primary/50"
                       >
@@ -2521,6 +2847,28 @@ function PlanPage() {
                           <VolumeX className="h-4 w-4" />
                         )}
                       </button>
+                    </div>
+                  )}
+                  {nextDiscovery && (
+                    <div className="mb-2 ml-0 rounded-xl border border-primary/20 bg-background px-4 py-2.5 shadow-sm sm:ml-8 sm:max-w-sm">
+                      <div className="flex items-center gap-3">
+                        <MapPinned className="h-4 w-4 shrink-0 text-primary" />
+                        <div className="min-w-0 flex-1">
+                          <div className="text-[9px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
+                            Next discovery
+                          </div>
+                          <div className="truncate font-serif text-sm font-semibold text-ink">
+                            {nextDiscovery.name}
+                          </div>
+                        </div>
+                        <span className="shrink-0 text-xs font-semibold text-primary">
+                          {Math.max(
+                            1,
+                            Math.ceil((nextDiscovery.atSeconds - elapsedNavigationSeconds) / 60),
+                          )}{" "}
+                          min
+                        </span>
+                      </div>
                     </div>
                   )}
                   {rerouting && (
@@ -2534,7 +2882,7 @@ function PlanPage() {
                       <MapPin className="mt-0.5 h-5 w-5 shrink-0 text-primary" />
                       <div className="min-w-0 flex-1">
                         <div className="text-[10px] font-medium uppercase tracking-widest text-muted-foreground">
-                          You're arriving at
+                          Discovery ahead
                         </div>
                         <div className="mt-0.5 break-words font-serif text-sm font-semibold text-ink sm:text-base">
                           {waypointFact.name}
@@ -2748,88 +3096,294 @@ function PlanPage() {
           )}
 
           {result && (
-            <Card className="border-border bg-card p-5 shadow-paper sm:p-6">
+            <Card
+              className={`border-border bg-card p-5 shadow-paper transition-all duration-700 ease-out motion-reduce:transition-none sm:p-6 ${revealClass(revealStage >= 6)}`}
+            >
               <div className="grid gap-6 md:grid-cols-2">
                 <div>
                   <h3 className="font-serif text-sm font-semibold uppercase tracking-widest text-muted-foreground">
-                    Journey timeline
+                    The story of your journey
                   </h3>
-                  {result.journeyTimeline?.length ? (
-                    <ol className="mt-3 space-y-3">
-                      {result.journeyTimeline.map((event, i) => (
-                        <li key={`${event.name}-${i}`} className="flex gap-3 text-sm">
-                          <span className="min-w-14 font-medium text-primary">
-                            {Math.max(1, Math.round(event.atSeconds / 60))} min
-                          </span>
-                          <span>
-                            <strong className="block text-ink">{event.name}</strong>
-                            <span className="text-muted-foreground">{event.description}</span>
-                          </span>
-                        </li>
-                      ))}
-                    </ol>
-                  ) : (
-                    <ul className="mt-3 space-y-2">
-                      {result.highlights.map((h, i) => (
-                        <li key={i} className="flex gap-2 text-sm">
-                          <span className="font-serif text-primary">·</span>
-                          <span>{h}</span>
-                        </li>
-                      ))}
-                    </ul>
-                  )}
-                </div>
-                <div>
-                  <h3 className="font-serif text-sm font-semibold uppercase tracking-widest text-muted-foreground">
-                    Waypoints
-                  </h3>
-                  <ol className="mt-3 space-y-3">
-                    {result.waypoints.map((w, i) => (
-                      <li key={i} className="rounded-xl border border-border bg-background p-3">
-                        <div className="flex items-center gap-2">
-                          <span className="flex h-5 w-5 items-center justify-center rounded-full bg-primary text-[10px] font-semibold text-primary-foreground">
+                  <ol className="relative mt-4 space-y-1 before:absolute before:bottom-5 before:left-[15px] before:top-5 before:w-px before:bg-primary/25">
+                    <li className="relative flex gap-4 rounded-2xl p-3">
+                      <span className="relative z-10 flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-primary text-primary-foreground shadow-sm">
+                        <MapPin className="h-3.5 w-3.5" />
+                      </span>
+                      <div className="min-w-0 pb-2">
+                        <span className="text-[10px] font-semibold uppercase tracking-[0.18em] text-primary">
+                          Start
+                        </span>
+                        <div className="font-serif text-base font-semibold text-ink">
+                          {journeyEndpointLabel(result.start.address, "Starting point")}
+                        </div>
+                      </div>
+                    </li>
+                    {discoveryPresentation.hasDiscoveries ? (
+                      result.journeyTimeline.map((event, i) => (
+                        <li
+                          key={event.identity ?? `${event.name}-${event.category}-${i}`}
+                          className="group relative flex gap-4 rounded-2xl p-3 transition duration-300 hover:bg-muted/40"
+                        >
+                          <span className="relative z-10 flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-primary/30 bg-background font-serif text-xs font-semibold text-primary shadow-sm transition group-hover:scale-105">
                             {i + 1}
                           </span>
-                          <span className="font-serif text-base font-semibold text-ink">
-                            {w.name}
-                          </span>
-                        </div>
-                        <p className="mt-1 text-xs text-muted-foreground">{w.description}</p>
+                          <div className="min-w-0 pb-2">
+                            <span className="text-[10px] font-semibold uppercase tracking-[0.18em] text-primary">
+                              {journeyTimeLabel(event.atSeconds)} · Passing
+                            </span>
+                            <strong className="block font-serif text-base text-ink">
+                              {event.name}
+                            </strong>
+                            <span className="text-xs font-medium text-primary/90">
+                              {event.category}
+                            </span>
+                            <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+                              {event.description}
+                            </p>
+                          </div>
+                        </li>
+                      ))
+                    ) : (
+                      <li className="relative ml-12 rounded-xl bg-muted/35 p-3 text-xs leading-relaxed text-muted-foreground">
+                        {discoveryPresentation.legacySummary ?? evidenceLine}
                       </li>
-                    ))}
+                    )}
+                    <li className="relative flex gap-4 rounded-2xl p-3">
+                      <span className="relative z-10 flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-primary bg-background text-primary shadow-sm">
+                        <Check className="h-3.5 w-3.5" />
+                      </span>
+                      <div className="min-w-0">
+                        <span className="text-[10px] font-semibold uppercase tracking-[0.18em] text-primary">
+                          Arrival
+                        </span>
+                        <div className="font-serif text-base font-semibold text-ink">
+                          {journeyEndpointLabel(result.end.address, "Destination")}
+                        </div>
+                      </div>
+                    </li>
                   </ol>
+                </div>
+                <div>
+                  {discoveryPresentation.showDiscoveryHeading ? (
+                    <>
+                      <h3 className="font-serif text-sm font-semibold uppercase tracking-widest text-muted-foreground">
+                        Featured discoveries
+                      </h3>
+                      <div className="mt-4 space-y-3">
+                        {result.journeyTimeline.map((place, i) => (
+                          <article
+                            key={place.identity ?? `${place.name}-${place.category}-card-${i}`}
+                            className="group overflow-hidden rounded-2xl border border-border bg-background shadow-sm transition duration-300 hover:-translate-y-0.5 hover:shadow-paper"
+                          >
+                            {place.photoUrl ? (
+                              <img
+                                src={place.photoUrl}
+                                alt=""
+                                className="h-28 w-full object-cover transition duration-500 group-hover:scale-[1.02]"
+                              />
+                            ) : (
+                              <div className="flex h-20 items-center justify-center bg-gradient-to-br from-primary/15 via-amber-100/70 to-muted">
+                                <MapPinned className="h-7 w-7 text-primary/80" />
+                              </div>
+                            )}
+                            <div className="p-4">
+                              <div className="flex items-start justify-between gap-3">
+                                <div>
+                                  <h4 className="font-serif text-lg font-semibold text-ink">
+                                    {place.name}
+                                  </h4>
+                                  <p className="mt-0.5 text-xs font-medium text-primary">
+                                    {place.category}
+                                  </p>
+                                </div>
+                                {place.rating != null && (
+                                  <span className="flex shrink-0 items-center gap-1 rounded-full bg-amber-50 px-2 py-1 text-xs font-semibold text-amber-900">
+                                    <Star className="h-3 w-3 fill-amber-500 text-amber-500" />
+                                    {place.rating.toFixed(1)}
+                                  </span>
+                                )}
+                              </div>
+                              <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
+                                {place.description}
+                              </p>
+                              <p className="mt-2 text-[10px] font-semibold uppercase tracking-wider text-primary">
+                                Around {journeyTimeLabel(place.atSeconds)} into your journey
+                              </p>
+                              {place.userRatingCount != null && place.rating != null && (
+                                <p className="mt-2 text-[10px] text-muted-foreground">
+                                  Google rating · {place.userRatingCount.toLocaleString()} reviews
+                                </p>
+                              )}
+                            </div>
+                          </article>
+                        ))}
+                      </div>
+                    </>
+                  ) : (
+                    <div className="rounded-2xl border border-border bg-muted/25 p-5">
+                      <h3 className="font-serif text-sm font-semibold uppercase tracking-widest text-muted-foreground">
+                        Route character
+                      </h3>
+                      <p className="mt-3 text-sm leading-relaxed text-ink">{evidenceLine}</p>
+                    </div>
+                  )}
                 </div>
               </div>
 
-              {routeCompleted && (
-                <RouteFeedback
-                  routeKey={`${result.title}-${result.start.address}-${result.end.address}`}
-                />
+              {routeCompleted && completionSummary && (
+                <div
+                  className="fixed inset-0 z-50 overflow-y-auto bg-[#f5f1e8]/98 px-4 py-8 backdrop-blur-sm motion-safe:animate-in motion-safe:fade-in motion-safe:duration-700 sm:py-12"
+                  role="dialog"
+                  aria-modal="true"
+                  aria-labelledby="journey-complete-title"
+                >
+                  <div className="mx-auto max-w-xl motion-safe:animate-in motion-safe:slide-in-from-bottom-4 motion-safe:duration-700">
+                    <div className="text-center">
+                      <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-full border border-primary/25 bg-primary/10 text-primary">
+                        <Check className="h-5 w-5" aria-hidden="true" />
+                      </div>
+                      <p className="mt-5 text-xs font-semibold uppercase tracking-[0.28em] text-primary">
+                        Journey complete
+                      </p>
+                      <h2
+                        id="journey-complete-title"
+                        className="mt-2 font-serif text-4xl font-semibold text-ink"
+                      >
+                        {completionSummary.title}
+                      </h2>
+                      <div className="mt-6 motion-safe:animate-in motion-safe:zoom-in-95 motion-safe:delay-300 motion-safe:duration-700">
+                        <div className="font-serif text-6xl font-semibold leading-none text-ink">
+                          {completionSummary.scenicScore}
+                          <span className="ml-2 text-2xl font-normal text-muted-foreground">
+                            / 100
+                          </span>
+                        </div>
+                        <p className="mt-2 font-serif text-lg text-primary">
+                          {scoreLabel(completionSummary.scenicScore)}
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="mt-9 rounded-2xl border border-border/80 bg-background/80 p-5 shadow-paper sm:p-7">
+                      <h3 className="font-serif text-xl font-semibold text-ink">
+                        Today you explored
+                      </h3>
+                      <dl className="mt-4 grid grid-cols-3 gap-3 text-center">
+                        <div>
+                          <dd className="font-serif text-xl font-semibold text-ink">
+                            {formatDistance(completionSummary.distanceMeters, units)}
+                          </dd>
+                          <dt className="mt-1 text-[10px] uppercase tracking-wider text-muted-foreground">
+                            Distance
+                          </dt>
+                        </div>
+                        <div className="border-x border-border px-2">
+                          <dd className="font-serif text-xl font-semibold text-ink">
+                            {completedDurationLabel(completionSummary.durationSeconds)}
+                          </dd>
+                          <dt className="mt-1 text-[10px] uppercase tracking-wider text-muted-foreground">
+                            Time
+                          </dt>
+                        </div>
+                        <div>
+                          <dd className="font-serif text-xl font-semibold text-primary">
+                            +{completionSummary.extraMinutes} min
+                          </dd>
+                          <dt className="mt-1 text-[10px] uppercase tracking-wider text-muted-foreground">
+                            Scenic
+                          </dt>
+                        </div>
+                      </dl>
+
+                      <div className="mt-6 border-t border-border pt-5">
+                        <h3 className="font-serif text-xl font-semibold text-ink">Discoveries</h3>
+                        <div className="mt-3 space-y-2 text-sm text-muted-foreground">
+                          <p>{completionSummary.discoveryCounts.natural} natural places</p>
+                          <p>{completionSummary.discoveryCounts.historic} historic places</p>
+                          <p>{completionSummary.discoveryCounts.waterside} waterside discoveries</p>
+                        </div>
+                      </div>
+                    </div>
+
+                    {unlockedAchievements.map((achievement) => (
+                      <div
+                        key={achievement.key}
+                        className="mt-4 flex items-center gap-3 rounded-xl border border-primary/20 bg-primary/5 px-4 py-3"
+                      >
+                        <Award className="h-5 w-5 shrink-0 text-primary" aria-hidden="true" />
+                        <div>
+                          <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
+                            New discovery badge
+                          </p>
+                          <p className="mt-0.5 font-serif text-lg font-semibold text-ink">
+                            {achievement.name}
+                          </p>
+                        </div>
+                      </div>
+                    ))}
+
+                    <div className="mt-7 grid gap-2">
+                      <Button
+                        onClick={() => {
+                          if (!save.isPending && !save.isSuccess) save.mutate();
+                        }}
+                        disabled={save.isPending || save.isSuccess}
+                        className="w-full shadow-stamp"
+                      >
+                        <Bookmark className="mr-2 h-4 w-4" />
+                        {save.isPending
+                          ? "Saving…"
+                          : save.isSuccess
+                            ? "Journey saved"
+                            : "Save Journey"}
+                      </Button>
+                      <Button variant="outline" onClick={shareJourney} className="w-full">
+                        <Share2 className="mr-2 h-4 w-4" /> Share Journey
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        className="w-full"
+                        onClick={() => {
+                          setNavOpen(false);
+                          setRouteCompleted(false);
+                          setCompletionSummary(null);
+                        }}
+                      >
+                        Done
+                      </Button>
+                    </div>
+                    <p className="mt-6 text-center font-serif text-sm italic text-muted-foreground">
+                      Made for the journey.
+                    </p>
+                  </div>
+                </div>
               )}
 
-              <div className="mt-6 flex flex-col gap-2 sm:flex-row">
-                <Button
-                  type="button"
-                  onClick={() => {
-                    if (save.isPending || save.isSuccess) return;
-                    save.mutate();
-                  }}
-                  disabled={save.isPending || save.isSuccess}
-                  className="w-full shadow-stamp sm:w-auto"
-                >
-                  <Bookmark className="mr-2 h-4 w-4" />
-                  {save.isPending ? "Saving…" : save.isSuccess ? "Saved" : "Save route"}
-                </Button>
-                <Button
-                  type="button"
-                  variant="outline"
-                  onClick={() => setResult(null)}
-                  disabled={save.isPending}
-                  className="w-full sm:w-auto"
-                >
-                  Start over
-                </Button>
-              </div>
+              {!routeCompleted && (
+                <div className="mt-6 flex flex-col gap-2 sm:flex-row">
+                  <Button
+                    type="button"
+                    onClick={() => {
+                      if (save.isPending || save.isSuccess) return;
+                      save.mutate();
+                    }}
+                    disabled={save.isPending || save.isSuccess}
+                    className="w-full shadow-stamp sm:w-auto"
+                  >
+                    <Bookmark className="mr-2 h-4 w-4" />
+                    {save.isPending ? "Saving…" : save.isSuccess ? "Saved" : "Save route"}
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={() => setResult(null)}
+                    disabled={save.isPending}
+                    className="w-full sm:w-auto"
+                  >
+                    Start over
+                  </Button>
+                </div>
+              )}
             </Card>
           )}
         </div>

@@ -9,3 +9,20 @@ export function isInternalTestUser(userId: string): boolean {
     .filter((value) => UUID_PATTERN.test(value))
     .includes(userId);
 }
+
+export function shouldExposeInternalDiagnostics(input: {
+  internalTester: boolean;
+  diagnosticsFlag?: string;
+  nodeEnv?: string;
+}): boolean {
+  if (!input.internalTester) return false;
+  return input.nodeEnv === "development" || input.diagnosticsFlag?.trim().toLowerCase() === "true";
+}
+
+export function internalDiagnosticsEnabled(userId: string): boolean {
+  return shouldExposeInternalDiagnostics({
+    internalTester: isInternalTestUser(userId),
+    diagnosticsFlag: process.env.SCENIK_INTERNAL_DIAGNOSTICS,
+    nodeEnv: process.env.NODE_ENV,
+  });
+}

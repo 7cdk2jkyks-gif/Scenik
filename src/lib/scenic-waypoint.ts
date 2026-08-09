@@ -4,6 +4,11 @@ export type ScenicPlace = LatLng & {
   id: string;
   primaryType: string;
   types: string[];
+  displayName?: string;
+  categoryName?: string;
+  rating?: number;
+  userRatingCount?: number;
+  photoUrl?: string;
 };
 
 export type ScenicWaypointPlan = ScenicPlace & {

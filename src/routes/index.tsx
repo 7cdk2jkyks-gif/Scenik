@@ -88,7 +88,7 @@ function Landing() {
   }, [navigate]);
 
   return (
-    <div className="min-h-screen">
+    <div className="app-screen">
       {/* Nav */}
       <header className="mx-auto grid max-w-6xl grid-cols-[minmax(0,1fr)_auto] items-center gap-2 px-4 py-4 sm:flex sm:justify-between sm:px-6 sm:py-6">
         <Link to="/" className="flex min-w-0 items-center gap-2">

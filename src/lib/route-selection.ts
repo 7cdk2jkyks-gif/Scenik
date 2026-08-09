@@ -20,6 +20,31 @@ export type RouteSelection<TScore> = {
   requestedExtraTimeBudgetSeconds: number;
 };
 
+export const NEAR_SCORE_TOLERANCE = 3;
+
+export type BudgetUtilisationBand = "none" | "weak" | "acceptable" | "strong" | "near-full";
+
+export function candidateBudgetUtilisation(
+  fastestDurationSeconds: number,
+  candidateDurationSeconds: number,
+  requestedExtraMinutes: number,
+): number {
+  const budgetSeconds = Math.max(0, requestedExtraMinutes * 60);
+  if (budgetSeconds === 0) return 0;
+  return Math.max(
+    0,
+    Math.min(1, (candidateDurationSeconds - fastestDurationSeconds) / budgetSeconds),
+  );
+}
+
+export function budgetUtilisationBand(utilisation: number): BudgetUtilisationBand {
+  if (utilisation <= 0) return "none";
+  if (utilisation < 0.35) return "weak";
+  if (utilisation < 0.6) return "acceptable";
+  if (utilisation < 0.85) return "strong";
+  return "near-full";
+}
+
 export function maximumAllowedDurationSeconds(
   fastestDurationSeconds: number,
   requestedExtraMinutes: number,
@@ -119,13 +144,30 @@ export function selectRouteCandidate<TScore>(
   const selected =
     requestedExtraTimeBudgetSeconds === 0
       ? baseline
-      : ([...eligible].sort(
-          (a, b) =>
-            b.score - a.score ||
-            a.directions.durationSeconds - b.directions.durationSeconds ||
-            a.directions.distanceMeters - b.directions.distanceMeters ||
-            a.originalIndex - b.originalIndex,
-        )[0] ?? baseline);
+      : (() => {
+          const highestScore = Math.max(...eligible.map((candidate) => candidate.score));
+          const qualityEquivalent = eligible.filter(
+            (candidate) => highestScore - candidate.score <= NEAR_SCORE_TOLERANCE,
+          );
+          return (
+            [...qualityEquivalent].sort(
+              (a, b) =>
+                candidateBudgetUtilisation(
+                  fastestDurationSeconds,
+                  b.directions.durationSeconds,
+                  requestedExtraMinutes,
+                ) -
+                  candidateBudgetUtilisation(
+                    fastestDurationSeconds,
+                    a.directions.durationSeconds,
+                    requestedExtraMinutes,
+                  ) ||
+                a.directions.durationSeconds - b.directions.durationSeconds ||
+                a.directions.distanceMeters - b.directions.distanceMeters ||
+                a.originalIndex - b.originalIndex,
+            )[0] ?? baseline
+          );
+        })();
 
   return {
     selected,

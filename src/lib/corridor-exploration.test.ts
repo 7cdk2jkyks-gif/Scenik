@@ -4,6 +4,7 @@ import {
   budgetUtilisation,
   buildCorridorPlans,
   corridorWaypointsWithRequiredStops,
+  explorationShouldStop,
   explorationStages,
   isTargetBudgetCandidate,
 } from "./corridor-exploration";
@@ -89,10 +90,82 @@ describe("budget-driven corridor exploration", () => {
     assert.deepEqual(routed[1], { lat: 0, lng: 1 });
   });
 
-  it("recognises only measured candidates using 70–95% of the budget", () => {
+  it("recognises measured candidates using at least 70% of the budget", () => {
     assert.equal(isTargetBudgetCandidate(budgetUtilisation(3_600, 4_020, 10)), true);
     assert.equal(isTargetBudgetCandidate(budgetUtilisation(3_600, 4_170, 10)), true);
     assert.equal(isTargetBudgetCandidate(budgetUtilisation(3_600, 3_900, 10)), false);
-    assert.equal(isTargetBudgetCandidate(budgetUtilisation(3_600, 4_200, 10)), false);
+    assert.equal(isTargetBudgetCandidate(budgetUtilisation(3_600, 4_200, 10)), true);
+  });
+
+  it("continues beyond an acceptable route until a stopping condition is met", () => {
+    assert.equal(
+      explorationShouldStop({
+        bestScore: 70,
+        bestHighUtilisationScore: -1,
+        bestQualityEquivalentUtilisation: 0.3,
+        requestedExtraMinutes: 60,
+        stagesExplored: 1,
+        stagesRemaining: 2,
+      }),
+      false,
+    );
+    assert.equal(
+      explorationShouldStop({
+        bestScore: 75,
+        bestHighUtilisationScore: 74,
+        bestQualityEquivalentUtilisation: 0.8,
+        requestedExtraMinutes: 60,
+        stagesExplored: 1,
+        stagesRemaining: 2,
+      }),
+      false,
+    );
+    assert.equal(
+      explorationShouldStop({
+        bestScore: 75,
+        bestHighUtilisationScore: 74,
+        bestQualityEquivalentUtilisation: 0.8,
+        requestedExtraMinutes: 60,
+        stagesExplored: 2,
+        stagesRemaining: 1,
+      }),
+      true,
+    );
+    assert.equal(
+      explorationShouldStop({
+        bestScore: 98,
+        bestHighUtilisationScore: 97,
+        bestQualityEquivalentUtilisation: 0.75,
+        requestedExtraMinutes: 30,
+        stagesExplored: 1,
+        stagesRemaining: 2,
+      }),
+      true,
+    );
+    assert.equal(
+      explorationShouldStop({
+        bestScore: 70,
+        bestHighUtilisationScore: -1,
+        bestQualityEquivalentUtilisation: 0.2,
+        requestedExtraMinutes: 60,
+        stagesExplored: 3,
+        stagesRemaining: 0,
+      }),
+      true,
+    );
+  });
+
+  it("does not stop a large-budget search on a low-utilisation candidate", () => {
+    assert.equal(
+      explorationShouldStop({
+        bestScore: 98,
+        bestHighUtilisationScore: -1,
+        bestQualityEquivalentUtilisation: 0.3,
+        requestedExtraMinutes: 60,
+        stagesExplored: 2,
+        stagesRemaining: 1,
+      }),
+      false,
+    );
   });
 });

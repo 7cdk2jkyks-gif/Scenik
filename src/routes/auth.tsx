@@ -245,7 +245,7 @@ function AuthPage() {
   }
 
   return (
-    <div className="flex min-h-screen items-start justify-center px-4 py-5 sm:items-center sm:px-6 sm:py-12">
+    <div className="app-screen keyboard-scroll flex items-start justify-center overflow-y-auto px-4 py-5 sm:items-center sm:px-6 sm:py-12">
       <div className="w-full max-w-md">
         <Link to="/" className="mb-5 flex items-center justify-center gap-2 sm:mb-8">
           <Logo className="h-6 w-6 text-primary" />

@@ -17,8 +17,10 @@ export const planScenicRoute = createServerFn({ method: "POST" })
   .handler(async ({ data, context }) => {
     const { geocodeAddress, computeDirections, searchNearbyScenicPlaces } =
       await import("./google-maps.server");
-    const { isInternalTestUser } = await import("./internal-testers.server");
+    const { internalDiagnosticsEnabled, isInternalTestUser } =
+      await import("./internal-testers.server");
     const internalTester = isInternalTestUser(context.userId);
+    const exposeInternalDiagnostics = internalDiagnosticsEnabled(context.userId);
     const requestCorrelationId = crypto.randomUUID().slice(0, 8);
     console.info("[route-generation-access]", { internalTester, requestCorrelationId });
     const geocodingCallCount = 2 + data.stops.length;
@@ -33,6 +35,7 @@ export const planScenicRoute = createServerFn({ method: "POST" })
     let scenicRoutesReturned = 0;
     let scenicRoutesRejectedOverBudget = 0;
     let scenicRoutesAccepted = 0;
+    let explorationExhausted = false;
     const rejectionReasons = new Set<string>();
 
     // Enforce free-tier cap (3 generations per calendar month)
@@ -152,6 +155,9 @@ export const planScenicRoute = createServerFn({ method: "POST" })
         types: string[];
         displayName?: string;
         categoryName?: string;
+        rating?: number;
+        userRatingCount?: number;
+        photoUrl?: string;
       }>;
     }> = distinctGoogleDirections.map((directions, index) => ({
       directions,
@@ -170,6 +176,9 @@ export const planScenicRoute = createServerFn({ method: "POST" })
       types: string[];
       displayName?: string;
       categoryName?: string;
+      rating?: number;
+      userRatingCount?: number;
+      photoUrl?: string;
     }> = [];
     if (data.extra_minutes > 0) {
       try {
@@ -206,8 +215,10 @@ export const planScenicRoute = createServerFn({ method: "POST" })
           const anchors = [routeInput.origin, ...requiredCoordinates, routeInput.destination];
           const uniquePlaces = new Map<string, (typeof evidencePlaces)[number]>();
           const attemptedSignatures = new Set<string>();
+          const attemptedKinds = new Set<import("./corridor-exploration").ScenicCorridorKind>();
           const stages = explorationStages(data.extra_minutes);
           let bestExploredScore = 0;
+          const exploredCandidateQuality: Array<{ score: number; utilisation: number }> = [];
           for (const [stageIndex, stage] of stages.entries()) {
             const samples = routeCorridorSamples(
               routeInput.origin,
@@ -235,24 +246,23 @@ export const planScenicRoute = createServerFn({ method: "POST" })
             }
             evidencePlaces = [...uniquePlaces.values()];
             deduplicatedPlaceCount = evidencePlaces.length;
-            bestExploredScore = Math.max(
-              bestExploredScore,
-              scoreExploredRoute({
-                start,
-                end,
-                mood: moodIn,
-                theme: themeIn,
-                extraMinutes: data.extra_minutes,
-                stopCount: waypoints.length,
-                directions: baseline,
-                evidence: evidenceForExploration(
-                  evidencePlaces,
-                  routeCorridorSamples(start, end, baseline.steps, 7),
-                  750,
-                ),
-                fastestDurationSeconds: baseline.durationSeconds,
-              }).total,
-            );
+            const stageBaselineScore = scoreExploredRoute({
+              start,
+              end,
+              mood: moodIn,
+              theme: themeIn,
+              extraMinutes: data.extra_minutes,
+              stopCount: waypoints.length,
+              directions: baseline,
+              evidence: evidenceForExploration(
+                evidencePlaces,
+                routeCorridorSamples(start, end, baseline.steps, 7),
+                750,
+              ),
+              fastestDurationSeconds: baseline.durationSeconds,
+            }).total;
+            bestExploredScore = Math.max(bestExploredScore, stageBaselineScore);
+            exploredCandidateQuality.push({ score: stageBaselineScore, utilisation: 0 });
             const remainingRouteCalls = Math.max(
               0,
               stage.cumulativeRouteCap - scenicRouteRequestsAttempted,
@@ -263,6 +273,7 @@ export const planScenicRoute = createServerFn({ method: "POST" })
               maximumEstimatedDetourMeters: averageMetersPerSecond * budgetSeconds * 0.95,
               maximumPlans: remainingRouteCalls,
               attemptedSignatures,
+              attemptedKinds,
             });
             waypointPlansConsidered = Math.max(waypointPlansConsidered, planning.considered);
             waypointPlansRejectedDuplicate = Math.max(
@@ -275,6 +286,7 @@ export const planScenicRoute = createServerFn({ method: "POST" })
             );
             const candidateRequests = planning.plans.map((plan) => {
               attemptedSignatures.add(plan.signature);
+              attemptedKinds.add(plan.kind);
               return {
                 plan,
                 request: computeDirections({
@@ -290,7 +302,6 @@ export const planScenicRoute = createServerFn({ method: "POST" })
             const candidateResults = await Promise.allSettled(
               candidateRequests.map(({ request }) => request),
             );
-            let bestTargetCandidateScore = -1;
             for (const [index, result] of candidateResults.entries()) {
               if (result.status === "rejected") {
                 stableErrorCode = "SCENIK_CANDIDATE_UNAVAILABLE_FALLBACK";
@@ -356,26 +367,40 @@ export const planScenicRoute = createServerFn({ method: "POST" })
                   fastestDurationSeconds: baseline.durationSeconds,
                 }).total;
                 bestExploredScore = Math.max(bestExploredScore, candidateScore);
-                if (
-                  withinBudget &&
-                  isTargetBudgetCandidate(
-                    budgetUtilisation(
+                if (withinBudget)
+                  exploredCandidateQuality.push({
+                    score: candidateScore,
+                    utilisation: budgetUtilisation(
                       baseline.durationSeconds,
                       scenikDirections.durationSeconds,
                       data.extra_minutes,
                     ),
-                  )
-                ) {
-                  bestTargetCandidateScore = Math.max(bestTargetCandidateScore, candidateScore);
-                }
+                  });
               }
             }
+            const qualityEquivalent = exploredCandidateQuality.filter(
+              (candidate) => bestExploredScore - candidate.score <= 3,
+            );
+            const bestQualityEquivalentUtilisation = Math.max(
+              0,
+              ...qualityEquivalent.map((candidate) => candidate.utilisation),
+            );
+            const bestHighUtilisationScore = Math.max(
+              -1,
+              ...exploredCandidateQuality
+                .filter((candidate) => isTargetBudgetCandidate(candidate.utilisation))
+                .map((candidate) => candidate.score),
+            );
+            const stagesRemaining = stages.length - stageIndex - 1;
+            if (stagesRemaining === 0) explorationExhausted = true;
             if (
               explorationShouldStop({
                 bestScore: bestExploredScore,
-                hasTargetBudgetCandidate: bestTargetCandidateScore >= bestExploredScore - 0.001,
+                bestHighUtilisationScore,
+                bestQualityEquivalentUtilisation,
+                requestedExtraMinutes: data.extra_minutes,
                 stagesExplored: stageIndex + 1,
-                stagesRemaining: stages.length - stageIndex - 1,
+                stagesRemaining,
               })
             )
               break;
@@ -492,7 +517,14 @@ export const planScenicRoute = createServerFn({ method: "POST" })
     const journeyTimeline = buildJourneyTimeline(
       selectedRawCandidate?.scenicWaypoints ?? [],
       directions.steps,
+      { moods: moodIn, themes: themeIn },
     );
+    const { journeyTitle } = await import("./journey-naming");
+    const selectedJourneyTitle = journeyTitle({
+      evidence: selection.selected.evidence,
+      themes: themeIn,
+      discoveries: journeyTimeline,
+    });
     const narrationEvents = buildDiscoveryNarration(journeyTimeline);
     const { selectRouteUpgradeCandidate } = await import("./route-upgrade");
     const upgradeSelection = selectRouteUpgradeCandidate({
@@ -508,8 +540,16 @@ export const planScenicRoute = createServerFn({ method: "POST" })
       ? buildJourneyTimeline(
           upgradeRawCandidate?.scenicWaypoints ?? [],
           upgradeSelection.candidate.directions.steps,
+          { moods: moodIn, themes: themeIn },
         )
       : [];
+    const upgradeJourneyTitle = upgradeSelection
+      ? journeyTitle({
+          evidence: upgradeSelection.candidate.evidence,
+          themes: themeIn,
+          discoveries: upgradeJourneyTimeline,
+        })
+      : undefined;
     const scores = selection.candidates.map((candidate) => candidate.score);
     const fastestScore = scoredCandidates.find((candidate) => candidate.originalIndex === 0)?.score;
     const maximumAllowedDurationSeconds = durationCeiling(
@@ -578,7 +618,7 @@ export const planScenicRoute = createServerFn({ method: "POST" })
           scenicScoreImprovement: upgradeSelection.candidate.score - score.total,
           verifiedReasons: upgradeSelection.reasons,
           payload: {
-            title: upgradeSelection.candidate.scoreResult.title,
+            title: upgradeJourneyTitle ?? "The Scenic Journey",
             narrative: `This retained route scores ${upgradeSelection.candidate.score - score.total} points higher using verified evidence and measured route characteristics.`,
             scenic_score: upgradeSelection.candidate.score,
             score_breakdown: upgradeSelection.candidate.scoreResult.breakdown,
@@ -609,7 +649,7 @@ export const planScenicRoute = createServerFn({ method: "POST" })
       : undefined;
 
     return {
-      title: score.title,
+      title: selectedJourneyTitle,
       narrative:
         selectedWinner === "scenik" && selectedWaypointReason
           ? `${data.extra_minutes > 10 ? "Your larger time allowance unlocked this route. " : ""}It adds ${Math.round(selection.measuredExtraTimeSeconds / 60)} minutes and includes a verified ${selectedWaypointReason.toLowerCase()}.`
@@ -627,7 +667,7 @@ export const planScenicRoute = createServerFn({ method: "POST" })
       badges: score.badges,
       worth_extra_time: score.worthExtraTime,
       scoring_version: "v3-category-10" as const,
-      scoringDiagnostics: internalTester
+      scoringDiagnostics: exposeInternalDiagnostics
         ? {
             scoringVersion: "v3-category-10" as const,
             requestedExtraTimeMinutes: data.extra_minutes,
@@ -684,6 +724,7 @@ export const planScenicRoute = createServerFn({ method: "POST" })
       scenicCandidateCount,
       googleCandidateCount: distinctGoogleDirections.length,
       timeBudgetApplied,
+      explorationExhausted,
       alternativesUnavailableReason,
       routeUpgradeCandidate,
       directions,

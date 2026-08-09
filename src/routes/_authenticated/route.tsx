@@ -144,15 +144,18 @@ function AuthedLayout() {
       )}
       <Outlet />
       {!isGuest && <TermsGate />}
-      <nav className="fixed inset-x-0 bottom-0 z-40 border-t border-border bg-card/95 backdrop-blur">
-        <div className="mx-auto grid max-w-6xl grid-cols-5 items-center gap-1 px-2 py-2 sm:px-6">
+      <nav
+        aria-label="Primary"
+        className="fixed inset-x-0 bottom-0 z-40 border-t border-border bg-card/95 backdrop-blur"
+      >
+        <div className="mx-auto grid max-w-6xl grid-cols-5 items-center gap-1 px-2 pt-2 pb-[max(0.5rem,env(safe-area-inset-bottom))] sm:px-6">
           <Link to="/plan" className="flex-1">
             {({ isActive }) => (
               <Button
                 variant={isActive ? "secondary" : "ghost"}
                 size="sm"
                 className="w-full px-2 sm:px-3"
-                title="Plan"
+                aria-label="Plan"
               >
                 <Navigation className="h-4 w-4 sm:mr-1.5" />
                 <span className="hidden sm:inline">Plan</span>
@@ -165,6 +168,7 @@ function AuthedLayout() {
                 variant={isActive ? "secondary" : "ghost"}
                 size="sm"
                 className="w-full px-2 sm:px-3"
+                aria-label="My routes"
               >
                 <Map className="h-4 w-4 mr-1.5" />
                 <span className="hidden sm:inline">My routes</span>
@@ -172,7 +176,12 @@ function AuthedLayout() {
             )}
           </Link>
           <Link to="/community" className="flex-1">
-            <Button variant="ghost" size="sm" className="w-full px-2 sm:px-3">
+            <Button
+              variant="ghost"
+              size="sm"
+              className="w-full px-2 sm:px-3"
+              aria-label="Community"
+            >
               <Users className="h-4 w-4 mr-1.5" />
               <span className="hidden sm:inline">Community</span>
             </Button>
@@ -183,7 +192,7 @@ function AuthedLayout() {
                 variant={isActive ? "secondary" : "ghost"}
                 size="sm"
                 className="w-full px-2 sm:px-3"
-                title="Settings"
+                aria-label="Settings"
               >
                 <Settings className="h-4 w-4" />
               </Button>
@@ -195,7 +204,7 @@ function AuthedLayout() {
                 variant="secondary"
                 size="sm"
                 className="w-full px-2 sm:px-3 border border-primary/40 text-primary"
-                title="You're on Premium"
+                aria-label="Premium subscription"
               >
                 <Crown className="h-4 w-4 sm:mr-1.5" />
                 <span className="hidden sm:inline">Premium</span>
@@ -203,7 +212,7 @@ function AuthedLayout() {
             </Link>
           ) : (
             <Link to="/pricing" className="flex-1">
-              <Button size="sm" className="w-full px-2 shadow-stamp sm:px-3">
+              <Button size="sm" className="w-full px-2 shadow-stamp sm:px-3" aria-label="Upgrade">
                 <Crown className="h-4 w-4 sm:mr-1.5" />
                 <span className="hidden sm:inline">Upgrade</span>
               </Button>

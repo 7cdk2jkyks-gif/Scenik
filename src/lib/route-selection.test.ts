@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { ComputedDirections } from "./google-maps.server";
 import {
+  budgetUtilisationBand,
+  candidateBudgetUtilisation,
   maximumAllowedDurationSeconds,
   routesAreMeaningfullyDifferent,
   selectRouteCandidate,
@@ -100,5 +102,45 @@ describe("selectRouteCandidate", () => {
     const result = selectRouteCandidate([candidate(0, 600, 50)], 10);
     assert.equal(result.selected.originalIndex, 0);
     assert.equal(result.candidates.length, 1);
+  });
+
+  it("prefers +48 at score 84 over +18 at score 82 for a 60-minute budget", () => {
+    const result = selectRouteCandidate(
+      [candidate(0, 3_600, 50), candidate(1, 4_680, 82), candidate(2, 6_480, 84)],
+      60,
+    );
+    assert.equal(result.selected.originalIndex, 2);
+  });
+
+  it("prefers substantially better utilisation within the three-point tolerance", () => {
+    const result = selectRouteCandidate(
+      [candidate(0, 3_600, 50), candidate(1, 4_680, 82), candidate(2, 6_480, 81)],
+      60,
+    );
+    assert.equal(result.selected.originalIndex, 2);
+  });
+
+  it("does not trade away materially better scenic quality for utilisation", () => {
+    const result = selectRouteCandidate(
+      [candidate(0, 3_600, 50), candidate(1, 4_680, 82), candidate(2, 6_480, 74)],
+      60,
+    );
+    assert.equal(result.selected.originalIndex, 1);
+  });
+
+  it("prefers +23 over +1 when quality is equivalent for a 30-minute budget", () => {
+    const result = selectRouteCandidate(
+      [candidate(0, 3_600, 50), candidate(1, 3_660, 80), candidate(2, 4_980, 79)],
+      30,
+    );
+    assert.equal(result.selected.originalIndex, 2);
+  });
+
+  it("classifies measured extra-time utilisation without changing scores", () => {
+    assert.equal(candidateBudgetUtilisation(3_600, 4_680, 60), 0.3);
+    assert.equal(budgetUtilisationBand(0.3), "weak");
+    assert.equal(budgetUtilisationBand(0.5), "acceptable");
+    assert.equal(budgetUtilisationBand(0.7), "strong");
+    assert.equal(budgetUtilisationBand(0.9), "near-full");
   });
 });

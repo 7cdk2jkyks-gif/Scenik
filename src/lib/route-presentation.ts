@@ -108,3 +108,40 @@ export function mapRemainingDurationSeconds(
     ? progress.remainingSeconds
     : Math.max(0, selectedDurationSeconds);
 }
+
+export function timeBudgetExplanation(
+  measuredExtraSeconds: number,
+  requestedExtraMinutes: number,
+  fullSearchCompleted = true,
+) {
+  const usedMinutes = Math.max(0, Math.round(measuredExtraSeconds / 60));
+  const allowanceMinutes = Math.max(0, Math.round(requestedExtraMinutes));
+  const utilisation = allowanceMinutes > 0 ? usedMinutes / allowanceMinutes : 0;
+  if (allowanceMinutes === 0) {
+    return { usedMinutes, allowanceMinutes, utilisation, explanation: "Fastest route selected." };
+  }
+  if (utilisation >= 0.7) {
+    return {
+      usedMinutes,
+      allowanceMinutes,
+      utilisation,
+      explanation: "Your larger allowance unlocked this route.",
+    };
+  }
+  if (utilisation >= 0.4) {
+    return {
+      usedMinutes,
+      allowanceMinutes,
+      utilisation,
+      explanation: "This was the best balance of scenery and journey time.",
+    };
+  }
+  return {
+    usedMinutes,
+    allowanceMinutes,
+    utilisation,
+    explanation: fullSearchCompleted
+      ? "Scenik searched your full allowance, but the longer options didn’t improve the journey enough to justify the extra time."
+      : "The longer options didn’t improve the journey enough to justify the extra time.",
+  };
+}

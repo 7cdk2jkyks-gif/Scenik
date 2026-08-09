@@ -106,7 +106,7 @@ function CommunityPage() {
   });
 
   return (
-    <div className="min-h-screen">
+    <div className="app-screen">
       <header className="border-b border-border bg-card/70 backdrop-blur">
         <div className="mx-auto flex max-w-5xl items-center justify-between gap-3 px-4 py-3 sm:px-6 sm:py-4">
           <Link to="/" className="flex items-center gap-2">

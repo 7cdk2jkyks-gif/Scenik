@@ -31,6 +31,8 @@ export type ExplorationStage = {
   cumulativeRouteCap: number;
 };
 
+export const EXPLORATION_SCORE_IMPROVEMENT_THRESHOLD = 3;
+
 const CORRIDOR_ORDER: ScenicCorridorKind[] = [
   "forest",
   "coastline",
@@ -98,6 +100,7 @@ export function buildCorridorPlans(input: {
   maximumEstimatedDetourMeters: number;
   maximumPlans: number;
   attemptedSignatures?: ReadonlySet<string>;
+  attemptedKinds?: ReadonlySet<ScenicCorridorKind>;
 }): {
   plans: ScenicCorridorPlan[];
   considered: number;
@@ -168,9 +171,13 @@ export function buildCorridorPlans(input: {
   }
 
   const attempted = input.attemptedSignatures ?? new Set<string>();
+  const attemptedKinds = input.attemptedKinds ?? new Set<ScenicCorridorKind>();
   return {
     ...planning,
-    plans: proposals.filter((plan) => !attempted.has(plan.signature)).slice(0, input.maximumPlans),
+    plans: proposals
+      .filter((plan) => !attempted.has(plan.signature))
+      .sort((a, b) => Number(attemptedKinds.has(a.kind)) - Number(attemptedKinds.has(b.kind)))
+      .slice(0, input.maximumPlans),
   };
 }
 
@@ -206,5 +213,26 @@ export function budgetUtilisation(
 }
 
 export function isTargetBudgetCandidate(utilisation: number): boolean {
-  return utilisation >= 0.7 && utilisation <= 0.95;
+  return utilisation >= 0.7 && utilisation <= 1;
+}
+
+export function explorationShouldStop(input: {
+  bestScore: number;
+  bestHighUtilisationScore: number;
+  bestQualityEquivalentUtilisation: number;
+  requestedExtraMinutes: number;
+  stagesExplored: number;
+  stagesRemaining: number;
+  scoreImprovementThreshold?: number;
+}): boolean {
+  if (input.stagesRemaining <= 0) return true;
+  if (input.requestedExtraMinutes > 30 && input.bestQualityEquivalentUtilisation < 0.5)
+    return false;
+  const hasStrongQualityEquivalentCandidate =
+    input.bestHighUtilisationScore >= input.bestScore - EXPLORATION_SCORE_IMPROVEMENT_THRESHOLD;
+  if (hasStrongQualityEquivalentCandidate && input.stagesExplored >= 2) return true;
+  const threshold = input.scoreImprovementThreshold ?? EXPLORATION_SCORE_IMPROVEMENT_THRESHOLD;
+  return (
+    100 - input.bestScore <= Math.max(0, threshold) && input.bestQualityEquivalentUtilisation >= 0.7
+  );
 }

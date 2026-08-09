@@ -56,6 +56,11 @@ export interface NearbyScenicPlace {
   lng: number;
   primaryType: string;
   types: string[];
+  displayName?: string;
+  categoryName?: string;
+  rating?: number;
+  userRatingCount?: number;
+  photoUrl?: string;
 }
 
 type GeocodingResult = {
@@ -209,7 +214,8 @@ export async function searchNearbyScenicPlaces(input: {
       headers: {
         "Content-Type": "application/json",
         "X-Goog-Api-Key": mapsKey(),
-        "X-Goog-FieldMask": "places.id,places.location,places.primaryType,places.types",
+        "X-Goog-FieldMask":
+          "places.id,places.location,places.primaryType,places.types,places.displayName,places.primaryTypeDisplayName,places.rating,places.userRatingCount",
       },
       body: JSON.stringify({
         includedTypes: input.includedTypes,
@@ -238,6 +244,10 @@ export async function searchNearbyScenicPlaces(input: {
       location?: { latitude?: unknown; longitude?: unknown };
       primaryType?: unknown;
       types?: unknown;
+      displayName?: { text?: unknown };
+      primaryTypeDisplayName?: { text?: unknown };
+      rating?: unknown;
+      userRatingCount?: unknown;
     };
     const lat = place.location?.latitude;
     const lng = place.location?.longitude;
@@ -251,6 +261,14 @@ export async function searchNearbyScenicPlaces(input: {
         types: Array.isArray(place.types)
           ? place.types.filter((type): type is string => typeof type === "string")
           : [],
+        displayName:
+          typeof place.displayName?.text === "string" ? place.displayName.text : undefined,
+        categoryName:
+          typeof place.primaryTypeDisplayName?.text === "string"
+            ? place.primaryTypeDisplayName.text
+            : undefined,
+        rating: isFiniteNumber(place.rating) ? place.rating : undefined,
+        userRatingCount: isFiniteNumber(place.userRatingCount) ? place.userRatingCount : undefined,
       },
     ];
   });
