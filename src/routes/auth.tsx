@@ -37,29 +37,23 @@ function AuthPage() {
   // `loading` is ONLY ever set by an explicit user interaction. Nothing on
   // mount — native or web — may set it true.
   const [loading, setLoading] = useState(false);
-  const [loadingSource, setLoadingSource] = useState<string>("none");
   const [authError, setAuthError] = useState<string | null>(null);
-  const [debug, setDebug] = useState<string[]>([]);
 
-  function startLoading(source: string) {
-    setLoadingSource(source);
+  function startLoading(_source: string) {
     setLoading(true);
   }
   function stopLoading() {
     setLoading(false);
-    setLoadingSource("none");
   }
   function log(line: string) {
     console.log("[Auth]", line);
-    setDebug((d) => [...d.slice(-8), line]);
   }
 
   function reportStageFailure(stage: string, error: unknown) {
     const exception = error instanceof Error ? error : new Error(String(error));
     const detail = `${stage} failed: ${exception.message}\n${exception.stack ?? "Source line unavailable"}`;
     console.error(`[Auth] ${detail}`);
-    setAuthError(detail);
-    setDebug((current) => [...current.slice(-8), detail]);
+    setAuthError(`${stage} couldn’t be completed. Please try again.`);
     toast.error(`${stage} failed: ${exception.message}`);
   }
 
@@ -87,7 +81,6 @@ function AuthPage() {
       /* storage unavailable */
     }
     setLoading(false);
-    setLoadingSource("none");
     log(`native platform detected: ${native ? (isIOS() ? "ios" : "android") : "no (web)"}`);
     log("auth page mounted");
 
@@ -113,7 +106,6 @@ function AuthPage() {
       .finally(() => {
         if (cancelled) return;
         setLoading(false);
-        setLoadingSource("none");
       });
 
     return () => {
@@ -254,7 +246,7 @@ function AuthPage() {
 
         <Card className="border-border bg-card p-4 shadow-paper sm:p-8">
           <h1 className="font-serif text-2xl font-semibold text-ink sm:text-3xl">
-            {mode === "signin" ? "Welcome back" : "Begin your Scenik"}
+            {mode === "signin" ? "Welcome back" : "Create your account"}
           </h1>
           <p className="mt-1 text-sm text-muted-foreground">
             {mode === "signin"
@@ -395,17 +387,6 @@ function AuthPage() {
             No account needed. Create one later to save routes across devices.
           </p>
         </Card>
-
-        {/* Temporary native diagnostics — remove once iOS sign-in is confirmed. */}
-        <div className="mt-4 rounded-md border border-border bg-muted/40 p-3 text-[11px] leading-snug text-muted-foreground">
-          <div className="font-semibold">Debug</div>
-          <div>
-            loading: {String(loading)} · source: {loadingSource}
-          </div>
-          {debug.map((line, i) => (
-            <div key={i}>· {line}</div>
-          ))}
-        </div>
 
         <p className="mt-4 text-center text-xs text-muted-foreground">
           <Link to="/privacy" className="hover:text-primary">

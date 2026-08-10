@@ -23,7 +23,6 @@ import {
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import {
-  Settings as SettingsIcon,
   Ruler,
   Award,
   Crown,
@@ -100,11 +99,9 @@ function SettingsPage() {
 
   return (
     <div className="mx-auto max-w-2xl px-4 py-6 sm:px-6 sm:py-8">
-      <h1 className="flex items-center gap-2 font-serif text-2xl font-semibold text-ink sm:text-3xl">
-        <SettingsIcon className="h-6 w-6 text-primary" /> Settings
-      </h1>
+      <h1 className="font-serif text-2xl font-semibold text-ink sm:text-3xl">Settings</h1>
       <p className="mt-1 text-sm text-muted-foreground">
-        Your public profile and unit preferences.
+        Profile, guidance and account preferences.
       </p>
 
       {isLoading ? (

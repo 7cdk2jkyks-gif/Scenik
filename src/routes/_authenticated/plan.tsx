@@ -98,6 +98,8 @@ import {
   MapPinned,
   Star,
   Award,
+  Waves,
+  Eye,
 } from "lucide-react";
 import { Checkbox } from "@/components/ui/checkbox";
 import { formatDistance, formatSpeed, useUnits } from "@/lib/units";
@@ -121,7 +123,13 @@ import {
 } from "@/lib/route-presentation";
 import { journeyEvidenceLine } from "@/lib/journey-naming";
 import { JOURNEY_REVEAL_STAGE_COUNT, journeyRevealDelays } from "@/lib/journey-reveal";
-import { discoveryPresentationState, rankJourneyDiscoveries } from "@/lib/journey-timeline";
+import {
+  discoveryCardPresentation,
+  discoveryPresentationState,
+  featuredJourneyDiscoveries,
+  rankJourneyDiscoveries,
+  type JourneyTimelineEvent,
+} from "@/lib/journey-timeline";
 import { beginArrivalTracking, observeArrival } from "@/lib/journey-completion";
 import {
   applyJourneyCompletion,
@@ -517,6 +525,70 @@ function journeyEndpointLabel(address: string, fallback: string) {
   return address.split(",")[0]?.trim() || fallback;
 }
 
+function DiscoveryCategoryIcon({ category }: { category: string }) {
+  const normalizedCategory = category.toLowerCase();
+  if (/wood|forest|park|nature|reserve/.test(normalizedCategory))
+    return <Leaf className="h-5 w-5" aria-hidden="true" />;
+  if (/historic|heritage|castle|museum|ruin/.test(normalizedCategory))
+    return <Landmark className="h-5 w-5" aria-hidden="true" />;
+  if (/lake|river|water|coast|beach|harbour|marina/.test(normalizedCategory))
+    return <Waves className="h-5 w-5" aria-hidden="true" />;
+  if (/viewpoint|lookout|observation|scenic/.test(normalizedCategory))
+    return <Eye className="h-5 w-5" aria-hidden="true" />;
+  return <MapPinned className="h-5 w-5" aria-hidden="true" />;
+}
+
+function FeaturedDiscoveryCard({ place }: { place: JourneyTimelineEvent }) {
+  const [photoFailed, setPhotoFailed] = useState(false);
+  const category = discoveryCardPresentation(place, photoFailed);
+  const showPhoto = category.showPhoto;
+
+  return (
+    <article className="overflow-hidden rounded-2xl border border-border bg-background shadow-sm">
+      {showPhoto && (
+        <img
+          src={place.photoUrl}
+          alt={`${place.name}, ${category.label}`}
+          className="aspect-[16/7] max-h-36 w-full object-cover"
+          onError={() => setPhotoFailed(true)}
+        />
+      )}
+      <div className="flex items-start gap-3 p-4">
+        {!showPhoto && (
+          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-primary">
+            <DiscoveryCategoryIcon category={place.category} />
+          </div>
+        )}
+        <div className="min-w-0 flex-1">
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              <h4 className="break-words font-serif text-base font-semibold leading-snug text-ink">
+                {place.name}
+              </h4>
+              <p className="mt-0.5 text-xs font-medium text-primary">{category.label}</p>
+            </div>
+            {place.rating != null && (
+              <span
+                className="flex shrink-0 items-center gap-1 rounded-full bg-amber-50 px-2 py-1 text-xs font-semibold text-amber-900"
+                aria-label={`${place.rating.toFixed(1)} out of 5`}
+              >
+                <Star className="h-3 w-3 fill-amber-500 text-amber-500" aria-hidden="true" />
+                {place.rating.toFixed(1)}
+              </span>
+            )}
+          </div>
+          <p className="mt-2 text-xs leading-relaxed text-muted-foreground">{category.copy}</p>
+          {place.userRatingCount != null && (
+            <p className="mt-2 text-[10px] text-muted-foreground">
+              {place.userRatingCount.toLocaleString()} reviews
+            </p>
+          )}
+        </div>
+      </div>
+    </article>
+  );
+}
+
 function scoreBarClass(percentage: number) {
   if (percentage >= 90) return "bg-emerald-800";
   if (percentage >= 80) return "bg-emerald-600";
@@ -568,7 +640,8 @@ function PlanPage() {
         ? timeBudgetExplanation(
             result.measuredExtraTimeSeconds,
             result.extra_minutes,
-            result.explorationExhausted,
+            result.fullAllowanceSearchCompleted ?? false,
+            result.timeTargetOutcome,
           )
         : null,
     [result],
@@ -587,6 +660,15 @@ function PlanPage() {
   const topDiscoveries = useMemo(
     () =>
       rankJourneyDiscoveries(
+        result?.journeyTimeline,
+        { moods: result?.mood, themes: result?.theme },
+        4,
+      ),
+    [result],
+  );
+  const featuredDiscoveries = useMemo(
+    () =>
+      featuredJourneyDiscoveries(
         result?.journeyTimeline,
         { moods: result?.mood, themes: result?.theme },
         4,
@@ -1808,7 +1890,7 @@ function PlanPage() {
             Plan a scenic drive
           </h1>
           <p className="mt-1 text-sm text-muted-foreground">
-            Pick a mood, a theme, both, or neither — Scenik threads the prettiest route either way.
+            Choose how the journey should feel, or leave it open for the most direct drive.
           </p>
 
           <form onSubmit={onSubmit} className="mt-6 space-y-5">
@@ -2267,7 +2349,7 @@ function PlanPage() {
                     </span>
                     {result.selectedWaypointReason && (
                       <span className="text-muted-foreground">
-                        Added because:{" "}
+                        Journey highlights:{" "}
                         <strong className="text-ink">{result.selectedWaypointReason}</strong>
                       </span>
                     )}
@@ -2350,26 +2432,16 @@ function PlanPage() {
                       className={`mt-5 grid gap-3 transition-all duration-500 ease-out motion-reduce:transition-none sm:grid-cols-2 ${revealClass(revealStage >= 5)}`}
                     >
                       {[
-                        ["Natural Beauty", visible.natural_beauty, 10, Leaf, "natural_beauty"],
-                        [
-                          "Points of Interest",
-                          visible.points_of_interest,
-                          10,
-                          Landmark,
-                          "points_of_interest",
-                        ],
-                        ["Mood Match", visible.mood_match, 10, Heart, "mood_match"],
-                        ["Road Character", visible.road_character, 10, RouteIcon, "road_character"],
-                        ["Theme Match", visible.theme_match, 10, Sparkles, "theme_match"],
-                        ["Diversity", visible.diversity, 10, Shuffle, "diversity"],
-                      ].map(([label, value, maximum, Icon, key]) => {
+                        ["Natural Beauty", visible.natural_beauty, 10, Leaf],
+                        ["Points of Interest", visible.points_of_interest, 10, Landmark],
+                        ["Mood Match", visible.mood_match, 10, Heart],
+                        ["Road Character", visible.road_character, 10, RouteIcon],
+                        ["Theme Match", visible.theme_match, 10, Sparkles],
+                        ["Diversity", visible.diversity, 10, Shuffle],
+                      ].map(([label, value, maximum, Icon]) => {
                         const score = Number(value);
                         const max = Number(maximum);
                         const percentage = Math.round((score / max) * 100);
-                        const explanation =
-                          result.score_breakdown?.explanations?.[
-                            key as keyof typeof result.score_breakdown.explanations
-                          ] ?? result.score_breakdown.rationale;
                         return (
                           <div
                             key={String(label)}
@@ -2402,9 +2474,6 @@ function PlanPage() {
                                 style={{ width: `${percentage}%` }}
                               />
                             </div>
-                            <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
-                              {explanation}
-                            </p>
                           </div>
                         );
                       })}
@@ -2444,96 +2513,6 @@ function PlanPage() {
                     </Button>
                   </div>
                 </div>
-              )}
-
-              {result.scoringDiagnostics && (
-                <details className="mt-5 rounded-xl border border-border bg-muted/30 p-4 text-xs">
-                  <summary className="cursor-pointer font-semibold text-ink">
-                    Journey Engine diagnostics
-                  </summary>
-                  <dl className="mt-3 grid gap-x-6 gap-y-2 sm:grid-cols-2">
-                    {[
-                      [
-                        "Extra-time budget",
-                        `${result.scoringDiagnostics.requestedExtraTimeMinutes} min`,
-                      ],
-                      [
-                        "Maximum duration",
-                        `${result.scoringDiagnostics.maximumAllowedDurationSeconds} sec`,
-                      ],
-                      [
-                        "Fastest duration",
-                        `${result.scoringDiagnostics.fastestDurationMinutes} min`,
-                      ],
-                      [
-                        "Selected duration",
-                        `${result.scoringDiagnostics.selectedDurationMinutes} min`,
-                      ],
-                      [
-                        "Measured extra",
-                        `${result.scoringDiagnostics.selectedMeasuredExtraMinutes} min`,
-                      ],
-                      [
-                        "Map displayed duration",
-                        `${Math.round((selectedRoute?.durationSeconds ?? 0) / 60)} min`,
-                      ],
-                      [
-                        "Route identity",
-                        `${result.scoringDiagnostics.routeIdentityFingerprint}${
-                          selectedRoute?.identityFingerprint ===
-                          result.scoringDiagnostics.routeIdentityFingerprint
-                            ? " · matched"
-                            : " · mismatch"
-                        }`,
-                      ],
-                      ["Corridor samples", result.scoringDiagnostics.corridorSampleCount],
-                      ["Verified places found", result.scoringDiagnostics.deduplicatedPlaceCount],
-                      [
-                        "Waypoint plans considered",
-                        result.scoringDiagnostics.waypointPlansConsidered,
-                      ],
-                      [
-                        "Scenik candidates attempted",
-                        result.scoringDiagnostics.scenicRouteRequestsAttempted,
-                      ],
-                      [
-                        "Scenik candidates accepted",
-                        result.scoringDiagnostics.scenicRoutesAccepted,
-                      ],
-                      ["Eligible routes", result.scoringDiagnostics.eligibleCandidateCount],
-                      [
-                        "Score range",
-                        result.scoringDiagnostics.candidateScoreMin == null
-                          ? "Unavailable"
-                          : `${result.scoringDiagnostics.candidateScoreMin}–${result.scoringDiagnostics.candidateScoreMax}`,
-                      ],
-                      [
-                        "Winner",
-                        result.scoringDiagnostics.selectedWinnerType === "scenik"
-                          ? "Scenik candidate"
-                          : result.scoringDiagnostics.selectedWinnerType === "google"
-                            ? "Google alternative"
-                            : "Fastest route",
-                      ],
-                      [
-                        "Added time",
-                        `${result.scoringDiagnostics.selectedMeasuredExtraMinutes} min`,
-                      ],
-                      ["Main reason", result.scoringDiagnostics.mainRejectionReason ?? "NONE"],
-                      ["Geocoding calls", result.scoringDiagnostics.geocodingCallCount],
-                      ["Routes calls", result.scoringDiagnostics.routesCallCount],
-                      ["Places calls", result.scoringDiagnostics.placesCallCount],
-                    ].map(([label, value]) => (
-                      <div
-                        key={String(label)}
-                        className="flex justify-between gap-4 border-b border-border/60 py-1"
-                      >
-                        <dt className="text-muted-foreground">{label}</dt>
-                        <dd className="text-right font-medium text-ink">{value}</dd>
-                      </div>
-                    ))}
-                  </dl>
-                </details>
               )}
             </Card>
           )}
@@ -2708,7 +2687,13 @@ function PlanPage() {
 
           {result && selectedRoute && budgetExplanation && (
             <Dialog open={journeyIntroOpen} onOpenChange={setJourneyIntroOpen}>
-              <DialogContent className="overflow-hidden border-primary/20 bg-background p-0 sm:max-w-2xl">
+              <DialogContent
+                className="flex max-h-[calc(100dvh-1.5rem)] flex-col gap-0 overflow-hidden border-primary/20 bg-background p-0 sm:max-w-2xl"
+                style={{
+                  maxHeight:
+                    "calc(100dvh - max(1.5rem, env(safe-area-inset-top)) - max(1.5rem, env(safe-area-inset-bottom)))",
+                }}
+              >
                 <div className="relative bg-gradient-to-br from-primary via-primary/90 to-amber-800 px-6 pb-7 pt-10 text-primary-foreground sm:px-9">
                   <div className="absolute -right-10 -top-12 h-40 w-40 rounded-full bg-white/10 blur-2xl" />
                   <div
@@ -2740,7 +2725,8 @@ function PlanPage() {
                       className={`transition-all duration-500 ease-out motion-reduce:transition-none ${revealClass(revealStage >= 2)}`}
                     >
                       <div className="font-serif text-xl font-semibold">
-                        {selectedRoute.duration}
+                        {selectedRoute.duration ||
+                          completedDurationLabel(selectedRoute.durationSeconds)}
                       </div>
                       <div className="mt-1 text-xs text-white/75">
                         +{budgetExplanation.usedMinutes} min vs fastest
@@ -2748,7 +2734,7 @@ function PlanPage() {
                     </div>
                   </div>
                 </div>
-                <div className="space-y-5 px-6 py-6 sm:px-9">
+                <div className="min-h-0 flex-1 space-y-5 overflow-y-auto px-6 py-6 sm:px-9">
                   <div
                     className={`transition-all duration-500 ease-out motion-reduce:transition-none ${revealClass(revealStage >= 2)}`}
                   >
@@ -2790,7 +2776,7 @@ function PlanPage() {
                       </div>
                     </div>
                   )}
-                  <DialogFooter className="gap-2 sm:gap-2">
+                  <DialogFooter className="sticky bottom-0 -mx-6 -mb-6 gap-2 border-t border-border bg-background/95 px-6 pt-4 pb-[max(1rem,env(safe-area-inset-bottom))] backdrop-blur sm:-mx-9 sm:px-9 sm:gap-2">
                     <Button variant="outline" onClick={() => setJourneyIntroOpen(false)}>
                       Explore details
                     </Button>
@@ -3134,12 +3120,6 @@ function PlanPage() {
                             <strong className="block font-serif text-base text-ink">
                               {event.name}
                             </strong>
-                            <span className="text-xs font-medium text-primary/90">
-                              {event.category}
-                            </span>
-                            <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
-                              {event.description}
-                            </p>
                           </div>
                         </li>
                       ))
@@ -3164,69 +3144,28 @@ function PlanPage() {
                   </ol>
                 </div>
                 <div>
-                  {discoveryPresentation.showDiscoveryHeading ? (
+                  {discoveryPresentation.showDiscoveryHeading && featuredDiscoveries.length > 0 ? (
                     <>
                       <h3 className="font-serif text-sm font-semibold uppercase tracking-widest text-muted-foreground">
                         Featured discoveries
                       </h3>
                       <div className="mt-4 space-y-3">
-                        {result.journeyTimeline.map((place, i) => (
-                          <article
+                        {featuredDiscoveries.map((place, i) => (
+                          <FeaturedDiscoveryCard
                             key={place.identity ?? `${place.name}-${place.category}-card-${i}`}
-                            className="group overflow-hidden rounded-2xl border border-border bg-background shadow-sm transition duration-300 hover:-translate-y-0.5 hover:shadow-paper"
-                          >
-                            {place.photoUrl ? (
-                              <img
-                                src={place.photoUrl}
-                                alt=""
-                                className="h-28 w-full object-cover transition duration-500 group-hover:scale-[1.02]"
-                              />
-                            ) : (
-                              <div className="flex h-20 items-center justify-center bg-gradient-to-br from-primary/15 via-amber-100/70 to-muted">
-                                <MapPinned className="h-7 w-7 text-primary/80" />
-                              </div>
-                            )}
-                            <div className="p-4">
-                              <div className="flex items-start justify-between gap-3">
-                                <div>
-                                  <h4 className="font-serif text-lg font-semibold text-ink">
-                                    {place.name}
-                                  </h4>
-                                  <p className="mt-0.5 text-xs font-medium text-primary">
-                                    {place.category}
-                                  </p>
-                                </div>
-                                {place.rating != null && (
-                                  <span className="flex shrink-0 items-center gap-1 rounded-full bg-amber-50 px-2 py-1 text-xs font-semibold text-amber-900">
-                                    <Star className="h-3 w-3 fill-amber-500 text-amber-500" />
-                                    {place.rating.toFixed(1)}
-                                  </span>
-                                )}
-                              </div>
-                              <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
-                                {place.description}
-                              </p>
-                              <p className="mt-2 text-[10px] font-semibold uppercase tracking-wider text-primary">
-                                Around {journeyTimeLabel(place.atSeconds)} into your journey
-                              </p>
-                              {place.userRatingCount != null && place.rating != null && (
-                                <p className="mt-2 text-[10px] text-muted-foreground">
-                                  Google rating · {place.userRatingCount.toLocaleString()} reviews
-                                </p>
-                              )}
-                            </div>
-                          </article>
+                            place={place}
+                          />
                         ))}
                       </div>
                     </>
-                  ) : (
+                  ) : !discoveryPresentation.hasDiscoveries ? (
                     <div className="rounded-2xl border border-border bg-muted/25 p-5">
                       <h3 className="font-serif text-sm font-semibold uppercase tracking-widest text-muted-foreground">
                         Route character
                       </h3>
                       <p className="mt-3 text-sm leading-relaxed text-ink">{evidenceLine}</p>
                     </div>
-                  )}
+                  ) : null}
                 </div>
               </div>
 

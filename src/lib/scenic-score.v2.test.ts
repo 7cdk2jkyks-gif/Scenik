@@ -145,4 +145,20 @@ describe("Journey Engine V2 evidence calibration", () => {
     };
     assert.deepEqual(scoreScenicRoute(input), scoreScenicRoute(input));
   });
+
+  it("keeps scenic scoring consistent when only the allowance increases", () => {
+    const input = {
+      ...common,
+      mood: "Adventurous",
+      theme: "Forest",
+      directions: varied,
+      evidence: { ...EMPTY_SCENIC_EVIDENCE, natural: 2 },
+    };
+    const thirty = scoreScenicRoute({ ...input, extraMinutes: 30 });
+    const eightyFive = scoreScenicRoute({ ...input, extraMinutes: 85 });
+    assert.equal(eightyFive.total, thirty.total);
+    assert.deepEqual(eightyFive.breakdown, thirty.breakdown);
+    assert.ok(eightyFive.breakdown.theme_match > 2);
+    assert.ok(eightyFive.breakdown.mood_match > 2);
+  });
 });

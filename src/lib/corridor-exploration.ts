@@ -5,6 +5,7 @@ import {
   type ScenicPlace,
   type ScenicWaypointPlan,
 } from "./scenic-waypoint";
+import { MIN_TARGET_UTILISATION } from "./route-selection";
 
 export type ScenicCorridorKind =
   | "forest"
@@ -29,6 +30,8 @@ export type ExplorationStage = {
   sampleCap: number;
   cumulativePlaceCap: number;
   cumulativeRouteCap: number;
+  planningBudgetMinutes: number;
+  targetExtraMinutes: number[];
 };
 
 export const EXPLORATION_SCORE_IMPROVEMENT_THRESHOLD = 3;
@@ -59,22 +62,86 @@ export function explorationStages(extraMinutes: number): ExplorationStage[] {
   if (extraMinutes <= 0) return [];
   if (extraMinutes <= 10) {
     return [
-      { radiusMeters: 900, sampleCap: 2, cumulativePlaceCap: 14, cumulativeRouteCap: 1 },
-      { radiusMeters: 1_500, sampleCap: 3, cumulativePlaceCap: 24, cumulativeRouteCap: 2 },
+      {
+        radiusMeters: 900,
+        sampleCap: 2,
+        cumulativePlaceCap: 14,
+        cumulativeRouteCap: 1,
+        planningBudgetMinutes: extraMinutes,
+        targetExtraMinutes: [extraMinutes],
+      },
+      {
+        radiusMeters: 1_500,
+        sampleCap: 3,
+        cumulativePlaceCap: 24,
+        cumulativeRouteCap: 2,
+        planningBudgetMinutes: extraMinutes,
+        targetExtraMinutes: [extraMinutes],
+      },
     ];
   }
   if (extraMinutes <= 30) {
     return [
-      { radiusMeters: 1_200, sampleCap: 3, cumulativePlaceCap: 20, cumulativeRouteCap: 1 },
-      { radiusMeters: 2_300, sampleCap: 4, cumulativePlaceCap: 34, cumulativeRouteCap: 2 },
-      { radiusMeters: 3_500, sampleCap: 5, cumulativePlaceCap: 45, cumulativeRouteCap: 4 },
+      {
+        radiusMeters: 1_200,
+        sampleCap: 3,
+        cumulativePlaceCap: 20,
+        cumulativeRouteCap: 1,
+        planningBudgetMinutes: extraMinutes,
+        targetExtraMinutes: [extraMinutes],
+      },
+      {
+        radiusMeters: 2_300,
+        sampleCap: 4,
+        cumulativePlaceCap: 34,
+        cumulativeRouteCap: 2,
+        planningBudgetMinutes: extraMinutes,
+        targetExtraMinutes: [extraMinutes],
+      },
+      {
+        radiusMeters: 3_500,
+        sampleCap: 5,
+        cumulativePlaceCap: 45,
+        cumulativeRouteCap: 4,
+        planningBudgetMinutes: extraMinutes,
+        targetExtraMinutes: [extraMinutes],
+      },
     ];
   }
+  const roundToFive = (minutes: number) => Math.max(1, Math.round(minutes / 5) * 5);
+  const intermediateTarget = Math.max(35, roundToFive(extraMinutes * 0.58));
+  const upperTarget = Math.max(40, roundToFive(extraMinutes * 0.82));
   return [
-    { radiusMeters: 1_500, sampleCap: 3, cumulativePlaceCap: 24, cumulativeRouteCap: 2 },
-    { radiusMeters: 3_500, sampleCap: 5, cumulativePlaceCap: 48, cumulativeRouteCap: 4 },
-    { radiusMeters: 6_000, sampleCap: 7, cumulativePlaceCap: 70, cumulativeRouteCap: 6 },
+    ...explorationStages(30),
+    {
+      radiusMeters: 6_000,
+      sampleCap: 3,
+      cumulativePlaceCap: 70,
+      cumulativeRouteCap: 6,
+      planningBudgetMinutes: extraMinutes,
+      targetExtraMinutes: [intermediateTarget, upperTarget],
+    },
   ];
+}
+
+export function selectPlansForDetourTargets(
+  plans: ScenicCorridorPlan[],
+  targetDetourMeters: number[],
+  maximumPlans: number,
+): ScenicCorridorPlan[] {
+  const remaining = [...plans];
+  const selected: ScenicCorridorPlan[] = [];
+  for (const target of targetDetourMeters) {
+    if (selected.length >= maximumPlans || remaining.length === 0) break;
+    remaining.sort(
+      (a, b) =>
+        Math.abs(a.estimatedDetourMeters - target) - Math.abs(b.estimatedDetourMeters - target) ||
+        a.estimatedDetourMeters - b.estimatedDetourMeters ||
+        a.signature.localeCompare(b.signature),
+    );
+    selected.push(remaining.shift()!);
+  }
+  return selected.concat(remaining).slice(0, Math.max(0, maximumPlans));
 }
 
 export function corridorKindForPlace(place: ScenicPlace): ScenicCorridorKind {
@@ -101,6 +168,7 @@ export function buildCorridorPlans(input: {
   maximumPlans: number;
   attemptedSignatures?: ReadonlySet<string>;
   attemptedKinds?: ReadonlySet<ScenicCorridorKind>;
+  targetDetourMeters?: number[];
 }): {
   plans: ScenicCorridorPlan[];
   considered: number;
@@ -172,12 +240,15 @@ export function buildCorridorPlans(input: {
 
   const attempted = input.attemptedSignatures ?? new Set<string>();
   const attemptedKinds = input.attemptedKinds ?? new Set<ScenicCorridorKind>();
+  const availablePlans = proposals
+    .filter((plan) => !attempted.has(plan.signature))
+    .sort((a, b) => Number(attemptedKinds.has(a.kind)) - Number(attemptedKinds.has(b.kind)));
   return {
     ...planning,
-    plans: proposals
-      .filter((plan) => !attempted.has(plan.signature))
-      .sort((a, b) => Number(attemptedKinds.has(a.kind)) - Number(attemptedKinds.has(b.kind)))
-      .slice(0, input.maximumPlans),
+    plans:
+      input.targetDetourMeters?.length && input.maximumPlans > 0
+        ? selectPlansForDetourTargets(availablePlans, input.targetDetourMeters, input.maximumPlans)
+        : availablePlans.slice(0, input.maximumPlans),
   };
 }
 
@@ -213,7 +284,22 @@ export function budgetUtilisation(
 }
 
 export function isTargetBudgetCandidate(utilisation: number): boolean {
-  return utilisation >= 0.7 && utilisation <= 1;
+  return utilisation >= MIN_TARGET_UTILISATION && utilisation <= 1;
+}
+
+export function didCompleteFullAllowanceSearch(input: {
+  explorationExhausted: boolean;
+  candidateRequestFailed: boolean;
+  scenicRouteRequestsAttempted: number;
+  intendedScenicRouteRequests: number;
+  longerEligibleCandidateEvaluated: boolean;
+}): boolean {
+  return (
+    input.explorationExhausted &&
+    !input.candidateRequestFailed &&
+    input.scenicRouteRequestsAttempted >= input.intendedScenicRouteRequests &&
+    input.longerEligibleCandidateEvaluated
+  );
 }
 
 export function explorationShouldStop(input: {
@@ -233,6 +319,7 @@ export function explorationShouldStop(input: {
   if (hasStrongQualityEquivalentCandidate && input.stagesExplored >= 2) return true;
   const threshold = input.scoreImprovementThreshold ?? EXPLORATION_SCORE_IMPROVEMENT_THRESHOLD;
   return (
-    100 - input.bestScore <= Math.max(0, threshold) && input.bestQualityEquivalentUtilisation >= 0.7
+    100 - input.bestScore <= Math.max(0, threshold) &&
+    input.bestQualityEquivalentUtilisation >= MIN_TARGET_UTILISATION
   );
 }

@@ -14,6 +14,15 @@ export type JourneyTimelineEvent = {
   photoUrl?: string;
 };
 
+export type DiscoveryCategoryPresentation = {
+  label: string;
+  copy: string;
+};
+
+export type DiscoveryCardPresentation = DiscoveryCategoryPresentation & {
+  showPhoto: boolean;
+};
+
 export type DiscoveryNarrationEvent = JourneyTimelineEvent & {
   triggerAtSeconds: number;
   staleAfterSeconds: number;
@@ -42,10 +51,59 @@ const normalized = (value: string) =>
 const selections = (value: string | string[] | undefined) =>
   (Array.isArray(value) ? value : (value ?? "").split(",")).map(normalized).filter(Boolean);
 
-function factualDescription(name: string, category: string): string {
-  if (normalized(name) === normalized(category))
-    return `Verified by Google Places as ${category.toLowerCase()}.`;
-  return `Google Places lists ${name} as ${category.toLowerCase()}.`;
+export function discoveryCategoryPresentation(category: string): DiscoveryCategoryPresentation {
+  const value = normalized(category);
+  if (/\b(wood|woods|woodland|forest)\b/.test(value))
+    return { label: "Woodland", copy: "Woodland discovery along your journey." };
+  if (/\b(historic|historical|heritage|castle|ruin|monument|history museum)\b/.test(value))
+    return { label: "Historic place", copy: "Historic discovery along your journey." };
+  if (/\b(museum)\b/.test(value))
+    return { label: "Museum", copy: "Museum discovery along your journey." };
+  if (/\b(art gallery|cultural landmark)\b/.test(value))
+    return { label: "Cultural place", copy: "Cultural discovery along your journey." };
+  if (
+    /\b(lake|river|water|waterside|coast|coastal|beach|harbour|harbor|marina|canal)\b/.test(value)
+  )
+    return { label: "Waterside", copy: "Waterside discovery along your journey." };
+  if (/\b(viewpoint|lookout|observation)\b/.test(value))
+    return { label: "Viewpoint", copy: "Viewpoint along your journey." };
+  if (/\b(park|nature reserve|national park|natural place)\b/.test(value))
+    return { label: "Natural place", copy: "Natural discovery along your journey." };
+  if (/\b(garden|botanical garden)\b/.test(value))
+    return { label: "Garden", copy: "Garden discovery along your journey." };
+  if (/\b(wildlife reserve|wildlife refuge|wildlife park)\b/.test(value))
+    return { label: "Wildlife place", copy: "Wildlife discovery along your journey." };
+  return { label: "Discovery", copy: "Discovery along your journey." };
+}
+
+export function verifiedDiscoveryDescription(category: string): string {
+  return discoveryCategoryPresentation(category).copy;
+}
+
+export function hasFeaturedDiscoveryDetail(event: JourneyTimelineEvent): boolean {
+  return Boolean(event.photoUrl || event.rating != null || event.userRatingCount != null);
+}
+
+export function discoveryCardPresentation(
+  event: JourneyTimelineEvent,
+  photoFailed = false,
+): DiscoveryCardPresentation {
+  return {
+    ...discoveryCategoryPresentation(event.category),
+    showPhoto: Boolean(event.photoUrl) && !photoFailed,
+  };
+}
+
+export function featuredJourneyDiscoveries(
+  timeline: JourneyTimelineEvent[] | null | undefined,
+  preferences: JourneyPreferences = {},
+  limit = 4,
+): JourneyTimelineEvent[] {
+  return rankJourneyDiscoveries(
+    (timeline ?? []).filter(hasFeaturedDiscoveryDetail),
+    preferences,
+    limit,
+  );
 }
 
 export function buildJourneyTimeline(
@@ -93,7 +151,7 @@ export function buildJourneyTimeline(
           hasVerifiedDisplayName: !!verifiedDisplayName,
           category,
           evidenceCategory: waypoint.reason,
-          description: factualDescription(name, category),
+          description: verifiedDiscoveryDescription(category),
           distanceToRouteMeters,
           rating: waypoint.rating,
           userRatingCount: waypoint.userRatingCount,

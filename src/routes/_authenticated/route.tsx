@@ -6,7 +6,6 @@ import { LogOut, Map, Users, Settings, Crown, Navigation } from "lucide-react";
 
 import { Logo } from "@/components/Logo";
 import { useQueryClient } from "@tanstack/react-query";
-import { PaymentTestModeBanner } from "@/components/PaymentTestModeBanner";
 import { useSubscription } from "@/hooks/useSubscription";
 import { TermsGate } from "@/components/TermsGate";
 import { capture } from "@/lib/analytics/client";
@@ -115,22 +114,35 @@ function AuthedLayout() {
         paddingBottom: "calc(5rem + env(safe-area-inset-bottom))",
       }}
     >
-      <PaymentTestModeBanner />
       <header className="border-b border-border bg-card/70 backdrop-blur">
         <div className="mx-auto flex max-w-6xl items-center justify-between gap-3 px-4 py-3 sm:px-6 sm:py-4">
           <Link to="/" aria-label="Home" className="flex min-w-0 items-center gap-2">
             <Logo className="h-5 w-5 shrink-0 text-primary" />
             <span className="truncate font-serif text-lg font-semibold text-ink">Scenik</span>
           </Link>
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={signOut}
-            title={isGuest ? "Exit guest" : "Sign out"}
-            className="px-2 sm:px-3"
-          >
-            <LogOut className="h-4 w-4" />
-          </Button>
+          <div className="flex items-center gap-1">
+            <Link to="/pricing">
+              <Button
+                variant="ghost"
+                size="sm"
+                className={isPremium ? "text-primary" : "text-muted-foreground"}
+                aria-label={isPremium ? "Manage Premium" : "View Premium"}
+              >
+                <Crown className="h-4 w-4" />
+                <span className="hidden sm:inline">{isPremium ? "Premium" : "Upgrade"}</span>
+              </Button>
+            </Link>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={signOut}
+              title={isGuest ? "Exit guest" : "Sign out"}
+              aria-label={isGuest ? "Exit guest session" : "Sign out"}
+              className="px-3"
+            >
+              <LogOut className="h-4 w-4" />
+            </Button>
+          </div>
         </div>
       </header>
       {isGuest && (
@@ -148,17 +160,17 @@ function AuthedLayout() {
         aria-label="Primary"
         className="fixed inset-x-0 bottom-0 z-40 border-t border-border bg-card/95 backdrop-blur"
       >
-        <div className="mx-auto grid max-w-6xl grid-cols-5 items-center gap-1 px-2 pt-2 pb-[max(0.5rem,env(safe-area-inset-bottom))] sm:px-6">
+        <div className="mx-auto grid max-w-lg grid-cols-4 items-center gap-1 px-2 pb-[max(0.35rem,env(safe-area-inset-bottom))] pt-1.5 sm:px-6">
           <Link to="/plan" className="flex-1">
             {({ isActive }) => (
               <Button
                 variant={isActive ? "secondary" : "ghost"}
                 size="sm"
-                className="w-full px-2 sm:px-3"
+                className="h-auto w-full flex-col gap-0.5 rounded-xl px-2 py-1.5 text-[10px] sm:flex-row sm:gap-1.5 sm:text-xs"
                 aria-label="Plan"
               >
                 <Navigation className="h-4 w-4 sm:mr-1.5" />
-                <span className="hidden sm:inline">Plan</span>
+                <span>Plan</span>
               </Button>
             )}
           </Link>
@@ -167,57 +179,40 @@ function AuthedLayout() {
               <Button
                 variant={isActive ? "secondary" : "ghost"}
                 size="sm"
-                className="w-full px-2 sm:px-3"
+                className="h-auto w-full flex-col gap-0.5 rounded-xl px-2 py-1.5 text-[10px] sm:flex-row sm:gap-1.5 sm:text-xs"
                 aria-label="My routes"
               >
-                <Map className="h-4 w-4 mr-1.5" />
-                <span className="hidden sm:inline">My routes</span>
+                <Map className="h-4 w-4" />
+                <span>Routes</span>
               </Button>
             )}
           </Link>
           <Link to="/community" className="flex-1">
-            <Button
-              variant="ghost"
-              size="sm"
-              className="w-full px-2 sm:px-3"
-              aria-label="Community"
-            >
-              <Users className="h-4 w-4 mr-1.5" />
-              <span className="hidden sm:inline">Community</span>
-            </Button>
+            {({ isActive }) => (
+              <Button
+                variant={isActive ? "secondary" : "ghost"}
+                size="sm"
+                className="h-auto w-full flex-col gap-0.5 rounded-xl px-2 py-1.5 text-[10px] sm:flex-row sm:gap-1.5 sm:text-xs"
+                aria-label="Explore community routes"
+              >
+                <Users className="h-4 w-4" />
+                <span>Explore</span>
+              </Button>
+            )}
           </Link>
           <Link to="/settings" className="flex-1">
             {({ isActive }) => (
               <Button
                 variant={isActive ? "secondary" : "ghost"}
                 size="sm"
-                className="w-full px-2 sm:px-3"
+                className="h-auto w-full flex-col gap-0.5 rounded-xl px-2 py-1.5 text-[10px] sm:flex-row sm:gap-1.5 sm:text-xs"
                 aria-label="Settings"
               >
                 <Settings className="h-4 w-4" />
+                <span>Settings</span>
               </Button>
             )}
           </Link>
-          {isPremium ? (
-            <Link to="/pricing" className="flex-1">
-              <Button
-                variant="secondary"
-                size="sm"
-                className="w-full px-2 sm:px-3 border border-primary/40 text-primary"
-                aria-label="Premium subscription"
-              >
-                <Crown className="h-4 w-4 sm:mr-1.5" />
-                <span className="hidden sm:inline">Premium</span>
-              </Button>
-            </Link>
-          ) : (
-            <Link to="/pricing" className="flex-1">
-              <Button size="sm" className="w-full px-2 shadow-stamp sm:px-3" aria-label="Upgrade">
-                <Crown className="h-4 w-4 sm:mr-1.5" />
-                <span className="hidden sm:inline">Upgrade</span>
-              </Button>
-            </Link>
-          )}
         </div>
       </nav>
     </div>

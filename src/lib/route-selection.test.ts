@@ -3,10 +3,14 @@ import { describe, it } from "node:test";
 import type { ComputedDirections } from "./google-maps.server";
 import {
   budgetUtilisationBand,
+  candidateSelectionDiagnostics,
   candidateBudgetUtilisation,
+  MIN_ACCEPTABLE_TARGET_SCORE,
   maximumAllowedDurationSeconds,
   routesAreMeaningfullyDifferent,
   selectRouteCandidate,
+  MIN_TARGET_UTILISATION,
+  TIME_TARGET_SCENIC_QUALITY_GUARDRAIL,
   type ScoredRouteCandidate,
 } from "./route-selection";
 
@@ -112,6 +116,196 @@ describe("selectRouteCandidate", () => {
     assert.equal(result.selected.originalIndex, 2);
   });
 
+  it("selects a worthwhile candidate using 80% of an 85-minute allowance", () => {
+    const result = selectRouteCandidate(
+      [candidate(0, 3_600, 70), candidate(1, 7_680, 76), candidate(2, 8_820, 90)],
+      85,
+    );
+    assert.equal(result.selected.originalIndex, 1);
+    assert.equal(result.measuredExtraTimeSeconds, 68 * 60);
+    assert.equal(candidateBudgetUtilisation(3_600, 7_680, 85), 0.8);
+  });
+
+  it("preserves a +28-minute candidate when the allowance increases from 30 to 85", () => {
+    const candidates = [candidate(0, 3_600, 70), candidate(1, 5_280, 82)];
+    const thirty = selectRouteCandidate(candidates, 30);
+    const eightyFive = selectRouteCandidate(candidates, 85);
+    assert.ok(thirty.eligible.some((item) => item.originalIndex === 1));
+    assert.ok(eightyFive.eligible.some((item) => item.originalIndex === 1));
+    assert.equal(eightyFive.selected.originalIndex, 1);
+  });
+
+  it("allows a materially better +15-minute route to beat a weaker +28-minute route", () => {
+    const result = selectRouteCandidate(
+      [candidate(0, 3_600, 70), candidate(1, 4_500, 90), candidate(2, 5_280, 82)],
+      85,
+    );
+    assert.equal(result.selected.originalIndex, 1);
+    assert.equal(
+      candidateSelectionDiagnostics(
+        [candidate(0, 3_600, 70), candidate(1, 4_500, 90), candidate(2, 5_280, 82)],
+        result,
+        85,
+      ).find((item) => item.selected)?.selectionReason,
+      "BELOW_TARGET_BEST_BALANCE",
+    );
+  });
+
+  it("prefers a strong target-band route for an 85-minute request", () => {
+    const result = selectRouteCandidate(
+      [
+        candidate(0, 3_600, 70),
+        candidate(1, 4_500, 90),
+        candidate(2, 5_280, 87),
+        candidate(3, 7_800, 84),
+      ],
+      85,
+    );
+    assert.equal(result.selected.originalIndex, 3);
+    assert.equal(result.timeTargetOutcome, "TARGET_MET");
+  });
+
+  it("rejects a target-band route with a severe scenic-quality collapse", () => {
+    const result = selectRouteCandidate(
+      [candidate(0, 3_600, 70), candidate(1, 4_500, 90), candidate(2, 7_800, 40)],
+      85,
+    );
+    assert.equal(result.selected.originalIndex, 1);
+    assert.equal(result.timeTargetOutcome, "LONGER_WEAKENED_QUALITY");
+  });
+
+  it("does not reselect a target-band route that failed the absolute score floor", () => {
+    const input = [candidate(0, 3_600, 50), candidate(1, 7_800, 55)];
+    const result = selectRouteCandidate(input, 85);
+    assert.equal(result.selected.originalIndex, 0);
+    assert.equal(result.timeTargetOutcome, "LONGER_WEAKENED_QUALITY");
+    assert.equal(
+      candidateSelectionDiagnostics(input, result, 85)[1].rejectionReason,
+      "BELOW_QUALITY_GUARDRAIL",
+    );
+  });
+
+  it("uses scenic quality rather than duration within the target band", () => {
+    const result = selectRouteCandidate(
+      [
+        candidate(0, 3_600, 70),
+        candidate(1, 7_500, 84),
+        candidate(2, 7_920, 88),
+        candidate(3, 8_520, 86),
+      ],
+      85,
+    );
+    assert.equal(result.selected.originalIndex, 2);
+    assert.equal(
+      candidateSelectionDiagnostics(
+        [
+          candidate(0, 3_600, 70),
+          candidate(1, 7_500, 84),
+          candidate(2, 7_920, 88),
+          candidate(3, 8_520, 86),
+        ],
+        result,
+        85,
+      ).find((item) => item.selected)?.selectionReason,
+      "TARGET_BAND_HIGHEST_SCENIC_QUALITY",
+    );
+  });
+
+  it("uses quality and target proximity when no target-band route exists", () => {
+    const result = selectRouteCandidate(
+      [candidate(0, 3_600, 70), candidate(1, 4_500, 90), candidate(2, 5_280, 88)],
+      85,
+    );
+    assert.equal(result.selected.originalIndex, 2);
+    assert.equal(result.timeTargetOutcome, "NO_TARGET_BAND_ROUTE");
+  });
+
+  it("prefers an acceptable +28-minute route over +10 for a 30-minute request", () => {
+    const result = selectRouteCandidate(
+      [candidate(0, 3_600, 70), candidate(1, 4_200, 89), candidate(2, 5_280, 84)],
+      30,
+    );
+    assert.equal(result.selected.originalIndex, 2);
+    assert.equal(result.timeTargetOutcome, "TARGET_MET");
+  });
+
+  it("enforces the hard maximum for an 85-minute request", () => {
+    const result = selectRouteCandidate(
+      [candidate(0, 3_600, 70), candidate(1, 7_800, 84), candidate(2, 8_760, 99)],
+      85,
+    );
+    assert.equal(result.selected.originalIndex, 1);
+    assert.ok(!result.eligible.some((item) => item.originalIndex === 2));
+  });
+
+  it("retains a strong +28-minute route when later candidates are weaker or over budget", () => {
+    const result = selectRouteCandidate(
+      [
+        candidate(0, 3_600, 70),
+        candidate(1, 5_280, 88),
+        candidate(2, 7_680, 80),
+        candidate(3, 8_820, 95),
+      ],
+      85,
+    );
+    assert.equal(result.selected.originalIndex, 1);
+    assert.ok(result.eligible.some((item) => item.originalIndex === 1));
+    assert.ok(!result.eligible.some((item) => item.originalIndex === 3));
+  });
+
+  it("diagnoses every candidate without changing selection", () => {
+    const baseline = candidate(0, 3_600, 70);
+    const duplicate = candidate(1, 3_610, 72, baseline.directions.distanceMeters + 50);
+    const valid = candidate(2, 7_680, 76);
+    const overBudget = candidate(3, 8_820, 90);
+    const input = [baseline, duplicate, valid, overBudget];
+    const selection = selectRouteCandidate(input, 85);
+    const diagnostics = candidateSelectionDiagnostics(input, selection, 85);
+    assert.deepEqual(
+      diagnostics.map(
+        ({ originalIndex, duplicate: isDuplicate, eligible, selected, rejectionReason }) => ({
+          originalIndex,
+          duplicate: isDuplicate,
+          eligible,
+          selected,
+          rejectionReason,
+        }),
+      ),
+      [
+        {
+          originalIndex: 0,
+          duplicate: false,
+          eligible: true,
+          selected: false,
+          rejectionReason: "LOWER_UTILISATION_OR_TIEBREAK",
+        },
+        {
+          originalIndex: 1,
+          duplicate: true,
+          eligible: false,
+          selected: false,
+          rejectionReason: "DUPLICATE_ROUTE",
+        },
+        {
+          originalIndex: 2,
+          duplicate: false,
+          eligible: true,
+          selected: true,
+          rejectionReason: null,
+        },
+        {
+          originalIndex: 3,
+          duplicate: false,
+          eligible: false,
+          selected: false,
+          rejectionReason: "OVER_TIME_BUDGET",
+        },
+      ],
+    );
+    assert.equal(diagnostics[2].addedMinutes, 68);
+    assert.equal(diagnostics[2].allowanceUtilisation, 0.8);
+  });
+
   it("prefers substantially better utilisation within the three-point tolerance", () => {
     const result = selectRouteCandidate(
       [candidate(0, 3_600, 50), candidate(1, 4_680, 82), candidate(2, 6_480, 81)],
@@ -142,5 +336,95 @@ describe("selectRouteCandidate", () => {
     assert.equal(budgetUtilisationBand(0.5), "acceptable");
     assert.equal(budgetUtilisationBand(0.7), "strong");
     assert.equal(budgetUtilisationBand(0.9), "near-full");
+  });
+
+  it("treats 75% as the named lower bound for target fulfilment", () => {
+    assert.equal(MIN_TARGET_UTILISATION, 0.75);
+    assert.equal(MIN_ACCEPTABLE_TARGET_SCORE, 60);
+    assert.equal(TIME_TARGET_SCENIC_QUALITY_GUARDRAIL, 6);
+  });
+
+  it("selects +70 over +15 and +28 for an 85-minute target when quality is acceptable", () => {
+    const result = selectRouteCandidate(
+      [
+        candidate(0, 3_600, 70),
+        candidate(1, 4_500, 90),
+        candidate(2, 5_280, 87),
+        candidate(3, 7_800, 85),
+      ],
+      85,
+    );
+    assert.equal(result.selected.originalIndex, 3);
+    assert.equal(result.measuredExtraTimeSeconds, 70 * 60);
+    assert.equal(result.timeTargetOutcome, "TARGET_MET");
+  });
+
+  it("allows a slightly lower-scoring +70 route to beat a score-90 +15 route", () => {
+    const result = selectRouteCandidate(
+      [candidate(0, 3_600, 70), candidate(1, 4_500, 90), candidate(2, 7_800, 85)],
+      85,
+    );
+    assert.equal(result.selected.originalIndex, 2);
+  });
+
+  it("rejects a severe scenic-quality collapse even inside the target band", () => {
+    const result = selectRouteCandidate(
+      [candidate(0, 3_600, 70), candidate(1, 4_500, 90), candidate(2, 7_800, 80)],
+      85,
+    );
+    assert.equal(result.selected.originalIndex, 1);
+    assert.equal(result.timeTargetOutcome, "LONGER_WEAKENED_QUALITY");
+  });
+
+  it("uses the best legitimate lower candidate when no target-band route exists", () => {
+    const result = selectRouteCandidate(
+      [candidate(0, 3_600, 70), candidate(1, 4_500, 88), candidate(2, 5_280, 85)],
+      85,
+    );
+    assert.equal(result.selected.originalIndex, 2);
+    assert.equal(result.timeTargetOutcome, "NO_TARGET_BAND_ROUTE");
+  });
+
+  it("prefers +28 over a similarly scenic +10 route for a 30-minute target", () => {
+    const result = selectRouteCandidate(
+      [candidate(0, 3_600, 70), candidate(1, 4_200, 88), candidate(2, 5_280, 86)],
+      30,
+    );
+    assert.equal(result.selected.originalIndex, 2);
+    assert.equal(result.timeTargetOutcome, "TARGET_MET");
+  });
+
+  it("never selects a candidate one second beyond the hard maximum", () => {
+    const result = selectRouteCandidate(
+      [candidate(0, 3_600, 70), candidate(1, 8_700, 82), candidate(2, 8_701, 99)],
+      85,
+    );
+    assert.equal(result.selected.originalIndex, 1);
+    assert.ok(result.eligible.every((item) => item.directions.durationSeconds <= 8_700));
+  });
+
+  it("preserves candidate Scenic Scores while duration affects only winner selection", () => {
+    const input = [candidate(0, 3_600, 70), candidate(1, 4_500, 90), candidate(2, 7_800, 85)];
+    const scoresBefore = input.map((item) => item.scoreResult.total);
+    const result = selectRouteCandidate(input, 85);
+    assert.deepEqual(
+      result.candidates.map((item) => item.scoreResult.total),
+      scoresBefore,
+    );
+    assert.equal(result.selected.score, 85);
+  });
+
+  it("retains valid candidates discovered at earlier duration stages", () => {
+    const input = [
+      candidate(0, 3_600, 70),
+      candidate(1, 4_500, 84),
+      candidate(2, 5_280, 85),
+      candidate(3, 7_800, 86),
+    ];
+    const result = selectRouteCandidate(input, 85);
+    assert.deepEqual(
+      result.candidates.map((item) => item.originalIndex),
+      [0, 1, 2, 3],
+    );
   });
 });

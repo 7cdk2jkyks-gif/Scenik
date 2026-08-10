@@ -81,24 +81,60 @@ export function journeyEvidenceLine(input: JourneyNamingInput): string {
   const categories = (input.discoveries ?? [])
     .map((discovery) => discovery.category?.trim().toLowerCase() ?? "")
     .filter(Boolean);
-  const signals: string[] = [];
-  const hasCategory = (needles: string[]) =>
-    categories.some((category) => includesAny(category, needles));
+  const categoryCount = (needles: string[]) =>
+    categories.filter((category) => includesAny(category, needles)).length;
+  const numberWord = (count: number) =>
+    count === 1 ? "One" : count === 2 ? "Two" : count === 3 ? "Three" : String(count);
+  const signal = (label: string, count: number) =>
+    `${numberWord(count)} ${label} ${count === 1 ? "discovery" : "discoveries"}`;
 
-  if ((counts.natural ?? 0) > 0 || hasCategory(["wood", "forest", "park", "nature"]))
-    signals.push("natural places");
-  if ((counts.historic ?? 0) > 0 || hasCategory(["historic", "heritage", "castle", "museum"]))
-    signals.push("historic places");
-  if ((counts.coastal ?? 0) > 0 || hasCategory(["lake", "river", "coast", "beach", "marina"]))
-    signals.push("waterside places");
-  if ((counts.viewpoint ?? 0) > 0 || hasCategory(["viewpoint", "scenic", "lookout"]))
-    signals.push("viewpoints");
-  if ((counts.cultural ?? 0) > 0 || hasCategory(["gallery", "cultural", "art"]))
-    signals.push("cultural places");
+  const woodlandCount = categoryCount(["wood", "forest"]);
+  const naturalCount = categoryCount(["park", "nature", "reserve"]);
+  const historicCount = categoryCount(["historic", "heritage", "castle", "museum", "ruin"]);
+  const watersideCount = categoryCount([
+    "lake",
+    "river",
+    "water",
+    "coast",
+    "beach",
+    "harbour",
+    "marina",
+  ]);
+  const viewpointCount = categoryCount(["viewpoint", "scenic", "lookout", "observation"]);
+  const culturalCount = categoryCount(["gallery", "cultural", "art"]);
+  const signals = [
+    woodlandCount > 0
+      ? signal("woodland", woodlandCount)
+      : (counts.natural ?? 0) > 0
+        ? signal("natural", counts.natural ?? 0)
+        : naturalCount > 0
+          ? signal("natural", naturalCount)
+          : null,
+    historicCount > 0
+      ? signal("historic", historicCount)
+      : (counts.historic ?? 0) > 0
+        ? signal("historic", counts.historic ?? 0)
+        : null,
+    watersideCount > 0
+      ? signal("waterside", watersideCount)
+      : (counts.coastal ?? 0) > 0
+        ? signal("waterside", counts.coastal ?? 0)
+        : null,
+    viewpointCount > 0
+      ? signal("viewpoint", viewpointCount)
+      : (counts.viewpoint ?? 0) > 0
+        ? signal("viewpoint", counts.viewpoint ?? 0)
+        : null,
+    culturalCount > 0
+      ? signal("cultural", culturalCount)
+      : (counts.cultural ?? 0) > 0
+        ? signal("cultural", counts.cultural ?? 0)
+        : null,
+  ].filter((value): value is string => value != null);
 
   if (signals.length === 0) return "Measured road variety shaped this journey.";
   const shown = signals.slice(0, 3);
   const phrase =
     shown.length === 1 ? shown[0] : `${shown.slice(0, -1).join(", ")} and ${shown.at(-1)}`;
-  return `${phrase.charAt(0).toUpperCase()}${phrase.slice(1)} shaped this journey.`;
+  return `${phrase} shaped this journey.`;
 }

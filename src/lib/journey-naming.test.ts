@@ -39,6 +39,15 @@ describe("journeyEvidenceLine", () => {
         themes: ["Forest"],
         discoveries: [{ category: "Lake" }],
       }),
-    ).toBe("Waterside places shaped this journey.");
+    ).toBe("One waterside discovery shaped this journey.");
+  });
+
+  test("uses verified discovery categories and counts when available", () => {
+    expect(
+      journeyEvidenceLine({
+        evidence: { natural: 4 },
+        discoveries: [{ category: "Woodland" }, { category: "Forest" }],
+      }),
+    ).toBe("Two woodland discoveries shaped this journey.");
   });
 });

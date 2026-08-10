@@ -9,7 +9,6 @@ import { useState } from "react";
 import { useSubscription, useUsage } from "@/hooks/useSubscription";
 import { useRCOffering, useRCPremium } from "@/hooks/useRevenueCat";
 import { usePaddleCheckout } from "@/hooks/usePaddleCheckout";
-import { PaymentTestModeBanner } from "@/components/PaymentTestModeBanner";
 import { useServerFn } from "@tanstack/react-start";
 import { useQueryClient } from "@tanstack/react-query";
 import {
@@ -33,7 +32,7 @@ export const Route = createFileRoute("/pricing")({
       {
         name: "description",
         content:
-          "Go Premium for unlimited routes, multi-stop planning, community collections, personalised AI, and the full rewards programme.",
+          "Go Premium for unlimited routes, multi-stop planning, community collections, personalised preferences, and rewards.",
       },
     ],
   }),
@@ -54,7 +53,7 @@ const PREMIUM_FEATURES = [
   "Full community routes",
   "Curated scenic collections",
   "Multi-stop planning",
-  "Personalised AI routing",
+  "Personalised route preferences",
   "Rewards programme with badges",
 ];
 
@@ -269,7 +268,6 @@ function PricingPage() {
 
   return (
     <div className="app-screen">
-      <PaymentTestModeBanner />
       <header className="mx-auto flex max-w-6xl items-center justify-between px-4 py-5 sm:px-6 sm:py-6">
         <Link to="/" className="flex items-center gap-2">
           <Logo className="h-6 w-6 text-primary" />
@@ -287,8 +285,8 @@ function PricingPage() {
           Take the <span className="italic text-primary">Scenik route.</span>
         </h1>
         <p className="mx-auto mt-4 max-w-xl text-muted-foreground">
-          Free is enough to try Scenik. Premium is for the drivers who never want to be told "you've
-          used all your routes this month."
+          Start with the essentials. Premium is for drivers who want unlimited journeys and the
+          complete Scenik experience.
         </p>
         {isPremium && (
           <div className="mx-auto mt-4 inline-flex items-center gap-2 rounded-full border border-primary/40 bg-primary/10 px-3 py-1 text-sm font-semibold text-primary">

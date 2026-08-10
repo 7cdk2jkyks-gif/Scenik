@@ -113,6 +113,11 @@ export function timeBudgetExplanation(
   measuredExtraSeconds: number,
   requestedExtraMinutes: number,
   fullSearchCompleted = true,
+  timeTargetOutcome?:
+    | "ZERO_TARGET"
+    | "TARGET_MET"
+    | "LONGER_WEAKENED_QUALITY"
+    | "NO_TARGET_BAND_ROUTE",
 ) {
   const usedMinutes = Math.max(0, Math.round(measuredExtraSeconds / 60));
   const allowanceMinutes = Math.max(0, Math.round(requestedExtraMinutes));
@@ -120,12 +125,29 @@ export function timeBudgetExplanation(
   if (allowanceMinutes === 0) {
     return { usedMinutes, allowanceMinutes, utilisation, explanation: "Fastest route selected." };
   }
-  if (utilisation >= 0.7) {
+  if (utilisation >= 0.75) {
     return {
       usedMinutes,
       allowanceMinutes,
       utilisation,
       explanation: "Your larger allowance unlocked this route.",
+    };
+  }
+  if (timeTargetOutcome === "LONGER_WEAKENED_QUALITY") {
+    return {
+      usedMinutes,
+      allowanceMinutes,
+      utilisation,
+      explanation: "Longer routes were available, but they weakened the journey too much.",
+    };
+  }
+  if (timeTargetOutcome === "NO_TARGET_BAND_ROUTE") {
+    return {
+      usedMinutes,
+      allowanceMinutes,
+      utilisation,
+      explanation:
+        "We couldn’t find a suitable route using all of your requested time, so we chose the strongest journey available.",
     };
   }
   if (utilisation >= 0.4) {
@@ -141,7 +163,9 @@ export function timeBudgetExplanation(
     allowanceMinutes,
     utilisation,
     explanation: fullSearchCompleted
-      ? "Scenik searched your full allowance, but the longer options didn’t improve the journey enough to justify the extra time."
-      : "The longer options didn’t improve the journey enough to justify the extra time.",
+      ? "We couldn’t find a suitable route using all of your requested time, so we chose the strongest journey available."
+      : usedMinutes > 0
+        ? "We found a scenic option without using your full allowance."
+        : "The selected journey stays close to the fastest route.",
   };
 }

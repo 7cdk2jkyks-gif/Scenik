@@ -6,7 +6,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
-import { MapPin, X } from "lucide-react";
+import { MapPin } from "lucide-react";
 
 export function LocationDisclosure({
   open,
@@ -28,8 +28,8 @@ export function LocationDisclosure({
             Allow location access
           </DialogTitle>
           <DialogDescription className="text-center text-sm">
-            Scenik uses your location to provide turn-by-turn navigation and route guidance.
-            Your detailed location history is not stored.
+            Scenik uses your location to provide turn-by-turn navigation and route guidance. Your
+            detailed location history is not stored.
           </DialogDescription>
         </DialogHeader>
         <div className="mt-2 flex flex-col gap-2">
@@ -37,7 +37,7 @@ export function LocationDisclosure({
             <MapPin className="mr-2 h-4 w-4" /> Allow location access
           </Button>
           <Button variant="outline" onClick={() => onOpenChange(false)}>
-            <X className="mr-2 h-4 w-4" /> Not now
+            Not now
           </Button>
         </div>
       </DialogContent>

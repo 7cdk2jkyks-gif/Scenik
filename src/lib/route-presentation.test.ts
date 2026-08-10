@@ -55,6 +55,32 @@ describe("selected route presentation", () => {
       timeBudgetExplanation(30 * 60, 60).explanation,
       "This was the best balance of scenery and journey time.",
     );
-    assert.match(timeBudgetExplanation(18 * 60, 60).explanation, /longer options didn’t improve/);
+    assert.equal(
+      timeBudgetExplanation(18 * 60, 60).explanation,
+      "We couldn’t find a suitable route using all of your requested time, so we chose the strongest journey available.",
+    );
+    assert.equal(
+      timeBudgetExplanation(18 * 60, 60, false).explanation,
+      "We found a scenic option without using your full allowance.",
+    );
+    assert.equal(
+      timeBudgetExplanation(0, 85, false).explanation,
+      "The selected journey stays close to the fastest route.",
+    );
+    assert.equal(
+      timeBudgetExplanation(15 * 60, 85, true, "LONGER_WEAKENED_QUALITY").explanation,
+      "Longer routes were available, but they weakened the journey too much.",
+    );
+  });
+
+  it("explains below-target outcomes truthfully", () => {
+    assert.equal(
+      timeBudgetExplanation(15 * 60, 85, true, "LONGER_WEAKENED_QUALITY").explanation,
+      "Longer routes were available, but they weakened the journey too much.",
+    );
+    assert.equal(
+      timeBudgetExplanation(28 * 60, 85, true, "NO_TARGET_BAND_ROUTE").explanation,
+      "We couldn’t find a suitable route using all of your requested time, so we chose the strongest journey available.",
+    );
   });
 });

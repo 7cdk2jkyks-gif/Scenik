@@ -38,7 +38,7 @@ function RoutesPage() {
     queryKey: ["routes"],
     queryFn: () => listFn(),
     // Offline hydration is Premium-only.
-    initialData: () => (isPremium ? loadSavedRoutes<SavedRoute[]>() ?? undefined : undefined),
+    initialData: () => (isPremium ? (loadSavedRoutes<SavedRoute[]>() ?? undefined) : undefined),
     retry: online ? 3 : false,
     networkMode: isPremium ? "offlineFirst" : "online",
   });
@@ -48,7 +48,6 @@ function RoutesPage() {
   useEffect(() => {
     if (isPremium && data) saveSavedRoutes(data);
   }, [data, isPremium]);
-
 
   const del = useMutation({
     mutationFn: (id: string) => deleteFn({ data: { id } }),
@@ -84,16 +83,19 @@ function RoutesPage() {
 
   return (
     <div className="mx-auto max-w-6xl px-4 py-6 sm:px-6 sm:py-8">
-      {!online && (isPremium ? <OfflineBanner className="mb-4" /> : <OfflineUpgradeBanner className="mb-4" />)}
+      {!online &&
+        (isPremium ? (
+          <OfflineBanner className="mb-4" />
+        ) : (
+          <OfflineUpgradeBanner className="mb-4" />
+        ))}
       <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
         <div className="min-w-0">
-          <h1 className="font-serif text-2xl font-semibold text-ink sm:text-3xl">Your saved drives</h1>
-          <p className="mt-1 text-sm text-muted-foreground">Toggle Share to publish a drive to the community feed.</p>
+          <h1 className="font-serif text-2xl font-semibold text-ink sm:text-3xl">Saved routes</h1>
+          <p className="mt-1 text-sm text-muted-foreground">Your journeys, ready when you are.</p>
         </div>
         <Link to="/plan" className="shrink-0">
-          <Button className="w-full shadow-stamp sm:w-auto">
-            Plan another
-          </Button>
+          <Button className="w-full shadow-stamp sm:w-auto">Plan another</Button>
         </Link>
       </div>
 
@@ -101,9 +103,14 @@ function RoutesPage() {
 
       {!isLoading && (!data || data.length === 0) && (
         <Card className="mt-8 border-dashed border-border bg-card p-8 text-center shadow-paper sm:p-12">
-          <MapPin className="mx-auto h-10 w-10 text-muted-foreground opacity-40" strokeWidth={1.25} />
+          <MapPin
+            className="mx-auto h-10 w-10 text-muted-foreground opacity-40"
+            strokeWidth={1.25}
+          />
           <h2 className="mt-4 font-serif text-xl font-semibold text-ink">No routes yet</h2>
-          <p className="mt-1 text-sm text-muted-foreground">Plan your first scenic drive to see it here.</p>
+          <p className="mt-1 text-sm text-muted-foreground">
+            Plan your first scenic drive to see it here.
+          </p>
           <Link to="/plan">
             <Button className="mt-5 shadow-stamp">Plan a drive</Button>
           </Link>
@@ -120,21 +127,31 @@ function RoutesPage() {
                   <div className="truncate text-[10px] font-medium uppercase tracking-widest text-muted-foreground">
                     {r.mood} · {r.theme} · +{r.extra_minutes} min
                   </div>
-                  <h3 className="mt-1 font-serif text-lg font-semibold text-ink sm:text-xl">{r.title}</h3>
+                  <h3 className="mt-1 font-serif text-lg font-semibold text-ink sm:text-xl">
+                    {r.title}
+                  </h3>
                   <p className="mt-1 break-words text-xs text-muted-foreground">
                     {r.start_address} → {r.end_address}
                   </p>
                 </div>
                 <div className="shrink-0 rounded-xl border border-border bg-background px-3 py-2 text-center">
-                  <div className="text-[9px] font-medium uppercase tracking-widest text-muted-foreground">Scenic</div>
-                  <div className="font-serif text-xl font-semibold text-primary">{r.scenic_score}</div>
+                  <div className="text-[9px] font-medium uppercase tracking-widest text-muted-foreground">
+                    Scenic
+                  </div>
+                  <div className="font-serif text-xl font-semibold text-primary">
+                    {r.scenic_score}
+                  </div>
                 </div>
               </div>
-              <p className="mt-3 line-clamp-3 font-serif text-sm italic text-ink/80">"{r.narrative}"</p>
+              <p className="mt-3 line-clamp-3 font-serif text-sm italic text-ink/80">
+                "{r.narrative}"
+              </p>
 
               <div className="mt-4 flex items-center justify-between gap-2 rounded-lg border border-border bg-background p-2.5">
                 <div className="flex items-center gap-2 text-xs">
-                  <Share2 className={`h-3.5 w-3.5 ${isPublic ? "text-primary" : "text-muted-foreground"}`} />
+                  <Share2
+                    className={`h-3.5 w-3.5 ${isPublic ? "text-primary" : "text-muted-foreground"}`}
+                  />
                   <span className="font-medium text-ink">{isPublic ? "Shared" : "Private"}</span>
                   {isPublic && (
                     <button
@@ -153,7 +170,6 @@ function RoutesPage() {
                   disabled={share.isPending}
                   className="shrink-0 h-4 w-12 [&>span]:h-3 [&>span]:w-3 [&>span]:data-[state=checked]:translate-x-8"
                 />
-
               </div>
 
               <div className="mt-3 flex justify-end">

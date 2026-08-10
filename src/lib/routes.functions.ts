@@ -1,6 +1,7 @@
 import { createServerFn } from "@tanstack/react-start";
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
 import { z } from "zod";
+import { verifiedDiscoveryDescription } from "./journey-timeline";
 
 const PlanInput = z.object({
   start_address: z.string().min(2),
@@ -132,10 +133,41 @@ export const planScenicRoute = createServerFn({ method: "POST" })
 
     const {
       maximumAllowedDurationSeconds: durationCeiling,
+      candidateBudgetUtilisation,
+      candidateSelectionDiagnostics,
       routesAreNearIdentical,
       routesAreMeaningfullyDifferent,
       selectRouteCandidate,
     } = await import("./route-selection");
+    const diagnosticDurationCeiling = durationCeiling(baseline.durationSeconds, data.extra_minutes);
+    const generatedCandidateOutcomes: Array<{
+      source: "fastest" | "google" | "scenik";
+      durationSeconds: number | null;
+      addedMinutes: number | null;
+      allowanceUtilisation: number | null;
+      duplicate: boolean | null;
+      outcome: "ELIGIBLE" | "OVER_TIME_BUDGET" | "DUPLICATE_ROUTE" | "ROUTE_REQUEST_FAILED";
+    }> = googleDirections.map((directions, index, all) => {
+      const duplicate = all
+        .slice(0, index)
+        .some((prior) => routesAreNearIdentical(prior, directions));
+      const withinBudget = directions.durationSeconds <= diagnosticDurationCeiling;
+      return {
+        source: index === 0 ? "fastest" : "google",
+        durationSeconds: directions.durationSeconds,
+        addedMinutes:
+          Math.round(
+            (Math.max(0, directions.durationSeconds - baseline.durationSeconds) / 60) * 10,
+          ) / 10,
+        allowanceUtilisation: candidateBudgetUtilisation(
+          baseline.durationSeconds,
+          directions.durationSeconds,
+          data.extra_minutes,
+        ),
+        duplicate,
+        outcome: duplicate ? "DUPLICATE_ROUTE" : withinBudget ? "ELIGIBLE" : "OVER_TIME_BUDGET",
+      };
+    });
     const distinctGoogleDirections = googleDirections.filter(
       (directions, index, all) =>
         !all.slice(0, index).some((prior) => routesAreNearIdentical(prior, directions)),
@@ -270,10 +302,17 @@ export const planScenicRoute = createServerFn({ method: "POST" })
             const planning = buildCorridorPlans({
               places: evidencePlaces,
               anchors,
-              maximumEstimatedDetourMeters: averageMetersPerSecond * budgetSeconds * 0.95,
+              maximumEstimatedDetourMeters:
+                averageMetersPerSecond * stage.planningBudgetMinutes * 60 * 0.95,
               maximumPlans: remainingRouteCalls,
               attemptedSignatures,
               attemptedKinds,
+              targetDetourMeters:
+                stage.targetExtraMinutes.length > 1
+                  ? stage.targetExtraMinutes.map(
+                      (targetMinutes) => averageMetersPerSecond * targetMinutes * 60,
+                    )
+                  : undefined,
             });
             waypointPlansConsidered = Math.max(waypointPlansConsidered, planning.considered);
             waypointPlansRejectedDuplicate = Math.max(
@@ -304,6 +343,14 @@ export const planScenicRoute = createServerFn({ method: "POST" })
             );
             for (const [index, result] of candidateResults.entries()) {
               if (result.status === "rejected") {
+                generatedCandidateOutcomes.push({
+                  source: "scenik",
+                  durationSeconds: null,
+                  addedMinutes: null,
+                  allowanceUtilisation: null,
+                  duplicate: null,
+                  outcome: "ROUTE_REQUEST_FAILED",
+                });
                 stableErrorCode = "SCENIK_CANDIDATE_UNAVAILABLE_FALLBACK";
                 rejectionReasons.add("ROUTE_REQUEST_FAILED");
                 continue;
@@ -325,6 +372,27 @@ export const planScenicRoute = createServerFn({ method: "POST" })
               const meaningfullyDifferent = rawCandidates.every((candidate) =>
                 routesAreMeaningfullyDifferent(candidate.directions, scenikDirections),
               );
+              generatedCandidateOutcomes.push({
+                source: "scenik",
+                durationSeconds: scenikDirections.durationSeconds,
+                addedMinutes:
+                  Math.round(
+                    (Math.max(0, scenikDirections.durationSeconds - baseline.durationSeconds) /
+                      60) *
+                      10,
+                  ) / 10,
+                allowanceUtilisation: candidateBudgetUtilisation(
+                  baseline.durationSeconds,
+                  scenikDirections.durationSeconds,
+                  data.extra_minutes,
+                ),
+                duplicate: !meaningfullyDifferent,
+                outcome: !meaningfullyDifferent
+                  ? "DUPLICATE_ROUTE"
+                  : withinBudget
+                    ? "ELIGIBLE"
+                    : "OVER_TIME_BUDGET",
+              });
               if (!withinBudget) {
                 scenicRoutesRejectedOverBudget += 1;
                 rejectionReasons.add("OVER_TIME_BUDGET");
@@ -472,6 +540,11 @@ export const planScenicRoute = createServerFn({ method: "POST" })
       }
     });
     const selection = selectRouteCandidate(scoredCandidates, data.extra_minutes);
+    const candidateDiagnostics = candidateSelectionDiagnostics(
+      scoredCandidates,
+      selection,
+      data.extra_minutes,
+    );
     const directions = selection.selected.directions;
     const score = selection.selected.scoreResult;
     if (!alternativesUnavailableReason && selection.candidates.length <= 1) {
@@ -505,9 +578,7 @@ export const planScenicRoute = createServerFn({ method: "POST" })
             name: waypoint.displayName ?? waypoint.reason,
             lat: waypoint.lat,
             lng: waypoint.lng,
-            description: waypoint.categoryName
-              ? `Google Places lists this as ${waypoint.categoryName.toLowerCase()}.`
-              : waypoint.reason,
+            description: verifiedDiscoveryDescription(waypoint.categoryName ?? waypoint.reason),
           });
         });
       return candidateWaypoints;
@@ -557,6 +628,25 @@ export const planScenicRoute = createServerFn({ method: "POST" })
       data.extra_minutes,
     );
     const mainRejectionReason = rejectionReasons.values().next().value ?? null;
+    const { didCompleteFullAllowanceSearch, explorationStages: diagnosticExplorationStages } =
+      await import("./corridor-exploration");
+    const explorationTargets = diagnosticExplorationStages(data.extra_minutes);
+    const finalSelectionReason =
+      candidateDiagnostics.find((candidate) => candidate.selected)?.selectionReason ?? null;
+    const intendedScenicRouteRequests = explorationTargets.at(-1)?.cumulativeRouteCap ?? 0;
+    const longerEligibleCandidateEvaluated = candidateDiagnostics.some(
+      (candidate) =>
+        candidate.eligible &&
+        !candidate.duplicate &&
+        candidate.durationSeconds > selection.selected.directions.durationSeconds,
+    );
+    const fullAllowanceSearchCompleted = didCompleteFullAllowanceSearch({
+      explorationExhausted,
+      candidateRequestFailed: rejectionReasons.has("ROUTE_REQUEST_FAILED"),
+      scenicRouteRequestsAttempted,
+      intendedScenicRouteRequests,
+      longerEligibleCandidateEvaluated,
+    });
     console.info("[scenik-route-engine-v2]", {
       requestedExtraTimeMinutes: data.extra_minutes,
       fastestDurationSeconds: selection.fastestDurationSeconds,
@@ -581,6 +671,13 @@ export const planScenicRoute = createServerFn({ method: "POST" })
       selectedScore: selection.selected.score,
       selectedMeasuredExtraMinutes: Math.round(selection.measuredExtraTimeSeconds / 60),
       mainRejectionReason,
+      rejectionReasons: [...rejectionReasons],
+      explorationTargets,
+      generatedCandidateOutcomes,
+      candidateDiagnostics,
+      finalSelectionReason,
+      timeTargetOutcome: selection.timeTargetOutcome,
+      fullAllowanceSearchCompleted,
       geocodingCallCount,
       routesCallCount,
       placesCallCount,
@@ -697,6 +794,13 @@ export const planScenicRoute = createServerFn({ method: "POST" })
             selectedScore: selection.selected.score,
             selectedMeasuredExtraMinutes: Math.round(selection.measuredExtraTimeSeconds / 60),
             mainRejectionReason,
+            rejectionReasons: [...rejectionReasons],
+            explorationTargets,
+            generatedCandidateOutcomes,
+            candidateDiagnostics,
+            finalSelectionReason,
+            timeTargetOutcome: selection.timeTargetOutcome,
+            fullAllowanceSearchCompleted,
             geocodingCallCount,
             routesCallCount,
             placesCallCount,
@@ -725,6 +829,8 @@ export const planScenicRoute = createServerFn({ method: "POST" })
       googleCandidateCount: distinctGoogleDirections.length,
       timeBudgetApplied,
       explorationExhausted,
+      fullAllowanceSearchCompleted,
+      timeTargetOutcome: selection.timeTargetOutcome,
       alternativesUnavailableReason,
       routeUpgradeCandidate,
       directions,

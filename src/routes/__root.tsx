@@ -84,13 +84,12 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
         name: "viewport",
         content: "width=device-width, initial-scale=1, viewport-fit=cover",
       },
-      { title: "Scenik — scenic routes, not fast ones" },
+      { title: "Scenik — drives worth taking" },
       {
         name: "description",
-        content:
-          "An AI sat-nav that plans the most scenic drive based on your mood, your theme, and how much extra time you can spare.",
+        content: "Plan memorable drives around your mood, preferred scenery, and available time.",
       },
-      { property: "og:title", content: "Scenik — scenic routes, not fast ones" },
+      { property: "og:title", content: "Scenik — drives worth taking" },
       {
         property: "og:description",
         content:

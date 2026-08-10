@@ -4,7 +4,12 @@ import {
   buildDiscoveryNarration,
   buildJourneyTimeline,
   discoveryPresentationState,
+  discoveryCategoryPresentation,
+  discoveryCardPresentation,
+  featuredJourneyDiscoveries,
+  hasFeaturedDiscoveryDetail,
   rankJourneyDiscoveries,
+  verifiedDiscoveryDescription,
 } from "./journey-timeline";
 
 describe("journey timeline", () => {
@@ -48,10 +53,98 @@ describe("journey timeline", () => {
         { atSeconds: 900, name: "Stone Castle" },
       ],
     );
-    assert.equal(timeline[0].description, "Google Places lists River Park as park.");
+    assert.equal(timeline[0].description, "Natural discovery along your journey.");
     assert.equal(
       buildDiscoveryNarration(timeline)[0].text,
       "You’re approaching River Park, one of the featured discoveries on today’s journey.",
+    );
+  });
+
+  it("uses provider-neutral verified fallbacks", () => {
+    assert.equal(
+      verifiedDiscoveryDescription("Woodland"),
+      "Woodland discovery along your journey.",
+    );
+    assert.deepEqual(discoveryCategoryPresentation("woods"), {
+      label: "Woodland",
+      copy: "Woodland discovery along your journey.",
+    });
+    assert.deepEqual(discoveryCategoryPresentation("internal_place_type"), {
+      label: "Discovery",
+      copy: "Discovery along your journey.",
+    });
+    assert.equal(verifiedDiscoveryDescription("museum"), "Museum discovery along your journey.");
+    assert.doesNotMatch(verifiedDiscoveryDescription("museum"), /google|provider|places/i);
+    assert.doesNotMatch(
+      verifiedDiscoveryDescription("ordinary building"),
+      /beautiful|historic|ancient|peaceful|famous|worth visiting/i,
+    );
+  });
+
+  it("selects richer featured discoveries before deterministic ranking", () => {
+    const timeline = [
+      { atSeconds: 10, name: "Timeline only", category: "Park", description: "Natural discovery." },
+      {
+        atSeconds: 40,
+        name: "Later rich",
+        category: "Park",
+        description: "Natural discovery.",
+        rating: 4.4,
+      },
+      {
+        atSeconds: 20,
+        name: "Earlier rich",
+        category: "Park",
+        description: "Natural discovery.",
+        userRatingCount: 12,
+      },
+    ];
+    const selected = featuredJourneyDiscoveries(timeline, {}, 2).map((item) => item.name);
+    assert.deepEqual(selected, ["Later rich", "Earlier rich"]);
+    assert.deepEqual(
+      featuredJourneyDiscoveries([...timeline].reverse(), {}, 2).map((item) => item.name),
+      selected,
+    );
+  });
+
+  it("handles missing rating and review data without inventing detail", () => {
+    const event = {
+      atSeconds: 60,
+      name: "A very long verified place name that should remain unchanged in presentation",
+      category: "unknown_type",
+      description: verifiedDiscoveryDescription("unknown_type"),
+      photoUrl: "https://example.com/existing-photo.jpg",
+    };
+    assert.equal(hasFeaturedDiscoveryDetail(event), true);
+    assert.equal(event.description, "Discovery along your journey.");
+    assert.equal(
+      event.name,
+      "A very long verified place name that should remain unchanged in presentation",
+    );
+    assert.equal(discoveryCardPresentation(event).showPhoto, true);
+    assert.equal(discoveryCardPresentation(event, true).showPhoto, false);
+    assert.equal(discoveryCardPresentation({ ...event, photoUrl: undefined }).showPhoto, false);
+  });
+
+  it("features only discoveries with details beyond the timeline", () => {
+    assert.equal(
+      hasFeaturedDiscoveryDetail({
+        atSeconds: 60,
+        name: "Pine Wood",
+        category: "Woodland",
+        description: "Verified woodland discovery along your journey.",
+      }),
+      false,
+    );
+    assert.equal(
+      hasFeaturedDiscoveryDetail({
+        atSeconds: 60,
+        name: "Pine Wood",
+        category: "Woodland",
+        description: "Verified woodland discovery along your journey.",
+        rating: 4.6,
+      }),
+      true,
     );
   });
 

@@ -13,8 +13,7 @@ export const Route = createFileRoute("/")({
       { title: "Scenik — take the Scenik route" },
       {
         name: "description",
-        content:
-          "An AI scenic-route planner. Tell it your mood and your spare time; it plans a drive worth taking.",
+        content: "A scenic-route planner shaped by your mood, preferences, and available time.",
       },
     ],
   }),
@@ -138,8 +137,8 @@ function Landing() {
           <span className="italic text-primary">Scenik route.</span>
         </h1>
         <p className="mx-auto mt-5 max-w-md text-base text-muted-foreground sm:mt-6 sm:text-lg">
-          Tell Scenik your mood, your theme, and how many extra minutes you'll spare. We'll thread
-          the prettiest drive between A and B — and score it out of 100.
+          Choose a mood, a theme, and how much extra time you have. Scenik compares verified
+          discoveries and route character to find a drive worth taking.
         </p>
         <div className="mt-7 flex flex-col items-stretch justify-center gap-3 sm:mt-8 sm:flex-row sm:items-center">
           {authed === null ? (
