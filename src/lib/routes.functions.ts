@@ -823,10 +823,9 @@ export const planScenicRoute = createServerFn({ method: "POST" })
           });
         }
       }
-      const { buildRouteGenerationDiagnostic } = await import("./route-generation-diagnostics");
+      const { serializeRouteGenerationDiagnostic } = await import("./route-generation-diagnostics");
       console.info(
-        "[scenik-route-engine-v2]",
-        buildRouteGenerationDiagnostic({
+        serializeRouteGenerationDiagnostic({
           correlationId: requestCorrelationId,
           requestedExtraMinutes: data.extra_minutes,
           baselineDurationSeconds: selection.fastestDurationSeconds,

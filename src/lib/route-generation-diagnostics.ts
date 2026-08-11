@@ -105,3 +105,9 @@ export function buildRouteGenerationDiagnostic(input: {
     totalServerProcessingDurationMs: input.totalServerProcessingDurationMs,
   };
 }
+
+export function serializeRouteGenerationDiagnostic(
+  input: Parameters<typeof buildRouteGenerationDiagnostic>[0],
+): string {
+  return `scenik-route-engine-v2 ${JSON.stringify(buildRouteGenerationDiagnostic(input))}`;
+}

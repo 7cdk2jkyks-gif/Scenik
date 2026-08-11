@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 import {
   buildRouteGenerationDiagnostic,
   runSequentialLongAttempts,
+  serializeRouteGenerationDiagnostic,
 } from "./route-generation-diagnostics";
 
 function deferred<T>() {
@@ -134,6 +135,51 @@ describe("route-generation diagnostic log", () => {
       "secret-1",
     ]) {
       assert.equal(serialized.includes(forbidden), false);
+    }
+  });
+
+  it("serializes one searchable allow-listed line without sensitive extras", () => {
+    const line = serializeRouteGenerationDiagnostic({
+      correlationId: "route-456",
+      requestedExtraMinutes: 85,
+      baselineDurationSeconds: 21_600,
+      plannedExplorationStages: [],
+      attemptsPlanned: 6,
+      attemptsCompleted: 6,
+      intendedTargetMinutes: [50, 70],
+      adaptiveTargetMinutes: [50, 85],
+      actualAddedMinutesReturned: 61,
+      outcomeClassification: "TARGET_MET",
+      candidateEligibility: [],
+      candidateScenicScores: [72],
+      finalSelectionReason: "TARGET_BAND_HIGHEST_SCENIC_QUALITY",
+      totalServerProcessingDurationMs: 2_100,
+      coordinates: [51.7, -1.2],
+      address: "Oxford",
+      placeId: "secret-place",
+      polyline: "encoded-route",
+      userId: "user-1",
+      authentication: "auth-1",
+      apiKey: "key-1",
+      token: "token-1",
+      secret: "secret-1",
+    } as Parameters<typeof serializeRouteGenerationDiagnostic>[0] & Record<string, unknown>);
+
+    assert.equal(line.startsWith("scenik-route-engine-v2 {"), true);
+    assert.equal(line.includes('"requestedExtraMinutes":85'), true);
+    assert.equal(line.includes('"totalServerProcessingDurationMs":2100'), true);
+    for (const forbidden of [
+      "coordinates",
+      "Oxford",
+      "secret-place",
+      "encoded-route",
+      "user-1",
+      "auth-1",
+      "key-1",
+      "token-1",
+      "secret-1",
+    ]) {
+      assert.equal(line.includes(forbidden), false);
     }
   });
 });
