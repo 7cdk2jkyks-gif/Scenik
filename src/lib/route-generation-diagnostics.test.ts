@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   buildRouteGenerationDiagnostic,
+  formatRouteGenerationDiagnosticForClipboard,
+  internalRouteDiagnosticResponse,
   runSequentialLongAttempts,
   serializeRouteGenerationDiagnostic,
 } from "./route-generation-diagnostics";
@@ -181,5 +183,75 @@ describe("route-generation diagnostic log", () => {
     ]) {
       assert.equal(line.includes(forbidden), false);
     }
+  });
+
+  it("excludes diagnostics entirely from an unauthorised response", () => {
+    const diagnostic = buildRouteGenerationDiagnostic({
+      correlationId: "route-normal",
+      requestedExtraMinutes: 30,
+      baselineDurationSeconds: 3_600,
+      plannedExplorationStages: [],
+      attemptsPlanned: 4,
+      attemptsCompleted: 4,
+      intendedTargetMinutes: [],
+      adaptiveTargetMinutes: [],
+      actualAddedMinutesReturned: 28,
+      outcomeClassification: "TARGET_MET",
+      candidateEligibility: [],
+      candidateScenicScores: [82],
+      finalSelectionReason: "TARGET_BAND_HIGHEST_SCENIC_QUALITY",
+      totalServerProcessingDurationMs: 900,
+    });
+    assert.deepEqual(internalRouteDiagnosticResponse(false, diagnostic), {});
+    assert.equal(
+      "routeGenerationDiagnostics" in internalRouteDiagnosticResponse(false, diagnostic),
+      false,
+    );
+    assert.deepEqual(internalRouteDiagnosticResponse(true, diagnostic), {
+      routeGenerationDiagnostics: diagnostic,
+    });
+  });
+
+  it("formats exactly the allowed clipboard fields and strips arbitrary extras", () => {
+    const diagnostic = buildRouteGenerationDiagnostic({
+      correlationId: "route-copy",
+      requestedExtraMinutes: 85,
+      baselineDurationSeconds: 21_600,
+      plannedExplorationStages: [],
+      attemptsPlanned: 6,
+      attemptsCompleted: 5,
+      intendedTargetMinutes: [50, 70],
+      adaptiveTargetMinutes: [50, 85],
+      actualAddedMinutesReturned: 61,
+      outcomeClassification: "TARGET_MET",
+      candidateEligibility: [],
+      candidateScenicScores: [72, 76],
+      finalSelectionReason: "TARGET_BAND_HIGHEST_SCENIC_QUALITY",
+      totalServerProcessingDurationMs: 2_100,
+      address: "Oxford",
+      coordinates: [51.7, -1.2],
+      polyline: "secret-polyline",
+      arbitraryExtra: "must-not-copy",
+    } as Parameters<typeof buildRouteGenerationDiagnostic>[0] & Record<string, unknown>);
+    const copied = JSON.parse(formatRouteGenerationDiagnosticForClipboard(diagnostic));
+    assert.deepEqual(Object.keys(copied), [
+      "correlationId",
+      "requestedExtraMinutes",
+      "baselineDurationSeconds",
+      "plannedExplorationStages",
+      "attemptsPlanned",
+      "attemptsCompleted",
+      "intendedTargetMinutes",
+      "adaptiveTargetMinutes",
+      "actualAddedMinutesReturned",
+      "outcomeClassification",
+      "candidateEligibility",
+      "candidateScenicScores",
+      "finalSelectionReason",
+      "totalServerProcessingDurationMs",
+    ]);
+    assert.equal(JSON.stringify(copied).includes("Oxford"), false);
+    assert.equal(JSON.stringify(copied).includes("secret-polyline"), false);
+    assert.equal(JSON.stringify(copied).includes("must-not-copy"), false);
   });
 });

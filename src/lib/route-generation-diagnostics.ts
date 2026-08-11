@@ -106,6 +106,40 @@ export function buildRouteGenerationDiagnostic(input: {
   };
 }
 
+export type RouteGenerationDiagnostic = ReturnType<typeof buildRouteGenerationDiagnostic>;
+
+/**
+ * Server-response projection. A false server-authorised gate returns no
+ * diagnostic property at all, rather than a client-visible disabled payload.
+ */
+export function internalRouteDiagnosticResponse(
+  authorised: boolean,
+  diagnostic: RouteGenerationDiagnostic,
+): { routeGenerationDiagnostics?: RouteGenerationDiagnostic } {
+  return authorised ? { routeGenerationDiagnostics: diagnostic } : {};
+}
+
+export function formatRouteGenerationDiagnosticForClipboard(
+  diagnostic: RouteGenerationDiagnostic,
+): string {
+  return JSON.stringify(buildRouteGenerationDiagnostic(diagnostic), null, 2);
+}
+
+type ClipboardWriter = Pick<Clipboard, "writeText">;
+
+export async function copyRouteDiagnostics(
+  diagnostic: RouteGenerationDiagnostic,
+  clipboard: ClipboardWriter | undefined,
+): Promise<boolean> {
+  if (!clipboard) return false;
+  try {
+    await clipboard.writeText(formatRouteGenerationDiagnosticForClipboard(diagnostic));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function serializeRouteGenerationDiagnostic(
   input: Parameters<typeof buildRouteGenerationDiagnostic>[0],
 ): string {

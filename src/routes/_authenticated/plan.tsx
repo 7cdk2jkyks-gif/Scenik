@@ -113,6 +113,7 @@ import { getPlatform, isNativePlatform } from "@/lib/native";
 import { playHaptic } from "@/lib/haptics";
 import { OfflineUpgradeBanner } from "@/components/OfflineUpgradeBanner";
 import { LocationDisclosure } from "@/components/LocationDisclosure";
+import { InternalRouteDiagnostics } from "@/components/InternalRouteDiagnostics";
 import { useSubscription } from "@/hooks/useSubscription";
 import { normalizeVisibleCategories } from "@/lib/scenic-score";
 import { applyRetainedRouteUpgrade } from "@/lib/route-upgrade";
@@ -2514,6 +2515,7 @@ function PlanPage() {
                   </div>
                 </div>
               )}
+              <InternalRouteDiagnostics diagnostics={result.routeGenerationDiagnostics} />
             </Card>
           )}
 

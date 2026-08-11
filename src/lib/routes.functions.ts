@@ -2,6 +2,7 @@ import { createServerFn } from "@tanstack/react-start";
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
 import { z } from "zod";
 import { verifiedDiscoveryDescription } from "./journey-timeline";
+import type { RouteGenerationDiagnostic } from "./route-generation-diagnostics";
 
 const PlanInput = z.object({
   start_address: z.string().min(2),
@@ -97,6 +98,9 @@ export const planScenicRoute = createServerFn({ method: "POST" })
     let baselineRequestSuccess = false;
     let stableErrorCode = "OK";
     let baseline;
+    let internalRouteDiagnosticFields: {
+      routeGenerationDiagnostics?: RouteGenerationDiagnostic;
+    } = {};
     try {
       routesCallCount += 1;
       baseline = await computeDirections({ ...routeInput, alternatives: false });
@@ -823,30 +827,37 @@ export const planScenicRoute = createServerFn({ method: "POST" })
           });
         }
       }
-      const { serializeRouteGenerationDiagnostic } = await import("./route-generation-diagnostics");
-      console.info(
-        serializeRouteGenerationDiagnostic({
-          correlationId: requestCorrelationId,
-          requestedExtraMinutes: data.extra_minutes,
-          baselineDurationSeconds: selection.fastestDurationSeconds,
-          plannedExplorationStages: explorationTargets,
-          attemptsPlanned: intendedScenicRouteRequests,
-          attemptsCompleted: scenicRouteRequestsCompleted,
-          intendedTargetMinutes: longAttemptExecutions.map(
-            (attempt) => attempt.intendedTargetMinutes,
-          ),
-          adaptiveTargetMinutes: longAttemptExecutions.map(
-            (attempt) => attempt.adaptiveTargetMinutes,
-          ),
-          actualAddedMinutesReturned:
-            Math.round((selection.measuredExtraTimeSeconds / 60) * 10) / 10,
-          outcomeClassification: selection.timeTargetOutcome,
-          candidateEligibility,
-          candidateScenicScores: candidateDiagnostics.map((candidate) => candidate.score),
-          finalSelectionReason,
-          totalServerProcessingDurationMs: Date.now() - requestStartedAt,
-        }),
+      const {
+        buildRouteGenerationDiagnostic,
+        internalRouteDiagnosticResponse,
+        serializeRouteGenerationDiagnostic,
+      } = await import("./route-generation-diagnostics");
+      const diagnosticInput = {
+        correlationId: requestCorrelationId,
+        requestedExtraMinutes: data.extra_minutes,
+        baselineDurationSeconds: selection.fastestDurationSeconds,
+        plannedExplorationStages: explorationTargets,
+        attemptsPlanned: intendedScenicRouteRequests,
+        attemptsCompleted: scenicRouteRequestsCompleted,
+        intendedTargetMinutes: longAttemptExecutions.map(
+          (attempt) => attempt.intendedTargetMinutes,
+        ),
+        adaptiveTargetMinutes: longAttemptExecutions.map(
+          (attempt) => attempt.adaptiveTargetMinutes,
+        ),
+        actualAddedMinutesReturned: Math.round((selection.measuredExtraTimeSeconds / 60) * 10) / 10,
+        outcomeClassification: selection.timeTargetOutcome,
+        candidateEligibility,
+        candidateScenicScores: candidateDiagnostics.map((candidate) => candidate.score),
+        finalSelectionReason,
+        totalServerProcessingDurationMs: Date.now() - requestStartedAt,
+      };
+      const safeDiagnostic = buildRouteGenerationDiagnostic(diagnosticInput);
+      internalRouteDiagnosticFields = internalRouteDiagnosticResponse(
+        exposeInternalDiagnostics,
+        safeDiagnostic,
       );
+      console.info(serializeRouteGenerationDiagnostic(diagnosticInput));
     } catch {
       // Diagnostics must never affect route generation.
     }
@@ -999,6 +1010,7 @@ export const planScenicRoute = createServerFn({ method: "POST" })
       explorationExhausted,
       fullAllowanceSearchCompleted,
       timeTargetOutcome: selection.timeTargetOutcome,
+      ...internalRouteDiagnosticFields,
       alternativesUnavailableReason,
       routeUpgradeCandidate,
       directions,
