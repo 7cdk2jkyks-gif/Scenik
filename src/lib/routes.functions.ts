@@ -16,6 +16,7 @@ export const planScenicRoute = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
   .inputValidator((input: unknown) => PlanInput.parse(input))
   .handler(async ({ data, context }) => {
+    const requestStartedAt = Date.now();
     const { geocodeAddress, computeDirections, searchNearbyScenicPlaces } =
       await import("./google-maps.server");
     const { internalDiagnosticsEnabled, isInternalTestUser } =
@@ -33,10 +34,12 @@ export const planScenicRoute = createServerFn({ method: "POST" })
     let waypointPlansRejectedDuplicate = 0;
     let waypointPlansRejectedBacktracking = 0;
     let scenicRouteRequestsAttempted = 0;
+    let scenicRouteRequestsCompleted = 0;
     let scenicRoutesReturned = 0;
     let scenicRoutesRejectedOverBudget = 0;
     let scenicRoutesAccepted = 0;
     let explorationExhausted = false;
+    let longAttemptExecutions: import("./route-generation-diagnostics").LongAttemptExecution[] = [];
     const rejectionReasons = new Set<string>();
 
     // Enforce free-tier cap (3 generations per calendar month)
@@ -260,6 +263,7 @@ export const planScenicRoute = createServerFn({ method: "POST" })
           explorationStages,
           isTargetBudgetCandidate,
         } = await import("./corridor-exploration");
+        const { runSequentialLongAttempts } = await import("./route-generation-diagnostics");
         const { scoreScenicRoute: scoreExploredRoute } = await import("./scenic-score");
         const { upgradeOverrunToleranceSeconds } = await import("./route-upgrade");
         const moods = moodIn
@@ -385,6 +389,7 @@ export const planScenicRoute = createServerFn({ method: "POST" })
               intendedAddedMinutes: number | null,
               constructionTargetMinutes: number | null,
             ): number | null => {
+              scenicRouteRequestsCompleted += 1;
               if (result.status === "rejected") {
                 generatedCandidateOutcomes.push({
                   source: "scenik",
@@ -514,41 +519,37 @@ export const planScenicRoute = createServerFn({ method: "POST" })
             };
 
             if (stage.targetExtraMinutes.length > 1) {
-              let priorTargetResult: { intended: number; actual: number } | null = null;
-              for (const intendedTargetMinutes of stage.targetExtraMinutes.slice(
-                0,
-                remainingRouteCalls,
-              )) {
-                const constructionTargetMinutes = priorTargetResult
-                  ? adaptiveDurationTargetMinutes({
-                      nextTargetMinutes: intendedTargetMinutes,
-                      priorIntendedMinutes: priorTargetResult.intended,
-                      priorActualMinutes: priorTargetResult.actual,
-                      maximumExtraMinutes: data.extra_minutes,
-                    })
-                  : intendedTargetMinutes;
-                const planning = buildCorridorPlans({
-                  places: evidencePlaces,
-                  anchors: planningAnchors,
-                  maximumEstimatedDetourMeters:
-                    averageMetersPerSecond * stage.planningBudgetMinutes * 60 * 0.95,
-                  maximumPlans: 1,
-                  attemptedSignatures,
-                  attemptedKinds,
-                  targetDetourMeters: [averageMetersPerSecond * constructionTargetMinutes * 60],
-                });
-                updatePlanningDiagnostics(planning);
-                const plan = planning.plans[0];
-                if (!plan) continue;
-                const [result] = await Promise.allSettled([requestCandidate(plan)]);
-                const actual = recordCandidateResult(
-                  plan,
-                  result,
-                  intendedTargetMinutes,
-                  constructionTargetMinutes,
-                );
-                if (actual != null) priorTargetResult = { intended: intendedTargetMinutes, actual };
-              }
+              longAttemptExecutions = await runSequentialLongAttempts({
+                intendedTargets: stage.targetExtraMinutes.slice(0, remainingRouteCalls),
+                maximumExtraMinutes: data.extra_minutes,
+                adaptiveTarget: adaptiveDurationTargetMinutes,
+                execute: async ({ intendedTargetMinutes, adaptiveTargetMinutes }) => {
+                  const planning = buildCorridorPlans({
+                    places: evidencePlaces,
+                    anchors: planningAnchors,
+                    maximumEstimatedDetourMeters:
+                      averageMetersPerSecond * stage.planningBudgetMinutes * 60 * 0.95,
+                    maximumPlans: 1,
+                    attemptedSignatures,
+                    attemptedKinds,
+                    targetDetourMeters: [averageMetersPerSecond * adaptiveTargetMinutes * 60],
+                  });
+                  updatePlanningDiagnostics(planning);
+                  const plan = planning.plans[0];
+                  if (!plan) return { status: "NO_PLAN", actualAddedMinutes: null };
+                  const [result] = await Promise.allSettled([requestCandidate(plan)]);
+                  const actualAddedMinutes = recordCandidateResult(
+                    plan,
+                    result,
+                    intendedTargetMinutes,
+                    adaptiveTargetMinutes,
+                  );
+                  return {
+                    status: result.status === "fulfilled" ? "COMPLETED" : "FAILED",
+                    actualAddedMinutes,
+                  };
+                },
+              });
             } else {
               const planning = buildCorridorPlans({
                 places: evidencePlaces,
@@ -781,41 +782,75 @@ export const planScenicRoute = createServerFn({ method: "POST" })
       intendedScenicRouteRequests,
       longerEligibleCandidateEvaluated,
     });
-    console.info("[scenik-route-engine-v2]", {
-      requestedExtraTimeMinutes: data.extra_minutes,
-      fastestDurationSeconds: selection.fastestDurationSeconds,
-      maximumAllowedDurationSeconds,
-      corridorSampleCount: corridorSamplesUsed,
-      placesSearchCount: placesCallCount,
-      deduplicatedPlaceCount,
-      waypointPlansConsidered,
-      waypointPlansRejectedDuplicate,
-      waypointPlansRejectedBacktracking,
-      scenicRouteRequestsAttempted,
-      scenicRoutesReturned,
-      scenicRoutesRejectedOverBudget,
-      scenicRoutesAccepted,
-      googleAlternativeCount: Math.max(0, distinctGoogleDirections.length - 1),
-      fastestScore,
-      candidateScoreMin: scores.length ? Math.min(...scores) : null,
-      candidateScoreMax: scores.length ? Math.max(...scores) : null,
-      candidateCount: selection.candidates.length,
-      eligibleCandidateCount: selection.eligible.length,
-      selectedWinnerType: selectedWinner,
-      selectedScore: selection.selected.score,
-      selectedMeasuredExtraMinutes: Math.round(selection.measuredExtraTimeSeconds / 60),
-      mainRejectionReason,
-      rejectionReasons: [...rejectionReasons],
-      explorationTargets,
-      generatedCandidateOutcomes,
-      candidateDiagnostics,
-      finalSelectionReason,
-      timeTargetOutcome: selection.timeTargetOutcome,
-      fullAllowanceSearchCompleted,
-      geocodingCallCount,
-      routesCallCount,
-      placesCallCount,
-    });
+    try {
+      const candidateEligibility = generatedCandidateOutcomes.map((outcome) => {
+        const diagnostic = candidateDiagnostics.find(
+          (candidate) =>
+            candidate.intendedAddedMinutes === outcome.intendedAddedMinutes &&
+            candidate.constructionTargetMinutes === outcome.constructionTargetMinutes,
+        );
+        return {
+          intendedTargetMinutes: outcome.intendedAddedMinutes,
+          adaptiveTargetMinutes: outcome.constructionTargetMinutes,
+          actualAddedMinutes: outcome.addedMinutes,
+          outcomeClassification: outcome.durationTargetClassification ?? outcome.outcome,
+          duplicateEligible: outcome.duplicate == null ? null : !outcome.duplicate,
+          budgetEligible:
+            outcome.outcome === "ROUTE_REQUEST_FAILED"
+              ? null
+              : outcome.outcome !== "OVER_TIME_BUDGET",
+          qualityEligible:
+            diagnostic == null ? null : diagnostic.rejectionReason !== "BELOW_QUALITY_GUARDRAIL",
+          scenicScore: diagnostic?.score ?? null,
+        };
+      });
+      for (const attempt of longAttemptExecutions) {
+        const represented = candidateEligibility.some(
+          (candidate) =>
+            candidate.intendedTargetMinutes === attempt.intendedTargetMinutes &&
+            candidate.adaptiveTargetMinutes === attempt.adaptiveTargetMinutes,
+        );
+        if (!represented) {
+          candidateEligibility.push({
+            intendedTargetMinutes: attempt.intendedTargetMinutes,
+            adaptiveTargetMinutes: attempt.adaptiveTargetMinutes,
+            actualAddedMinutes: attempt.actualAddedMinutes,
+            outcomeClassification: attempt.status,
+            duplicateEligible: null,
+            budgetEligible: null,
+            qualityEligible: null,
+            scenicScore: null,
+          });
+        }
+      }
+      const { buildRouteGenerationDiagnostic } = await import("./route-generation-diagnostics");
+      console.info(
+        "[scenik-route-engine-v2]",
+        buildRouteGenerationDiagnostic({
+          correlationId: requestCorrelationId,
+          requestedExtraMinutes: data.extra_minutes,
+          baselineDurationSeconds: selection.fastestDurationSeconds,
+          plannedExplorationStages: explorationTargets,
+          attemptsPlanned: intendedScenicRouteRequests,
+          attemptsCompleted: scenicRouteRequestsCompleted,
+          intendedTargetMinutes: longAttemptExecutions.map(
+            (attempt) => attempt.intendedTargetMinutes,
+          ),
+          adaptiveTargetMinutes: longAttemptExecutions.map(
+            (attempt) => attempt.adaptiveTargetMinutes,
+          ),
+          actualAddedMinutesReturned:
+            Math.round((selection.measuredExtraTimeSeconds / 60) * 10) / 10,
+          outcomeClassification: selection.timeTargetOutcome,
+          candidateEligibility,
+          candidateScenicScores: candidateDiagnostics.map((candidate) => candidate.score),
+          finalSelectionReason,
+          totalServerProcessingDurationMs: Date.now() - requestStartedAt,
+        }),
+      );
+    } catch {
+      // Diagnostics must never affect route generation.
+    }
 
     // Log generation for free-tier metering — surface failures so the cap is enforced
     const { error: genErr } = await context.supabase
