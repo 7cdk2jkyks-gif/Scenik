@@ -142,9 +142,20 @@ export const planScenicRoute = createServerFn({ method: "POST" })
     const diagnosticDurationCeiling = durationCeiling(baseline.durationSeconds, data.extra_minutes);
     const generatedCandidateOutcomes: Array<{
       source: "fastest" | "google" | "scenik";
+      intendedAddedMinutes: number | null;
+      constructionTargetMinutes: number | null;
       durationSeconds: number | null;
       addedMinutes: number | null;
       allowanceUtilisation: number | null;
+      durationTargetClassification:
+        | "SEVERE_UNDERSHOOT"
+        | "MODERATE_UNDERSHOOT"
+        | "TARGET_BAND"
+        | "OVER_BUDGET"
+        | null;
+      estimatedDetourMeters: number | null;
+      waypointCount: number;
+      requiredStopOrderPreserved: boolean;
       duplicate: boolean | null;
       outcome: "ELIGIBLE" | "OVER_TIME_BUDGET" | "DUPLICATE_ROUTE" | "ROUTE_REQUEST_FAILED";
     }> = googleDirections.map((directions, index, all) => {
@@ -154,6 +165,8 @@ export const planScenicRoute = createServerFn({ method: "POST" })
       const withinBudget = directions.durationSeconds <= diagnosticDurationCeiling;
       return {
         source: index === 0 ? "fastest" : "google",
+        intendedAddedMinutes: null,
+        constructionTargetMinutes: null,
         durationSeconds: directions.durationSeconds,
         addedMinutes:
           Math.round(
@@ -164,6 +177,10 @@ export const planScenicRoute = createServerFn({ method: "POST" })
           directions.durationSeconds,
           data.extra_minutes,
         ),
+        durationTargetClassification: null,
+        estimatedDetourMeters: null,
+        waypointCount: 0,
+        requiredStopOrderPreserved: true,
         duplicate,
         outcome: duplicate ? "DUPLICATE_ROUTE" : withinBudget ? "ELIGIBLE" : "OVER_TIME_BUDGET",
       };
@@ -176,6 +193,14 @@ export const planScenicRoute = createServerFn({ method: "POST" })
       directions: typeof baseline;
       source: "fastest" | "google" | "scenik";
       selectedWaypointReason: string | null;
+      intendedAddedMinutes: number | null;
+      constructionTargetMinutes: number | null;
+      durationTargetClassification:
+        | "SEVERE_UNDERSHOOT"
+        | "MODERATE_UNDERSHOOT"
+        | "TARGET_BAND"
+        | "OVER_BUDGET"
+        | null;
       scenicWaypoints: Array<{
         id: string;
         lat: number;
@@ -195,6 +220,9 @@ export const planScenicRoute = createServerFn({ method: "POST" })
       directions,
       source: index === 0 ? "fastest" : "google",
       selectedWaypointReason: null,
+      intendedAddedMinutes: null,
+      constructionTargetMinutes: null,
+      durationTargetClassification: null,
       scenicWaypoints: [],
     }));
 
@@ -222,9 +250,12 @@ export const planScenicRoute = createServerFn({ method: "POST" })
           selectedPlaceTypes,
         } = await import("./scenic-waypoint");
         const {
+          adaptiveDurationTargetMinutes,
           budgetUtilisation,
           buildCorridorPlans,
+          classifyDurationTargetResult,
           corridorWaypointsWithRequiredStops,
+          durationAwareCorridorSamples,
           explorationShouldStop,
           explorationStages,
           isTargetBudgetCandidate,
@@ -252,12 +283,24 @@ export const planScenicRoute = createServerFn({ method: "POST" })
           let bestExploredScore = 0;
           const exploredCandidateQuality: Array<{ score: number; utilisation: number }> = [];
           for (const [stageIndex, stage] of stages.entries()) {
-            const samples = routeCorridorSamples(
+            const baselineSamples = routeCorridorSamples(
               routeInput.origin,
               routeInput.destination,
               baseline.steps,
               Math.min(corridorSampleCount(baseline.distanceMeters), stage.sampleCap),
             );
+            const durationAwareSamples =
+              stage.targetExtraMinutes.length > 1
+                ? durationAwareCorridorSamples({
+                    samples: baselineSamples,
+                    baselineDistanceMeters: baseline.distanceMeters,
+                    baselineDurationSeconds: baseline.durationSeconds,
+                    targetExtraMinutes: stage.targetExtraMinutes,
+                  })
+                : [];
+            const samples = durationAwareSamples.length
+              ? durationAwareSamples.map((sample) => sample.center)
+              : baselineSamples;
             corridorSamplesUsed += samples.length;
             placesCallCount += samples.length;
             const placeResults = await Promise.allSettled(
@@ -299,65 +342,75 @@ export const planScenicRoute = createServerFn({ method: "POST" })
               0,
               stage.cumulativeRouteCap - scenicRouteRequestsAttempted,
             );
-            const planning = buildCorridorPlans({
-              places: evidencePlaces,
-              anchors,
-              maximumEstimatedDetourMeters:
-                averageMetersPerSecond * stage.planningBudgetMinutes * 60 * 0.95,
-              maximumPlans: remainingRouteCalls,
-              attemptedSignatures,
-              attemptedKinds,
-              targetDetourMeters:
-                stage.targetExtraMinutes.length > 1
-                  ? stage.targetExtraMinutes.map(
-                      (targetMinutes) => averageMetersPerSecond * targetMinutes * 60,
-                    )
-                  : undefined,
-            });
-            waypointPlansConsidered = Math.max(waypointPlansConsidered, planning.considered);
-            waypointPlansRejectedDuplicate = Math.max(
-              waypointPlansRejectedDuplicate,
-              planning.rejectedDuplicate,
-            );
-            waypointPlansRejectedBacktracking = Math.max(
-              waypointPlansRejectedBacktracking,
-              planning.rejectedBacktracking,
-            );
-            const candidateRequests = planning.plans.map((plan) => {
+            const planningAnchors =
+              stage.targetExtraMinutes.length > 1 && requiredCoordinates.length === 0
+                ? [routeInput.origin, ...baselineSamples, routeInput.destination]
+                : anchors;
+            const updatePlanningDiagnostics = (planning: {
+              considered: number;
+              rejectedDuplicate: number;
+              rejectedBacktracking: number;
+            }) => {
+              waypointPlansConsidered = Math.max(waypointPlansConsidered, planning.considered);
+              waypointPlansRejectedDuplicate = Math.max(
+                waypointPlansRejectedDuplicate,
+                planning.rejectedDuplicate,
+              );
+              waypointPlansRejectedBacktracking = Math.max(
+                waypointPlansRejectedBacktracking,
+                planning.rejectedBacktracking,
+              );
+            };
+            const requestCandidate = (
+              plan: import("./corridor-exploration").ScenicCorridorPlan,
+            ) => {
               attemptedSignatures.add(plan.signature);
               attemptedKinds.add(plan.kind);
-              return {
-                plan,
-                request: computeDirections({
-                  origin: routeInput.origin,
-                  destination: routeInput.destination,
-                  waypoints: corridorWaypointsWithRequiredStops(requiredCoordinates, anchors, plan),
-                  alternatives: false,
-                }),
-              };
-            });
-            scenicRouteRequestsAttempted += candidateRequests.length;
-            routesCallCount += candidateRequests.length;
-            const candidateResults = await Promise.allSettled(
-              candidateRequests.map(({ request }) => request),
-            );
-            for (const [index, result] of candidateResults.entries()) {
+              scenicRouteRequestsAttempted += 1;
+              routesCallCount += 1;
+              return computeDirections({
+                origin: routeInput.origin,
+                destination: routeInput.destination,
+                waypoints: corridorWaypointsWithRequiredStops(
+                  requiredCoordinates,
+                  planningAnchors,
+                  plan,
+                ),
+                alternatives: false,
+              });
+            };
+            const recordCandidateResult = (
+              corridorPlan: import("./corridor-exploration").ScenicCorridorPlan,
+              result: PromiseSettledResult<typeof baseline>,
+              intendedAddedMinutes: number | null,
+              constructionTargetMinutes: number | null,
+            ): number | null => {
               if (result.status === "rejected") {
                 generatedCandidateOutcomes.push({
                   source: "scenik",
+                  intendedAddedMinutes,
+                  constructionTargetMinutes,
                   durationSeconds: null,
                   addedMinutes: null,
                   allowanceUtilisation: null,
+                  durationTargetClassification: null,
+                  estimatedDetourMeters: corridorPlan.estimatedDetourMeters,
+                  waypointCount: corridorPlan.waypoints.length,
+                  requiredStopOrderPreserved: true,
                   duplicate: null,
                   outcome: "ROUTE_REQUEST_FAILED",
                 });
                 stableErrorCode = "SCENIK_CANDIDATE_UNAVAILABLE_FALLBACK";
                 rejectionReasons.add("ROUTE_REQUEST_FAILED");
-                continue;
+                return null;
               }
               scenicRoutesReturned += 1;
-              const corridorPlan = candidateRequests[index].plan;
               const scenikDirections = result.value;
+              const actualAddedMinutes =
+                Math.round(
+                  (Math.max(0, scenikDirections.durationSeconds - baseline.durationSeconds) / 60) *
+                    10,
+                ) / 10;
               const withinBudget = candidateFitsTimeBudget(
                 baseline.durationSeconds,
                 scenikDirections.durationSeconds,
@@ -372,20 +425,29 @@ export const planScenicRoute = createServerFn({ method: "POST" })
               const meaningfullyDifferent = rawCandidates.every((candidate) =>
                 routesAreMeaningfullyDifferent(candidate.directions, scenikDirections),
               );
+              const durationTargetClassification =
+                intendedAddedMinutes == null
+                  ? null
+                  : classifyDurationTargetResult(
+                      intendedAddedMinutes,
+                      actualAddedMinutes,
+                      data.extra_minutes,
+                    );
               generatedCandidateOutcomes.push({
                 source: "scenik",
+                intendedAddedMinutes,
+                constructionTargetMinutes,
                 durationSeconds: scenikDirections.durationSeconds,
-                addedMinutes:
-                  Math.round(
-                    (Math.max(0, scenikDirections.durationSeconds - baseline.durationSeconds) /
-                      60) *
-                      10,
-                  ) / 10,
+                addedMinutes: actualAddedMinutes,
                 allowanceUtilisation: candidateBudgetUtilisation(
                   baseline.durationSeconds,
                   scenikDirections.durationSeconds,
                   data.extra_minutes,
                 ),
+                durationTargetClassification,
+                estimatedDetourMeters: corridorPlan.estimatedDetourMeters,
+                waypointCount: corridorPlan.waypoints.length,
+                requiredStopOrderPreserved: true,
                 duplicate: !meaningfullyDifferent,
                 outcome: !meaningfullyDifferent
                   ? "DUPLICATE_ROUTE"
@@ -409,6 +471,9 @@ export const planScenicRoute = createServerFn({ method: "POST" })
                         waypoint.displayName ?? waypoint.categoryName ?? waypoint.reason,
                     )
                     .join(" and "),
+                  intendedAddedMinutes,
+                  constructionTargetMinutes,
+                  durationTargetClassification,
                   scenicWaypoints: corridorPlan.waypoints.map((waypoint) => ({ ...waypoint })),
                 });
                 scenikCandidateAdded = true;
@@ -445,6 +510,66 @@ export const planScenicRoute = createServerFn({ method: "POST" })
                     ),
                   });
               }
+              return actualAddedMinutes;
+            };
+
+            if (stage.targetExtraMinutes.length > 1) {
+              let priorTargetResult: { intended: number; actual: number } | null = null;
+              for (const intendedTargetMinutes of stage.targetExtraMinutes.slice(
+                0,
+                remainingRouteCalls,
+              )) {
+                const constructionTargetMinutes = priorTargetResult
+                  ? adaptiveDurationTargetMinutes({
+                      nextTargetMinutes: intendedTargetMinutes,
+                      priorIntendedMinutes: priorTargetResult.intended,
+                      priorActualMinutes: priorTargetResult.actual,
+                      maximumExtraMinutes: data.extra_minutes,
+                    })
+                  : intendedTargetMinutes;
+                const planning = buildCorridorPlans({
+                  places: evidencePlaces,
+                  anchors: planningAnchors,
+                  maximumEstimatedDetourMeters:
+                    averageMetersPerSecond * stage.planningBudgetMinutes * 60 * 0.95,
+                  maximumPlans: 1,
+                  attemptedSignatures,
+                  attemptedKinds,
+                  targetDetourMeters: [averageMetersPerSecond * constructionTargetMinutes * 60],
+                });
+                updatePlanningDiagnostics(planning);
+                const plan = planning.plans[0];
+                if (!plan) continue;
+                const [result] = await Promise.allSettled([requestCandidate(plan)]);
+                const actual = recordCandidateResult(
+                  plan,
+                  result,
+                  intendedTargetMinutes,
+                  constructionTargetMinutes,
+                );
+                if (actual != null) priorTargetResult = { intended: intendedTargetMinutes, actual };
+              }
+            } else {
+              const planning = buildCorridorPlans({
+                places: evidencePlaces,
+                anchors: planningAnchors,
+                maximumEstimatedDetourMeters:
+                  averageMetersPerSecond * stage.planningBudgetMinutes * 60 * 0.95,
+                maximumPlans: remainingRouteCalls,
+                attemptedSignatures,
+                attemptedKinds,
+              });
+              updatePlanningDiagnostics(planning);
+              const candidateRequests = planning.plans.map((plan) => ({
+                plan,
+                request: requestCandidate(plan),
+              }));
+              const candidateResults = await Promise.allSettled(
+                candidateRequests.map(({ request }) => request),
+              );
+              candidateResults.forEach((result, index) =>
+                recordCandidateResult(candidateRequests[index].plan, result, null, null),
+              );
             }
             const qualityEquivalent = exploredCandidateQuality.filter(
               (candidate) => bestExploredScore - candidate.score <= 3,
@@ -544,7 +669,16 @@ export const planScenicRoute = createServerFn({ method: "POST" })
       scoredCandidates,
       selection,
       data.extra_minutes,
-    );
+    ).map((candidate) => {
+      const generation = rawCandidates[candidate.originalIndex];
+      return {
+        ...candidate,
+        intendedAddedMinutes: generation?.intendedAddedMinutes ?? null,
+        constructionTargetMinutes: generation?.constructionTargetMinutes ?? null,
+        durationTargetClassification: generation?.durationTargetClassification ?? null,
+        requiredStopOrderPreserved: true,
+      };
+    });
     const directions = selection.selected.directions;
     const score = selection.selected.scoreResult;
     if (!alternativesUnavailableReason && selection.candidates.length <= 1) {

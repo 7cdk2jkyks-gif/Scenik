@@ -34,6 +34,19 @@ export type ExplorationStage = {
   targetExtraMinutes: number[];
 };
 
+export type DurationTargetClassification =
+  | "SEVERE_UNDERSHOOT"
+  | "MODERATE_UNDERSHOOT"
+  | "TARGET_BAND"
+  | "OVER_BUDGET";
+
+export type DurationAwareCorridorSample = {
+  center: LatLng;
+  targetExtraMinutes: number;
+  lateralDisplacementMeters: number;
+  journeyProgress: number;
+};
+
 export const EXPLORATION_SCORE_IMPROVEMENT_THRESHOLD = 3;
 
 const CORRIDOR_ORDER: ScenicCorridorKind[] = [
@@ -114,7 +127,7 @@ export function explorationStages(extraMinutes: number): ExplorationStage[] {
   return [
     ...explorationStages(30),
     {
-      radiusMeters: 6_000,
+      radiusMeters: 10_000,
       sampleCap: 3,
       cumulativePlaceCap: 70,
       cumulativeRouteCap: 6,
@@ -122,6 +135,106 @@ export function explorationStages(extraMinutes: number): ExplorationStage[] {
       targetExtraMinutes: [intermediateTarget, upperTarget],
     },
   ];
+}
+
+export function classifyDurationTargetResult(
+  intendedExtraMinutes: number,
+  actualExtraMinutes: number,
+  maximumExtraMinutes: number,
+): DurationTargetClassification {
+  if (actualExtraMinutes > maximumExtraMinutes) return "OVER_BUDGET";
+  const utilisation = actualExtraMinutes / Math.max(1, intendedExtraMinutes);
+  if (utilisation < 0.5) return "SEVERE_UNDERSHOOT";
+  if (utilisation < MIN_TARGET_UTILISATION) return "MODERATE_UNDERSHOOT";
+  return "TARGET_BAND";
+}
+
+export function adaptiveDurationTargetMinutes(input: {
+  nextTargetMinutes: number;
+  priorIntendedMinutes: number;
+  priorActualMinutes: number;
+  maximumExtraMinutes: number;
+}): number {
+  const boundedNextTarget = Math.max(
+    0,
+    Math.min(input.maximumExtraMinutes, input.nextTargetMinutes),
+  );
+  const classification = classifyDurationTargetResult(
+    input.priorIntendedMinutes,
+    input.priorActualMinutes,
+    input.maximumExtraMinutes,
+  );
+  if (classification === "TARGET_BAND" || classification === "OVER_BUDGET")
+    return boundedNextTarget;
+  const correction = Math.min(
+    1.5,
+    input.priorIntendedMinutes / Math.max(1, input.priorActualMinutes),
+  );
+  return Math.min(input.maximumExtraMinutes, Math.round(boundedNextTarget * correction));
+}
+
+export function targetLateralDisplacementMeters(input: {
+  baselineDistanceMeters: number;
+  baselineDurationSeconds: number;
+  targetExtraMinutes: number;
+}): number {
+  const averageMetersPerSecond =
+    input.baselineDistanceMeters / Math.max(1, input.baselineDurationSeconds);
+  const targetAdditionalDistance = averageMetersPerSecond * input.targetExtraMinutes * 60;
+  const routeLengthCap = Math.max(6_000, Math.min(70_000, input.baselineDistanceMeters * 0.15));
+  return Math.round(Math.max(6_000, Math.min(routeLengthCap, targetAdditionalDistance * 0.5)));
+}
+
+function offsetPerpendicular(
+  point: LatLng,
+  previous: LatLng,
+  next: LatLng,
+  meters: number,
+): LatLng {
+  const latitudeMeters = 111_320;
+  const longitudeMeters = Math.max(1, latitudeMeters * Math.cos((point.lat * Math.PI) / 180));
+  const north = (next.lat - previous.lat) * latitudeMeters;
+  const east = (next.lng - previous.lng) * longitudeMeters;
+  const length = Math.hypot(north, east);
+  if (length <= 0) return point;
+  const offsetNorth = (-east / length) * meters;
+  const offsetEast = (north / length) * meters;
+  return {
+    lat: point.lat + offsetNorth / latitudeMeters,
+    lng: point.lng + offsetEast / longitudeMeters,
+  };
+}
+
+export function durationAwareCorridorSamples(input: {
+  samples: LatLng[];
+  baselineDistanceMeters: number;
+  baselineDurationSeconds: number;
+  targetExtraMinutes: number[];
+}): DurationAwareCorridorSample[] {
+  if (input.samples.length === 0 || input.targetExtraMinutes.length === 0) return [];
+  return input.samples.map((sample, index) => {
+    const targetIndex = Math.min(
+      input.targetExtraMinutes.length - 1,
+      Math.floor(((index + 1) * input.targetExtraMinutes.length) / input.samples.length),
+    );
+    const targetExtraMinutes = input.targetExtraMinutes[targetIndex];
+    const lateralDisplacementMeters = targetLateralDisplacementMeters({
+      baselineDistanceMeters: input.baselineDistanceMeters,
+      baselineDurationSeconds: input.baselineDurationSeconds,
+      targetExtraMinutes,
+    });
+    return {
+      center: offsetPerpendicular(
+        sample,
+        input.samples[Math.max(0, index - 1)],
+        input.samples[Math.min(input.samples.length - 1, index + 1)],
+        lateralDisplacementMeters,
+      ),
+      targetExtraMinutes,
+      lateralDisplacementMeters,
+      journeyProgress: (index + 1) / (input.samples.length + 1),
+    };
+  });
 }
 
 export function selectPlansForDetourTargets(
@@ -226,7 +339,10 @@ export function buildCorridorPlans(input: {
   }
   for (const kind of CORRIDOR_ORDER) {
     const waypoints = groups.get(kind) ?? [];
-    for (const waypoint of waypoints.slice(0, 2)) {
+    for (const waypoint of waypoints.slice(
+      0,
+      input.targetDetourMeters?.length ? waypoints.length : 2,
+    )) {
       if (proposals.some((plan) => plan.signature === waypoint.id)) continue;
       proposals.push({
         kind,
@@ -235,6 +351,35 @@ export function buildCorridorPlans(input: {
         estimatedDetourMeters: waypoint.estimatedDetourMeters,
         signature: waypoint.id,
       });
+    }
+    if (input.targetDetourMeters?.length) {
+      for (let first = 0; first < waypoints.length; first += 1) {
+        for (let second = first + 1; second < waypoints.length; second += 1) {
+          const pair = [waypoints[first], waypoints[second]];
+          const estimatedDetourMeters = pair.reduce(
+            (sum, waypoint) => sum + waypoint.estimatedDetourMeters,
+            0,
+          );
+          if (
+            pair[0].insertionIndex === pair[1].insertionIndex ||
+            haversineDistanceMeters(pair[0], pair[1]) < 1_000 ||
+            estimatedDetourMeters > input.maximumEstimatedDetourMeters
+          )
+            continue;
+          const signature = pair
+            .map((waypoint) => waypoint.id)
+            .sort()
+            .join(":");
+          if (proposals.some((plan) => plan.signature === signature)) continue;
+          proposals.push({
+            kind,
+            reason: CORRIDOR_REASON[kind],
+            waypoints: pair,
+            estimatedDetourMeters,
+            signature,
+          });
+        }
+      }
     }
   }
 

@@ -1,14 +1,18 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
+  adaptiveDurationTargetMinutes,
   budgetUtilisation,
   buildCorridorPlans,
+  classifyDurationTargetResult,
   corridorWaypointsWithRequiredStops,
   didCompleteFullAllowanceSearch,
+  durationAwareCorridorSamples,
   explorationShouldStop,
   explorationStages,
   isTargetBudgetCandidate,
   selectPlansForDetourTargets,
+  targetLateralDisplacementMeters,
 } from "./corridor-exploration";
 import type { ScenicPlace } from "./scenic-waypoint";
 
@@ -27,7 +31,7 @@ describe("budget-driven corridor exploration", () => {
     const stages = explorationStages(60);
     assert.deepEqual(
       stages.map((stage) => stage.radiusMeters),
-      [1_200, 2_300, 3_500, 6_000],
+      [1_200, 2_300, 3_500, 10_000],
     );
     assert.deepEqual(
       stages.map((stage) => stage.sampleCap),
@@ -70,6 +74,121 @@ describe("budget-driven corridor exploration", () => {
         2,
       ).map((item) => item.signature),
       ["middle", "far"],
+    );
+  });
+
+  it("recognises the production-style 85-minute result as a severe target-generation undershoot", () => {
+    assert.equal(classifyDurationTargetResult(30, 24, 30), "TARGET_BAND");
+    assert.equal(classifyDurationTargetResult(70, 30, 85), "SEVERE_UNDERSHOOT");
+    assert.equal(classifyDurationTargetResult(70, 50, 85), "MODERATE_UNDERSHOOT");
+    assert.equal(classifyDurationTargetResult(70, 68, 85), "TARGET_BAND");
+    assert.equal(classifyDurationTargetResult(70, 86, 85), "OVER_BUDGET");
+  });
+
+  it("constructs a +70-minute search more ambitiously than +30", () => {
+    const baseline = { baselineDistanceMeters: 560_000, baselineDurationSeconds: 21_600 };
+    const thirty = targetLateralDisplacementMeters({ ...baseline, targetExtraMinutes: 30 });
+    const seventy = targetLateralDisplacementMeters({ ...baseline, targetExtraMinutes: 70 });
+    assert.ok(seventy > thirty, `${thirty} vs ${seventy}`);
+    const samples = durationAwareCorridorSamples({
+      samples: [
+        { lat: 51.75, lng: -1.25 },
+        { lat: 53.2, lng: -2.1 },
+        { lat: 54.7, lng: -3.2 },
+      ],
+      ...baseline,
+      targetExtraMinutes: [50, 70],
+    });
+    assert.deepEqual(
+      samples.map((sample) => sample.targetExtraMinutes),
+      [50, 70, 70],
+    );
+    assert.ok(samples[1].lateralDisplacementMeters > samples[0].lateralDisplacementMeters);
+    assert.deepEqual(
+      samples.map((sample) => sample.journeyProgress),
+      [0.25, 0.5, 0.75],
+    );
+  });
+
+  it("scales lateral exploration by journey length instead of using one fixed corridor", () => {
+    const short = targetLateralDisplacementMeters({
+      baselineDistanceMeters: 100_000,
+      baselineDurationSeconds: 3_857,
+      targetExtraMinutes: 70,
+    });
+    const oxfordToGlasgow = targetLateralDisplacementMeters({
+      baselineDistanceMeters: 560_000,
+      baselineDurationSeconds: 21_600,
+      targetExtraMinutes: 70,
+    });
+    assert.equal(short, 15_000);
+    assert.equal(oxfordToGlasgow, 54_444);
+    const modelledAddedMinutes = (oxfordToGlasgow * 2) / (560_000 / 21_600) / 60;
+    assert.ok(modelledAddedMinutes >= 69 && modelledAddedMinutes <= 71);
+  });
+
+  it("adapts the final bounded target after a routed undershoot", () => {
+    assert.equal(
+      adaptiveDurationTargetMinutes({
+        nextTargetMinutes: 70,
+        priorIntendedMinutes: 50,
+        priorActualMinutes: 28,
+        maximumExtraMinutes: 85,
+      }),
+      85,
+    );
+    assert.equal(
+      adaptiveDurationTargetMinutes({
+        nextTargetMinutes: 70,
+        priorIntendedMinutes: 50,
+        priorActualMinutes: 42,
+        maximumExtraMinutes: 85,
+      }),
+      70,
+    );
+    assert.equal(
+      adaptiveDurationTargetMinutes({
+        nextTargetMinutes: 90,
+        priorIntendedMinutes: 50,
+        priorActualMinutes: 45,
+        maximumExtraMinutes: 85,
+      }),
+      85,
+    );
+  });
+
+  it("selects displaced waypoints across coherent forward journey segments", () => {
+    const routeAnchors = [
+      { lat: 0, lng: 0 },
+      { lat: 0, lng: 1 },
+      { lat: 0, lng: 2 },
+      { lat: 0, lng: 3 },
+    ];
+    const result = buildCorridorPlans({
+      places: [
+        place("near-a", 0.03, 0.5, "woods"),
+        place("far-a", 0.4, 0.5, "woods"),
+        place("near-b", 0.03, 2.5, "woods"),
+        place("far-b", 0.4, 2.5, "woods"),
+      ],
+      anchors: routeAnchors,
+      maximumEstimatedDetourMeters: 100_000,
+      maximumPlans: 1,
+      targetDetourMeters: [50_000],
+    });
+    assert.equal(result.plans[0].waypoints.length, 2);
+    assert.deepEqual(
+      result.plans[0].waypoints.map((waypoint) => waypoint.id),
+      ["far-a", "far-b"],
+    );
+    assert.ok(
+      result.plans[0].waypoints[0].insertionIndex < result.plans[0].waypoints[1].insertionIndex,
+    );
+    assert.deepEqual(
+      corridorWaypointsWithRequiredStops([], routeAnchors, result.plans[0]).map(
+        (waypoint) => waypoint.lng,
+      ),
+      [0.5, 2.5],
     );
   });
 
