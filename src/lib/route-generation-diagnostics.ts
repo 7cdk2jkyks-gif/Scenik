@@ -1,5 +1,3 @@
-import { PREFERRED_TARGET_UTILISATION } from "./corridor-exploration";
-
 export type LongAttemptStatus = "COMPLETED" | "FAILED" | "NO_PLAN";
 
 export type LongAttemptResult = {
@@ -10,24 +8,17 @@ export type LongAttemptResult = {
 export type LongAttemptExecution = LongAttemptResult & {
   intendedTargetMinutes: number;
   adaptiveTargetMinutes: number;
-  adaptationDirection: import("./corridor-exploration").DurationAdaptationDirection;
-  lowerObservedActualMinutes: number | null;
-  upperObservedActualMinutes: number | null;
-  preferredTargetMinutes: number;
-  bracketedInterpolationUsed: boolean;
 };
 
 export async function runSequentialLongAttempts(input: {
   intendedTargets: number[];
   maximumExtraMinutes: number;
-  lowerObservation?: import("./corridor-exploration").DurationObservation | null;
   adaptiveTarget: (input: {
     nextTargetMinutes: number;
     priorIntendedMinutes: number;
     priorActualMinutes: number;
     maximumExtraMinutes: number;
-    lowerObservation?: import("./corridor-exploration").DurationObservation | null;
-  }) => import("./corridor-exploration").DurationTargetRefinement;
+  }) => number;
   execute: (input: {
     intendedTargetMinutes: number;
     adaptiveTargetMinutes: number;
@@ -37,34 +28,16 @@ export async function runSequentialLongAttempts(input: {
   let priorTargetResult: { intended: number; actual: number } | null = null;
 
   for (const intendedTargetMinutes of input.intendedTargets) {
-    const refinement = priorTargetResult
+    const adaptiveTargetMinutes = priorTargetResult
       ? input.adaptiveTarget({
           nextTargetMinutes: intendedTargetMinutes,
           priorIntendedMinutes: priorTargetResult.intended,
           priorActualMinutes: priorTargetResult.actual,
           maximumExtraMinutes: input.maximumExtraMinutes,
-          lowerObservation: input.lowerObservation,
         })
-      : {
-          targetMinutes: intendedTargetMinutes,
-          direction: "NONE" as const,
-          lowerObservedActualMinutes: input.lowerObservation?.actualAddedMinutes ?? null,
-          upperObservedActualMinutes: null,
-          preferredTargetMinutes: input.maximumExtraMinutes * PREFERRED_TARGET_UTILISATION,
-          bracketedInterpolationUsed: false,
-        };
-    const adaptiveTargetMinutes = refinement.targetMinutes;
+      : intendedTargetMinutes;
     const result = await input.execute({ intendedTargetMinutes, adaptiveTargetMinutes });
-    executions.push({
-      intendedTargetMinutes,
-      adaptiveTargetMinutes,
-      adaptationDirection: refinement.direction,
-      lowerObservedActualMinutes: refinement.lowerObservedActualMinutes,
-      upperObservedActualMinutes: refinement.upperObservedActualMinutes,
-      preferredTargetMinutes: refinement.preferredTargetMinutes,
-      bracketedInterpolationUsed: refinement.bracketedInterpolationUsed,
-      ...result,
-    });
+    executions.push({ intendedTargetMinutes, adaptiveTargetMinutes, ...result });
     if (result.status === "COMPLETED" && result.actualAddedMinutes != null) {
       priorTargetResult = {
         intended: intendedTargetMinutes,
@@ -102,12 +75,6 @@ export function buildRouteGenerationDiagnostic(input: {
   attemptsCompleted: number;
   intendedTargetMinutes: number[];
   adaptiveTargetMinutes: number[];
-  adaptationDirection?: import("./corridor-exploration").DurationAdaptationDirection;
-  lowerObservedActualMinutes?: number | null;
-  upperObservedActualMinutes?: number | null;
-  preferredTargetMinutes?: number;
-  finalRefinedConstructionTargetMinutes?: number | null;
-  bracketedInterpolationUsed?: boolean;
   actualAddedMinutesReturned: number;
   outcomeClassification: string;
   candidateEligibility: SafeAttemptDiagnostic[];
@@ -130,13 +97,6 @@ export function buildRouteGenerationDiagnostic(input: {
     attemptsCompleted: input.attemptsCompleted,
     intendedTargetMinutes: [...input.intendedTargetMinutes],
     adaptiveTargetMinutes: [...input.adaptiveTargetMinutes],
-    adaptationDirection: input.adaptationDirection ?? "NONE",
-    lowerObservedActualMinutes: input.lowerObservedActualMinutes ?? null,
-    upperObservedActualMinutes: input.upperObservedActualMinutes ?? null,
-    preferredTargetMinutes:
-      input.preferredTargetMinutes ?? input.requestedExtraMinutes * PREFERRED_TARGET_UTILISATION,
-    finalRefinedConstructionTargetMinutes: input.finalRefinedConstructionTargetMinutes ?? null,
-    bracketedInterpolationUsed: input.bracketedInterpolationUsed ?? false,
     actualAddedMinutesReturned: input.actualAddedMinutesReturned,
     outcomeClassification: input.outcomeClassification,
     candidateEligibility: input.candidateEligibility.map((candidate) => ({ ...candidate })),

@@ -25,14 +25,7 @@ describe("sequential long-budget attempts", () => {
     const exploration = runSequentialLongAttempts({
       intendedTargets: [50, 70],
       maximumExtraMinutes: 85,
-      adaptiveTarget: () => ({
-        targetMinutes: 85,
-        direction: "UPWARD",
-        lowerObservedActualMinutes: 39,
-        upperObservedActualMinutes: null,
-        preferredTargetMinutes: 76.5,
-        bracketedInterpolationUsed: false,
-      }),
+      adaptiveTarget: () => 85,
       execute: ({ intendedTargetMinutes }) => {
         started.push(intendedTargetMinutes);
         return intendedTargetMinutes === 50 ? first.promise : second.promise;
@@ -63,14 +56,7 @@ describe("sequential long-budget attempts", () => {
     const attemptsPromise = runSequentialLongAttempts({
       intendedTargets: [50, 70],
       maximumExtraMinutes: 85,
-      adaptiveTarget: () => ({
-        targetMinutes: 70,
-        direction: "NONE",
-        lowerObservedActualMinutes: null,
-        upperObservedActualMinutes: null,
-        preferredTargetMinutes: 76.5,
-        bracketedInterpolationUsed: false,
-      }),
+      adaptiveTarget: () => 70,
       execute: ({ intendedTargetMinutes }) =>
         intendedTargetMinutes === 50
           ? Promise.resolve({ status: "FAILED", actualAddedMinutes: null })
@@ -257,12 +243,6 @@ describe("route-generation diagnostic log", () => {
       "attemptsCompleted",
       "intendedTargetMinutes",
       "adaptiveTargetMinutes",
-      "adaptationDirection",
-      "lowerObservedActualMinutes",
-      "upperObservedActualMinutes",
-      "preferredTargetMinutes",
-      "finalRefinedConstructionTargetMinutes",
-      "bracketedInterpolationUsed",
       "actualAddedMinutesReturned",
       "outcomeClassification",
       "candidateEligibility",
