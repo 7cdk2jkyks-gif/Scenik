@@ -11,6 +11,7 @@ import {
   explorationShouldStop,
   explorationStages,
   isTargetBudgetCandidate,
+  PREFERRED_TARGET_UTILISATION,
   selectPlansForDetourTargets,
   targetLateralDisplacementMeters,
 } from "./corridor-exploration";
@@ -134,16 +135,16 @@ describe("budget-driven corridor exploration", () => {
         priorIntendedMinutes: 50,
         priorActualMinutes: 28,
         maximumExtraMinutes: 85,
-      }),
+      }).targetMinutes,
       85,
     );
     assert.equal(
       adaptiveDurationTargetMinutes({
         nextTargetMinutes: 70,
         priorIntendedMinutes: 50,
-        priorActualMinutes: 42,
+        priorActualMinutes: 50,
         maximumExtraMinutes: 85,
-      }),
+      }).targetMinutes,
       70,
     );
     assert.equal(
@@ -152,9 +153,68 @@ describe("budget-driven corridor exploration", () => {
         priorIntendedMinutes: 50,
         priorActualMinutes: 45,
         maximumExtraMinutes: 85,
-      }),
+      }).targetMinutes,
       85,
     );
+  });
+
+  it("refines downward between observed construction bounds after an overshoot", () => {
+    const refinement = adaptiveDurationTargetMinutes({
+      nextTargetMinutes: 70,
+      priorIntendedMinutes: 50,
+      priorActualMinutes: 101.1,
+      maximumExtraMinutes: 85,
+      lowerObservation: {
+        constructionTargetMinutes: 30,
+        actualAddedMinutes: 41.3,
+      },
+    });
+    assert.equal(refinement.direction, "DOWNWARD");
+    assert.equal(refinement.bracketedInterpolationUsed, true);
+    assert.equal(refinement.lowerObservedActualMinutes, 41.3);
+    assert.equal(refinement.upperObservedActualMinutes, 101.1);
+    assert.equal(refinement.preferredTargetMinutes, 85 * PREFERRED_TARGET_UTILISATION);
+    assert.ok(refinement.targetMinutes > 30 && refinement.targetMinutes < 50);
+    assert.equal(refinement.targetMinutes, 42);
+  });
+
+  it("uses a safe deterministic downward fallback without a usable bracket", () => {
+    const inputs = [
+      undefined,
+      { constructionTargetMinutes: 50, actualAddedMinutes: 41.3 },
+      { constructionTargetMinutes: 49, actualAddedMinutes: 41.3 },
+      { constructionTargetMinutes: 30, actualAddedMinutes: 101.1 },
+      { constructionTargetMinutes: Number.NaN, actualAddedMinutes: 41.3 },
+    ];
+    for (const lowerObservation of inputs) {
+      const refinement = adaptiveDurationTargetMinutes({
+        nextTargetMinutes: 70,
+        priorIntendedMinutes: 50,
+        priorActualMinutes: 101.1,
+        maximumExtraMinutes: 85,
+        lowerObservation,
+      });
+      assert.equal(refinement.direction, "DOWNWARD");
+      assert.equal(refinement.bracketedInterpolationUsed, false);
+      assert.ok(refinement.targetMinutes < 50);
+      assert.ok(refinement.targetMinutes > 0);
+    }
+  });
+
+  it("keeps target-band refinement eligible and below the preferred construction aim", () => {
+    const refinement = adaptiveDurationTargetMinutes({
+      nextTargetMinutes: 90,
+      priorIntendedMinutes: 70,
+      priorActualMinutes: 68,
+      maximumExtraMinutes: 85,
+    });
+    assert.equal(refinement.direction, "TARGET_BAND");
+    assert.equal(refinement.targetMinutes, 77);
+    assert.ok(refinement.targetMinutes <= 85);
+  });
+
+  it("preserves the modelled 180-minute target-band success", () => {
+    assert.equal(classifyDurationTargetResult(140, 157, 180), "TARGET_BAND");
   });
 
   it("selects displaced waypoints across coherent forward journey segments", () => {

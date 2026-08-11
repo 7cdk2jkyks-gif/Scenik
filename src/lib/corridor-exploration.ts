@@ -48,6 +48,24 @@ export type DurationAwareCorridorSample = {
 };
 
 export const EXPLORATION_SCORE_IMPROVEMENT_THRESHOLD = 3;
+/** Construction aim only; eligibility remains governed by MIN_TARGET_UTILISATION and hard max. */
+export const PREFERRED_TARGET_UTILISATION = 0.9;
+
+export type DurationAdaptationDirection = "UPWARD" | "DOWNWARD" | "TARGET_BAND" | "NONE";
+
+export type DurationObservation = {
+  constructionTargetMinutes: number;
+  actualAddedMinutes: number;
+};
+
+export type DurationTargetRefinement = {
+  targetMinutes: number;
+  direction: DurationAdaptationDirection;
+  lowerObservedActualMinutes: number | null;
+  upperObservedActualMinutes: number | null;
+  preferredTargetMinutes: number;
+  bracketedInterpolationUsed: boolean;
+};
 
 const CORRIDOR_ORDER: ScenicCorridorKind[] = [
   "forest",
@@ -138,12 +156,12 @@ export function explorationStages(extraMinutes: number): ExplorationStage[] {
 }
 
 export function classifyDurationTargetResult(
-  intendedExtraMinutes: number,
+  _intendedExtraMinutes: number,
   actualExtraMinutes: number,
   maximumExtraMinutes: number,
 ): DurationTargetClassification {
   if (actualExtraMinutes > maximumExtraMinutes) return "OVER_BUDGET";
-  const utilisation = actualExtraMinutes / Math.max(1, intendedExtraMinutes);
+  const utilisation = actualExtraMinutes / Math.max(1, maximumExtraMinutes);
   if (utilisation < 0.5) return "SEVERE_UNDERSHOOT";
   if (utilisation < MIN_TARGET_UTILISATION) return "MODERATE_UNDERSHOOT";
   return "TARGET_BAND";
@@ -154,23 +172,80 @@ export function adaptiveDurationTargetMinutes(input: {
   priorIntendedMinutes: number;
   priorActualMinutes: number;
   maximumExtraMinutes: number;
-}): number {
+  lowerObservation?: DurationObservation | null;
+}): DurationTargetRefinement {
   const boundedNextTarget = Math.max(
     0,
     Math.min(input.maximumExtraMinutes, input.nextTargetMinutes),
   );
+  const preferredTargetMinutes = input.maximumExtraMinutes * PREFERRED_TARGET_UTILISATION;
   const classification = classifyDurationTargetResult(
     input.priorIntendedMinutes,
     input.priorActualMinutes,
     input.maximumExtraMinutes,
   );
-  if (classification === "TARGET_BAND" || classification === "OVER_BUDGET")
-    return boundedNextTarget;
+  if (classification === "OVER_BUDGET") {
+    const lower = input.lowerObservation;
+    const upperConstruction = input.priorIntendedMinutes;
+    const hasUsableBracket =
+      lower != null &&
+      Number.isFinite(lower.constructionTargetMinutes) &&
+      Number.isFinite(lower.actualAddedMinutes) &&
+      lower.constructionTargetMinutes >= 0 &&
+      lower.constructionTargetMinutes < upperConstruction &&
+      upperConstruction - lower.constructionTargetMinutes > 2 &&
+      lower.actualAddedMinutes < preferredTargetMinutes &&
+      input.priorActualMinutes - lower.actualAddedMinutes > 0.1;
+    let targetMinutes: number;
+    if (hasUsableBracket && lower) {
+      const rawRatio =
+        (preferredTargetMinutes - lower.actualAddedMinutes) /
+        (input.priorActualMinutes - lower.actualAddedMinutes);
+      const ratio = Math.max(0.1, Math.min(0.9, rawRatio));
+      targetMinutes =
+        lower.constructionTargetMinutes +
+        ratio * (upperConstruction - lower.constructionTargetMinutes);
+    } else {
+      const observedRatio = preferredTargetMinutes / Math.max(1, input.priorActualMinutes);
+      targetMinutes = input.priorIntendedMinutes * Math.max(0.25, Math.min(0.9, observedRatio));
+    }
+    const safelyBoundedTarget = hasUsableBracket
+      ? Math.max(
+          lower!.constructionTargetMinutes + 1,
+          Math.min(input.maximumExtraMinutes, upperConstruction - 1, targetMinutes),
+        )
+      : Math.max(1, Math.min(input.maximumExtraMinutes, upperConstruction - 1, targetMinutes));
+    return {
+      targetMinutes: Math.round(safelyBoundedTarget),
+      direction: "DOWNWARD",
+      lowerObservedActualMinutes: lower?.actualAddedMinutes ?? null,
+      upperObservedActualMinutes: input.priorActualMinutes,
+      preferredTargetMinutes,
+      bracketedInterpolationUsed: hasUsableBracket,
+    };
+  }
+  if (classification === "TARGET_BAND") {
+    return {
+      targetMinutes: Math.round(Math.min(boundedNextTarget, preferredTargetMinutes)),
+      direction: "TARGET_BAND",
+      lowerObservedActualMinutes: input.priorActualMinutes,
+      upperObservedActualMinutes: null,
+      preferredTargetMinutes,
+      bracketedInterpolationUsed: false,
+    };
+  }
   const correction = Math.min(
     1.5,
     input.priorIntendedMinutes / Math.max(1, input.priorActualMinutes),
   );
-  return Math.min(input.maximumExtraMinutes, Math.round(boundedNextTarget * correction));
+  return {
+    targetMinutes: Math.min(input.maximumExtraMinutes, Math.round(boundedNextTarget * correction)),
+    direction: "UPWARD",
+    lowerObservedActualMinutes: input.priorActualMinutes,
+    upperObservedActualMinutes: null,
+    preferredTargetMinutes,
+    bracketedInterpolationUsed: false,
+  };
 }
 
 export function targetLateralDisplacementMeters(input: {

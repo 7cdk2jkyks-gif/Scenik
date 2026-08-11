@@ -523,9 +523,35 @@ export const planScenicRoute = createServerFn({ method: "POST" })
             };
 
             if (stage.targetExtraMinutes.length > 1) {
+              const firstLongTarget = stage.targetExtraMinutes[0];
+              const lowerObservation = generatedCandidateOutcomes
+                .filter(
+                  (candidate) =>
+                    candidate.source === "scenik" &&
+                    candidate.outcome === "ELIGIBLE" &&
+                    candidate.addedMinutes != null &&
+                    candidate.estimatedDetourMeters != null,
+                )
+                .map((candidate) => ({
+                  actualAddedMinutes: candidate.addedMinutes!,
+                  constructionTargetMinutes:
+                    candidate.estimatedDetourMeters! / averageMetersPerSecond / 60,
+                }))
+                .filter(
+                  (observation) =>
+                    Number.isFinite(observation.constructionTargetMinutes) &&
+                    observation.constructionTargetMinutes >= 0 &&
+                    observation.constructionTargetMinutes < firstLongTarget,
+                )
+                .sort(
+                  (a, b) =>
+                    b.actualAddedMinutes - a.actualAddedMinutes ||
+                    b.constructionTargetMinutes - a.constructionTargetMinutes,
+                )[0];
               longAttemptExecutions = await runSequentialLongAttempts({
                 intendedTargets: stage.targetExtraMinutes.slice(0, remainingRouteCalls),
                 maximumExtraMinutes: data.extra_minutes,
+                lowerObservation,
                 adaptiveTarget: adaptiveDurationTargetMinutes,
                 execute: async ({ intendedTargetMinutes, adaptiveTargetMinutes }) => {
                   const planning = buildCorridorPlans({
@@ -767,8 +793,11 @@ export const planScenicRoute = createServerFn({ method: "POST" })
       data.extra_minutes,
     );
     const mainRejectionReason = rejectionReasons.values().next().value ?? null;
-    const { didCompleteFullAllowanceSearch, explorationStages: diagnosticExplorationStages } =
-      await import("./corridor-exploration");
+    const {
+      didCompleteFullAllowanceSearch,
+      explorationStages: diagnosticExplorationStages,
+      PREFERRED_TARGET_UTILISATION,
+    } = await import("./corridor-exploration");
     const explorationTargets = diagnosticExplorationStages(data.extra_minutes);
     const finalSelectionReason =
       candidateDiagnostics.find((candidate) => candidate.selected)?.selectionReason ?? null;
@@ -845,6 +874,20 @@ export const planScenicRoute = createServerFn({ method: "POST" })
         adaptiveTargetMinutes: longAttemptExecutions.map(
           (attempt) => attempt.adaptiveTargetMinutes,
         ),
+        adaptationDirection: longAttemptExecutions.at(-1)?.adaptationDirection ?? "NONE",
+        lowerObservedActualMinutes:
+          longAttemptExecutions.at(-1)?.lowerObservedActualMinutes ?? null,
+        upperObservedActualMinutes:
+          longAttemptExecutions.at(-1)?.upperObservedActualMinutes ?? null,
+        preferredTargetMinutes:
+          longAttemptExecutions.at(-1)?.preferredTargetMinutes ??
+          data.extra_minutes * PREFERRED_TARGET_UTILISATION,
+        finalRefinedConstructionTargetMinutes:
+          longAttemptExecutions.length > 1
+            ? (longAttemptExecutions.at(-1)?.adaptiveTargetMinutes ?? null)
+            : null,
+        bracketedInterpolationUsed:
+          longAttemptExecutions.at(-1)?.bracketedInterpolationUsed ?? false,
         actualAddedMinutesReturned: Math.round((selection.measuredExtraTimeSeconds / 60) * 10) / 10,
         outcomeClassification: selection.timeTargetOutcome,
         candidateEligibility,
