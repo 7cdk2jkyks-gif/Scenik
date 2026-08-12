@@ -33,6 +33,39 @@ function candidate(
 }
 
 describe("selectRouteCandidate", () => {
+  it("models the captured 30-minute quality guardrail with stable candidate lineage", () => {
+    const baselineSeconds = 21_600;
+    const captured = [
+      { id: "google-alternative-1", added: 11.8, score: 73 },
+      { id: "scenic-stage-2", added: 17, score: 57 },
+      { id: "scenic-stage-3", added: 18.8, score: 43 },
+      { id: "scenic-stage-4", added: 25.4, score: 42 },
+    ].map(({ id, added, score }, index) => ({
+      ...candidate(index + 1, baselineSeconds + added * 60, score),
+      candidateId: id,
+      routeShapeEligible: true,
+    }));
+    const candidates = [
+      { ...candidate(0, baselineSeconds, 77), candidateId: "baseline-0" },
+      ...captured,
+    ];
+    const selection = selectRouteCandidate(candidates, 30);
+    const diagnostics = candidateSelectionDiagnostics(candidates, selection, 30);
+
+    assert.equal(selection.selected.candidateId, "google-alternative-1");
+    assert.equal(selection.timeTargetOutcome, "LONGER_WEAKENED_QUALITY");
+    assert.equal(
+      diagnostics.find((item) => item.candidateId === "scenic-stage-4")?.rejectionReason,
+      "BELOW_QUALITY_GUARDRAIL",
+    );
+    assert.equal(73 - 42 > TIME_TARGET_SCENIC_QUALITY_GUARDRAIL, true);
+    assert.ok(
+      Math.abs(
+        candidateBudgetUtilisation(baselineSeconds, baselineSeconds + 25.4 * 60, 30) - 25.4 / 30,
+      ) < 1e-12,
+    );
+  });
+
   it("cannot rescue incoherent geometry with a higher Scenic Score", () => {
     const coherent = candidate(1, 5_000, 77);
     const incoherent = {

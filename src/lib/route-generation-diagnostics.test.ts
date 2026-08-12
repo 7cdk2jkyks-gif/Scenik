@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   buildRouteGenerationDiagnostic,
+  candidateByRequestLocalId,
   formatRouteGenerationDiagnosticForClipboard,
   internalRouteDiagnosticResponse,
   runSequentialLongAttempts,
@@ -78,6 +79,16 @@ describe("sequential long-budget attempts", () => {
 });
 
 describe("route-generation diagnostic log", () => {
+  it("joins null-target candidates by request-local ID rather than the first matching target", () => {
+    const candidates = [
+      { candidateId: "baseline-0", intended: null, score: 77 },
+      { candidateId: "google-alternative-1", intended: null, score: 35 },
+      { candidateId: "scenic-stage-2", intended: null, score: 73 },
+    ];
+    assert.equal(candidateByRequestLocalId(candidates, "google-alternative-1")?.score, 35);
+    assert.equal(candidateByRequestLocalId(candidates, "scenic-stage-2")?.score, 73);
+  });
+
   it("records duration and completed attempts without leaking sensitive fields", () => {
     const diagnostic = buildRouteGenerationDiagnostic({
       correlationId: "route-123",
@@ -100,6 +111,9 @@ describe("route-generation diagnostic log", () => {
       outcomeClassification: "SEVERE_UNDERSHOOT",
       candidateEligibility: [
         {
+          candidateId: "long-target-5",
+          candidateSource: "scenik",
+          explorationStage: 3,
           intendedTargetMinutes: 50,
           adaptiveTargetMinutes: 50,
           actualAddedMinutes: null,
@@ -108,6 +122,21 @@ describe("route-generation diagnostic log", () => {
           budgetEligible: null,
           qualityEligible: null,
           scenicScore: null,
+          scoreBreakdown: {
+            naturalBeauty: 7,
+            pointsOfInterest: 6,
+            moodMatch: 5,
+            roadCharacter: 8,
+            themeMatch: 4,
+            diversity: 6,
+            rationale: "must-not-escape",
+          },
+          allowanceUtilisation: 0.6,
+          evidenceEligible: true,
+          targetBandEligible: false,
+          selected: false,
+          rejectionReason: "INCOHERENT_ROUTE",
+          finalSelectionReason: "must-not-escape",
           routeShapeEligible: false,
           routeShapeRejectionReason: "WAYPOINT_SPUR",
           reverseOverlapDistanceMeters: 2_400,
@@ -136,6 +165,9 @@ describe("route-generation diagnostic log", () => {
     assert.equal(diagnostic.attemptsCompleted, 5);
     assert.equal(diagnostic.totalServerProcessingDurationMs, 1_984);
     assert.deepEqual(diagnostic.candidateEligibility[0], {
+      candidateId: "long-target-5",
+      candidateSource: "scenik",
+      explorationStage: 3,
       intendedTargetMinutes: 50,
       adaptiveTargetMinutes: 50,
       actualAddedMinutes: null,
@@ -144,6 +176,20 @@ describe("route-generation diagnostic log", () => {
       budgetEligible: null,
       qualityEligible: null,
       scenicScore: null,
+      scoreBreakdown: {
+        naturalBeauty: 7,
+        pointsOfInterest: 6,
+        moodMatch: 5,
+        roadCharacter: 8,
+        themeMatch: 4,
+        diversity: 6,
+      },
+      allowanceUtilisation: 0.6,
+      evidenceEligible: true,
+      targetBandEligible: false,
+      selected: false,
+      rejectionReason: "INCOHERENT_ROUTE",
+      finalSelectionReason: null,
       routeShapeEligible: false,
       routeShapeRejectionReason: "WAYPOINT_SPUR",
       reverseOverlapDistanceMeters: 2_400,
@@ -163,6 +209,7 @@ describe("route-generation diagnostic log", () => {
       "key-1",
       "token-1",
       "secret-1",
+      "must-not-escape",
     ]) {
       assert.equal(serialized.includes(forbidden), false);
     }
@@ -237,6 +284,9 @@ describe("route-generation diagnostic log", () => {
       actualAddedMinutesReturned: 41,
       outcomeClassification: "TARGET_MET",
       candidateEligibility: outcomes.map(([eligible, reason, status]) => ({
+        candidateId: `candidate-${status}-${String(reason)}`,
+        candidateSource: "scenik" as const,
+        explorationStage: 1,
         intendedTargetMinutes: null,
         adaptiveTargetMinutes: null,
         actualAddedMinutes: null,
@@ -339,5 +389,64 @@ describe("route-generation diagnostic log", () => {
     assert.equal(JSON.stringify(copied).includes("Oxford"), false);
     assert.equal(JSON.stringify(copied).includes("secret-polyline"), false);
     assert.equal(JSON.stringify(copied).includes("must-not-copy"), false);
+  });
+
+  it("keeps candidate scores and safe breakdowns attached to their exact request-local IDs", () => {
+    const candidate = (candidateId: string, scenicScore: number) => ({
+      candidateId,
+      candidateSource: "scenik" as const,
+      explorationStage: 2,
+      intendedTargetMinutes: null,
+      adaptiveTargetMinutes: null,
+      actualAddedMinutes: 12,
+      outcomeClassification: "ELIGIBLE",
+      duplicateEligible: true,
+      budgetEligible: true,
+      qualityEligible: true,
+      scenicScore,
+      scoreBreakdown: {
+        naturalBeauty: scenicScore,
+        pointsOfInterest: 1,
+        moodMatch: 2,
+        roadCharacter: 3,
+        themeMatch: 4,
+        diversity: 5,
+      },
+      allowanceUtilisation: 0.4,
+      evidenceEligible: true,
+      targetBandEligible: false,
+      selected: scenicScore === 73,
+      rejectionReason: scenicScore === 73 ? null : "BELOW_QUALITY_GUARDRAIL",
+      finalSelectionReason: scenicScore === 73 ? "BELOW_TARGET_BEST_BALANCE" : null,
+    });
+    const diagnostic = buildRouteGenerationDiagnostic({
+      correlationId: "lineage",
+      requestedExtraMinutes: 30,
+      baselineDurationSeconds: 21_600,
+      plannedExplorationStages: [],
+      attemptsPlanned: 4,
+      attemptsCompleted: 4,
+      intendedTargetMinutes: [],
+      adaptiveTargetMinutes: [],
+      actualAddedMinutesReturned: 11.8,
+      outcomeClassification: "LONGER_WEAKENED_QUALITY",
+      candidateEligibility: [candidate("scenic-stage-2", 42), candidate("scenic-stage-3", 73)],
+      candidateScenicScores: [42, 73],
+      finalSelectionReason: "BELOW_TARGET_BEST_BALANCE",
+      totalServerProcessingDurationMs: 1_000,
+    });
+
+    assert.deepEqual(
+      diagnostic.candidateEligibility.map(({ candidateId, scenicScore }) => [
+        candidateId,
+        scenicScore,
+      ]),
+      [
+        ["scenic-stage-2", 42],
+        ["scenic-stage-3", 73],
+      ],
+    );
+    assert.equal(JSON.stringify(diagnostic).includes("coordinates"), false);
+    assert.equal(JSON.stringify(diagnostic).includes("polyline"), false);
   });
 });

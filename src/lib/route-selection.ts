@@ -2,6 +2,7 @@ import type { ComputedDirections } from "./google-maps.server";
 import type { ScenicEvidenceCounts } from "./scenic-waypoint";
 
 export type ScoredRouteCandidate<TScore> = {
+  candidateId?: string;
   directions: ComputedDirections;
   score: number;
   scoreResult: TScore;
@@ -27,6 +28,7 @@ export type RouteSelection<TScore> = {
 };
 
 export type CandidateSelectionDiagnostic = {
+  candidateId: string | null;
   originalIndex: number;
   source: ScoredRouteCandidate<unknown>["source"];
   durationSeconds: number;
@@ -341,6 +343,7 @@ export function candidateSelectionDiagnostics<TScore>(
             ? "TARGET_BAND_HIGHEST_SCENIC_QUALITY"
             : "BELOW_TARGET_BEST_BALANCE";
     return {
+      candidateId: candidate.candidateId ?? null,
       originalIndex: candidate.originalIndex,
       source: candidate.source,
       durationSeconds: directions.durationSeconds,

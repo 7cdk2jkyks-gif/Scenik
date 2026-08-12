@@ -1,5 +1,12 @@
 export type LongAttemptStatus = "COMPLETED" | "FAILED" | "NO_PLAN";
 
+export function candidateByRequestLocalId<T extends { candidateId: string | null }>(
+  candidates: T[],
+  candidateId: string,
+): T | undefined {
+  return candidates.find((candidate) => candidate.candidateId === candidateId);
+}
+
 export type LongAttemptResult = {
   status: LongAttemptStatus;
   actualAddedMinutes: number | null;
@@ -50,6 +57,9 @@ export async function runSequentialLongAttempts(input: {
 }
 
 type SafeAttemptDiagnostic = {
+  candidateId: string;
+  candidateSource: "fastest" | "google" | "scenik";
+  explorationStage: number | null;
   intendedTargetMinutes: number | null;
   adaptiveTargetMinutes: number | null;
   actualAddedMinutes: number | null;
@@ -58,6 +68,20 @@ type SafeAttemptDiagnostic = {
   budgetEligible: boolean | null;
   qualityEligible: boolean | null;
   scenicScore: number | null;
+  scoreBreakdown?: {
+    naturalBeauty: number;
+    pointsOfInterest: number;
+    moodMatch: number;
+    roadCharacter: number;
+    themeMatch: number;
+    diversity: number;
+  } | null;
+  allowanceUtilisation?: number | null;
+  evidenceEligible?: boolean | null;
+  targetBandEligible?: boolean | null;
+  selected?: boolean;
+  rejectionReason?: string | null;
+  finalSelectionReason?: string | null;
   routeShapeEligible?: boolean | null;
   routeShapeRejectionReason?: string | null;
   reverseOverlapDistanceMeters?: number | null;
@@ -108,6 +132,9 @@ export function buildRouteGenerationDiagnostic(input: {
     actualAddedMinutesReturned: input.actualAddedMinutesReturned,
     outcomeClassification: input.outcomeClassification,
     candidateEligibility: input.candidateEligibility.map((candidate) => ({
+      candidateId: candidate.candidateId,
+      candidateSource: candidate.candidateSource,
+      explorationStage: candidate.explorationStage,
       intendedTargetMinutes: candidate.intendedTargetMinutes,
       adaptiveTargetMinutes: candidate.adaptiveTargetMinutes,
       actualAddedMinutes: candidate.actualAddedMinutes,
@@ -116,6 +143,22 @@ export function buildRouteGenerationDiagnostic(input: {
       budgetEligible: candidate.budgetEligible,
       qualityEligible: candidate.qualityEligible,
       scenicScore: candidate.scenicScore,
+      scoreBreakdown: candidate.scoreBreakdown
+        ? {
+            naturalBeauty: candidate.scoreBreakdown.naturalBeauty,
+            pointsOfInterest: candidate.scoreBreakdown.pointsOfInterest,
+            moodMatch: candidate.scoreBreakdown.moodMatch,
+            roadCharacter: candidate.scoreBreakdown.roadCharacter,
+            themeMatch: candidate.scoreBreakdown.themeMatch,
+            diversity: candidate.scoreBreakdown.diversity,
+          }
+        : null,
+      allowanceUtilisation: candidate.allowanceUtilisation ?? null,
+      evidenceEligible: candidate.evidenceEligible ?? null,
+      targetBandEligible: candidate.targetBandEligible ?? null,
+      selected: candidate.selected ?? false,
+      rejectionReason: candidate.rejectionReason ?? null,
+      finalSelectionReason: candidate.selected ? (candidate.finalSelectionReason ?? null) : null,
       routeShapeEligible: candidate.routeShapeEligible ?? null,
       routeShapeRejectionReason: candidate.routeShapeRejectionReason ?? null,
       reverseOverlapDistanceMeters: candidate.reverseOverlapDistanceMeters ?? null,
