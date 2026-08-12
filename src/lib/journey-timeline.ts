@@ -1,4 +1,9 @@
-import { haversineDistanceMeters, type LatLng, type ScenicWaypointPlan } from "./scenic-waypoint";
+import {
+  haversineDistanceMeters,
+  verifiedMeaningfulPlaceName,
+  type LatLng,
+  type ScenicWaypointPlan,
+} from "./scenic-waypoint";
 
 export type JourneyTimelineEvent = {
   identity?: string;
@@ -41,6 +46,32 @@ type JourneyPreferences = {
   moods?: string | string[];
   themes?: string | string[];
 };
+
+export function verifiedJourneyHighlights(
+  waypoints: Array<{ displayName?: string; alternativeDisplayName?: string }>,
+): string | null {
+  const names = waypoints.flatMap((waypoint) => {
+    const name = verifiedMeaningfulPlaceName(waypoint);
+    return name ? [name] : [];
+  });
+  return names.join(" and ") || null;
+}
+
+export function routeResultNarrative(input: {
+  selectedWinner: string;
+  selectedWaypointReason: string | null;
+  requestedExtraMinutes: number;
+  measuredExtraTimeSeconds: number;
+}): string {
+  const addedMinutes = Math.round(input.measuredExtraTimeSeconds / 60);
+  if (input.selectedWinner === "scenik" && input.selectedWaypointReason)
+    return `${input.requestedExtraMinutes > 10 ? "Your larger time allowance unlocked this route. " : ""}It adds ${addedMinutes} minutes and includes ${input.selectedWaypointReason}.`;
+  if (input.measuredExtraTimeSeconds > 0)
+    return `This route remains within ${addedMinutes} minutes of the fastest journey and scored higher on measurable route variety.`;
+  if (input.requestedExtraMinutes > 10)
+    return `Scenik searched further within your ${input.requestedExtraMinutes}-minute allowance, but no better route scored higher.`;
+  return "This was the highest-scoring route within your allowance without adding journey time.";
+}
 
 const normalized = (value: string) =>
   value
@@ -127,9 +158,9 @@ export function buildJourneyTimeline(
   const timeline = waypoints
     .flatMap((waypoint) => {
       const category = waypoint.categoryName?.trim() || waypoint.reason;
-      const verifiedDisplayName = waypoint.displayName?.trim();
-      const name = verifiedDisplayName || category;
-      if (!name || !category || timedSteps.length === 0) return [];
+      const verifiedDisplayName = verifiedMeaningfulPlaceName(waypoint);
+      if (!verifiedDisplayName || !category || timedSteps.length === 0) return [];
+      const name = verifiedDisplayName;
       const identity = waypoint.id.trim();
       const presentationIdentity = `${normalized(name)}|${normalized(category)}`;
       if ((identity && seenIdentities.has(identity)) || seenPresentations.has(presentationIdentity))

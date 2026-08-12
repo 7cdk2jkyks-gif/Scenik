@@ -9,6 +9,7 @@ export type ScoredRouteCandidate<TScore> = {
   source?: "fastest" | "google" | "scenik";
   selectedWaypointReason?: string | null;
   evidence?: ScenicEvidenceCounts;
+  routeShapeEligible?: boolean;
 };
 
 export type RouteSelection<TScore> = {
@@ -41,6 +42,7 @@ export type CandidateSelectionDiagnostic = {
     | "INVALID_ROUTE_METRICS"
     | "DUPLICATE_ROUTE"
     | "OVER_TIME_BUDGET"
+    | "INCOHERENT_ROUTE"
     | "BELOW_QUALITY_GUARDRAIL"
     | "LOWER_UTILISATION_OR_TIEBREAK"
     | null;
@@ -175,7 +177,8 @@ export function selectRouteCandidate<TScore>(
   );
   const ceiling = maximumAllowedDurationSeconds(fastestDurationSeconds, requestedExtraMinutes);
   const eligible = candidates.filter(
-    (candidate) => candidate.directions.durationSeconds <= ceiling,
+    (candidate) =>
+      candidate.directions.durationSeconds <= ceiling && candidate.routeShapeEligible !== false,
   );
   const highestEligibleScore = Math.max(...eligible.map((candidate) => candidate.score));
   const qualityGuardrailScore = highestEligibleScore - TIME_TARGET_SCENIC_QUALITY_GUARDRAIL;
@@ -293,7 +296,9 @@ export function candidateSelectionDiagnostics<TScore>(
       inputCandidates
         .slice(0, index)
         .some((prior) => routesAreNearIdentical(prior.directions, directions));
-    const eligible = !invalid && !duplicate && directions.durationSeconds <= ceiling;
+    const routeShapeEligible = candidate.routeShapeEligible !== false;
+    const eligible =
+      !invalid && !duplicate && routeShapeEligible && directions.durationSeconds <= ceiling;
     const selected = candidate.originalIndex === selection.selected.originalIndex;
     const scoreDifference = highestEligibleScore - candidate.score;
     const utilisation = candidateBudgetUtilisation(
@@ -311,11 +316,14 @@ export function candidateSelectionDiagnostics<TScore>(
         ? "INVALID_ROUTE_METRICS"
         : duplicate
           ? "DUPLICATE_ROUTE"
-          : !eligible
-            ? "OVER_TIME_BUDGET"
-            : belowTargetQualityGuardrail || scoreDifference > TIME_TARGET_SCENIC_QUALITY_GUARDRAIL
-              ? "BELOW_QUALITY_GUARDRAIL"
-              : "LOWER_UTILISATION_OR_TIEBREAK";
+          : !routeShapeEligible
+            ? "INCOHERENT_ROUTE"
+            : !eligible
+              ? "OVER_TIME_BUDGET"
+              : belowTargetQualityGuardrail ||
+                  scoreDifference > TIME_TARGET_SCENIC_QUALITY_GUARDRAIL
+                ? "BELOW_QUALITY_GUARDRAIL"
+                : "LOWER_UTILISATION_OR_TIEBREAK";
     const evidenceStrength = candidate.evidence
       ? Object.values(candidate.evidence).reduce((sum, count) => sum + count, 0)
       : null;

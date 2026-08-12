@@ -108,6 +108,15 @@ describe("route-generation diagnostic log", () => {
           budgetEligible: null,
           qualityEligible: null,
           scenicScore: null,
+          routeShapeEligible: false,
+          routeShapeRejectionReason: "WAYPOINT_SPUR",
+          reverseOverlapDistanceMeters: 2_400,
+          reverseOverlapRatio: 0.12,
+          waypointSpurDetected: true,
+          affectedWaypointIndex: 1,
+          waypointAssociationStatus: "EXACT",
+          routeShapeAnalysisStatus: "ANALYSED",
+          polyline: "nested-secret-polyline",
         },
       ],
       candidateScenicScores: [66, 72],
@@ -126,11 +135,30 @@ describe("route-generation diagnostic log", () => {
 
     assert.equal(diagnostic.attemptsCompleted, 5);
     assert.equal(diagnostic.totalServerProcessingDurationMs, 1_984);
+    assert.deepEqual(diagnostic.candidateEligibility[0], {
+      intendedTargetMinutes: 50,
+      adaptiveTargetMinutes: 50,
+      actualAddedMinutes: null,
+      outcomeClassification: "REQUEST_FAILED",
+      duplicateEligible: null,
+      budgetEligible: null,
+      qualityEligible: null,
+      scenicScore: null,
+      routeShapeEligible: false,
+      routeShapeRejectionReason: "WAYPOINT_SPUR",
+      reverseOverlapDistanceMeters: 2_400,
+      reverseOverlapRatio: 0.12,
+      waypointSpurDetected: true,
+      affectedWaypointIndex: 1,
+      waypointAssociationStatus: "EXACT",
+      routeShapeAnalysisStatus: "ANALYSED",
+    });
     for (const forbidden of [
       "coordinates",
       "Oxford",
       "secret-place",
       "encoded-route",
+      "nested-secret-polyline",
       "user-1",
       "key-1",
       "token-1",
@@ -183,6 +211,64 @@ describe("route-generation diagnostic log", () => {
     ]) {
       assert.equal(line.includes(forbidden), false);
     }
+  });
+
+  it("distinguishes each privacy-safe route-shape outcome", () => {
+    const outcomes = [
+      [true, null, "ANALYSED"],
+      [false, "WAYPOINT_SPUR", "ANALYSED"],
+      [false, "MATERIAL_REVERSE_RETRACE", "ANALYSED"],
+      [false, "MISSING_GEOMETRY", "MISSING_GEOMETRY"],
+      [false, "MALFORMED_GEOMETRY", "MALFORMED_GEOMETRY"],
+      [false, "GEOMETRY_LIMIT_EXCEEDED", "GEOMETRY_LIMIT_EXCEEDED"],
+      [false, "ANALYSIS_WORK_LIMIT", "WORK_LIMIT_EXCEEDED"],
+      [true, null, "TRUSTED_BASELINE"],
+      [true, null, "LEGACY_UNAVAILABLE"],
+    ] as const;
+    const diagnostic = buildRouteGenerationDiagnostic({
+      correlationId: "route-shapes",
+      requestedExtraMinutes: 85,
+      baselineDurationSeconds: 21_600,
+      plannedExplorationStages: [],
+      attemptsPlanned: outcomes.length,
+      attemptsCompleted: outcomes.length,
+      intendedTargetMinutes: [],
+      adaptiveTargetMinutes: [],
+      actualAddedMinutesReturned: 41,
+      outcomeClassification: "TARGET_MET",
+      candidateEligibility: outcomes.map(([eligible, reason, status]) => ({
+        intendedTargetMinutes: null,
+        adaptiveTargetMinutes: null,
+        actualAddedMinutes: null,
+        outcomeClassification: "COMPLETED",
+        duplicateEligible: true,
+        budgetEligible: true,
+        qualityEligible: eligible,
+        scenicScore: null,
+        routeShapeEligible: eligible,
+        routeShapeRejectionReason: reason,
+        reverseOverlapDistanceMeters: 0,
+        reverseOverlapRatio: 0,
+        waypointSpurDetected: reason === "WAYPOINT_SPUR",
+        affectedWaypointIndex: reason === "WAYPOINT_SPUR" ? 0 : null,
+        waypointAssociationStatus: reason === "WAYPOINT_SPUR" ? "EXACT" : "UNAVAILABLE",
+        routeShapeAnalysisStatus: status,
+        encodedPolyline: "must-not-escape",
+      })),
+      candidateScenicScores: [],
+      finalSelectionReason: "BASELINE_FALLBACK",
+      totalServerProcessingDurationMs: 100,
+    } as Parameters<typeof buildRouteGenerationDiagnostic>[0]);
+
+    assert.deepEqual(
+      diagnostic.candidateEligibility.map((candidate) => [
+        candidate.routeShapeEligible,
+        candidate.routeShapeRejectionReason,
+        candidate.routeShapeAnalysisStatus,
+      ]),
+      outcomes,
+    );
+    assert.equal(JSON.stringify(diagnostic).includes("must-not-escape"), false);
   });
 
   it("excludes diagnostics entirely from an unauthorised response", () => {

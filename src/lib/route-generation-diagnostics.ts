@@ -58,6 +58,14 @@ type SafeAttemptDiagnostic = {
   budgetEligible: boolean | null;
   qualityEligible: boolean | null;
   scenicScore: number | null;
+  routeShapeEligible?: boolean | null;
+  routeShapeRejectionReason?: string | null;
+  reverseOverlapDistanceMeters?: number | null;
+  reverseOverlapRatio?: number | null;
+  waypointSpurDetected?: boolean | null;
+  affectedWaypointIndex?: number | null;
+  waypointAssociationStatus?: string | null;
+  routeShapeAnalysisStatus?: string | null;
 };
 
 export function buildRouteGenerationDiagnostic(input: {
@@ -99,7 +107,24 @@ export function buildRouteGenerationDiagnostic(input: {
     adaptiveTargetMinutes: [...input.adaptiveTargetMinutes],
     actualAddedMinutesReturned: input.actualAddedMinutesReturned,
     outcomeClassification: input.outcomeClassification,
-    candidateEligibility: input.candidateEligibility.map((candidate) => ({ ...candidate })),
+    candidateEligibility: input.candidateEligibility.map((candidate) => ({
+      intendedTargetMinutes: candidate.intendedTargetMinutes,
+      adaptiveTargetMinutes: candidate.adaptiveTargetMinutes,
+      actualAddedMinutes: candidate.actualAddedMinutes,
+      outcomeClassification: candidate.outcomeClassification,
+      duplicateEligible: candidate.duplicateEligible,
+      budgetEligible: candidate.budgetEligible,
+      qualityEligible: candidate.qualityEligible,
+      scenicScore: candidate.scenicScore,
+      routeShapeEligible: candidate.routeShapeEligible ?? null,
+      routeShapeRejectionReason: candidate.routeShapeRejectionReason ?? null,
+      reverseOverlapDistanceMeters: candidate.reverseOverlapDistanceMeters ?? null,
+      reverseOverlapRatio: candidate.reverseOverlapRatio ?? null,
+      waypointSpurDetected: candidate.waypointSpurDetected ?? null,
+      affectedWaypointIndex: candidate.affectedWaypointIndex ?? null,
+      waypointAssociationStatus: candidate.waypointAssociationStatus ?? null,
+      routeShapeAnalysisStatus: candidate.routeShapeAnalysisStatus ?? null,
+    })),
     candidateScenicScores: [...input.candidateScenicScores],
     finalSelectionReason: input.finalSelectionReason,
     totalServerProcessingDurationMs: input.totalServerProcessingDurationMs,

@@ -1,4 +1,5 @@
 import process from "node:process";
+import { meaningfulPlaceDisplayName } from "./scenic-waypoint";
 
 const GEOCODING_URL = "https://maps.googleapis.com/maps/api/geocode/json";
 const ROUTES_URL = "https://routes.googleapis.com/directions/v2:computeRoutes";
@@ -261,8 +262,9 @@ export async function searchNearbyScenicPlaces(input: {
         types: Array.isArray(place.types)
           ? place.types.filter((type): type is string => typeof type === "string")
           : [],
-        displayName:
+        displayName: meaningfulPlaceDisplayName(
           typeof place.displayName?.text === "string" ? place.displayName.text : undefined,
+        ),
         categoryName:
           typeof place.primaryTypeDisplayName?.text === "string"
             ? place.primaryTypeDisplayName.text

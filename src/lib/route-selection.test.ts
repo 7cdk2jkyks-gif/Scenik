@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { ComputedDirections } from "./google-maps.server";
+import { evaluateRouteCoherence, ROUTE_COHERENCE_MAX_ENCODED_CHARACTERS } from "./route-coherence";
 import {
   budgetUtilisationBand,
   candidateSelectionDiagnostics,
@@ -32,6 +33,53 @@ function candidate(
 }
 
 describe("selectRouteCandidate", () => {
+  it("cannot rescue incoherent geometry with a higher Scenic Score", () => {
+    const coherent = candidate(1, 5_000, 77);
+    const incoherent = {
+      ...candidate(2, 6_000, 87),
+      routeShapeEligible: false,
+    };
+    const selected = selectRouteCandidate([candidate(0, 4_000, 70), coherent, incoherent], 60);
+    assert.equal(selected.selected.originalIndex, 1);
+    assert.equal(
+      selected.eligible.some((item) => item.originalIndex === 2),
+      false,
+    );
+    const diagnostics = candidateSelectionDiagnostics(
+      [candidate(0, 4_000, 70), coherent, incoherent],
+      selected,
+      60,
+    );
+    assert.equal(diagnostics.find((item) => item.originalIndex === 1)?.eligible, true);
+    assert.equal(
+      diagnostics.find((item) => item.originalIndex === 2)?.rejectionReason,
+      "INCOHERENT_ROUTE",
+    );
+  });
+
+  it("keeps the baseline fallback when every generated candidate is incoherent", () => {
+    const baseline = candidate(0, 4_000, 70);
+    const invalid = { ...candidate(1, 6_000, 99), routeShapeEligible: false };
+    const selected = selectRouteCandidate([baseline, invalid], 60);
+    assert.equal(selected.selected.originalIndex, 0);
+    assert.deepEqual(
+      selected.eligible.map((item) => item.originalIndex),
+      [0],
+    );
+  });
+  it("keeps the trusted baseline beside an oversized scenic candidate", () => {
+    const baseline = { ...candidate(0, 4_000, 70), routeShapeEligible: true };
+    const oversizedShape = evaluateRouteCoherence(
+      "~".repeat(ROUTE_COHERENCE_MAX_ENCODED_CHARACTERS + 1),
+    );
+    const oversized = {
+      ...candidate(1, 5_000, 99),
+      routeShapeEligible: oversizedShape.routeShapeEligible,
+    };
+    const selected = selectRouteCandidate([baseline, oversized], 60);
+    assert.equal(oversizedShape.routeShapeAnalysisStatus, "GEOMETRY_LIMIT_EXCEEDED");
+    assert.equal(selected.selected.originalIndex, 0);
+  });
   it("recognises a separated corridor even when duration and distance are similar", () => {
     const first = candidate(0, 900, 50).directions;
     const second = candidate(1, 910, 50, first.distanceMeters + 100).directions;

@@ -9,10 +9,44 @@ import {
   featuredJourneyDiscoveries,
   hasFeaturedDiscoveryDetail,
   rankJourneyDiscoveries,
+  routeResultNarrative,
   verifiedDiscoveryDescription,
+  verifiedJourneyHighlights,
 } from "./journey-timeline";
 
 describe("journey timeline", () => {
+  it("omits category-only hero highlights and named-place route copy", () => {
+    const highlights = verifiedJourneyHighlights([
+      { displayName: "BB2 7LZ" },
+      { displayName: undefined },
+    ]);
+    const narrative = routeResultNarrative({
+      selectedWinner: "scenik",
+      selectedWaypointReason: highlights,
+      requestedExtraMinutes: 85,
+      measuredExtraTimeSeconds: 2_460,
+    });
+    assert.equal(highlights, null);
+    assert.equal(narrative.includes("Lake"), false);
+    assert.equal(narrative.includes("includes"), false);
+    assert.equal(narrative.includes("undefined"), false);
+  });
+
+  it("uses only verified meaningful names in hero highlights and route copy", () => {
+    const highlights = verifiedJourneyHighlights([
+      { displayName: "BB2 7LZ", alternativeDisplayName: "Roddlesworth Reservoir" },
+      { displayName: "Wychwood Forest" },
+    ]);
+    const narrative = routeResultNarrative({
+      selectedWinner: "scenik",
+      selectedWaypointReason: highlights,
+      requestedExtraMinutes: 85,
+      measuredExtraTimeSeconds: 2_460,
+    });
+    assert.equal(highlights, "Roddlesworth Reservoir and Wychwood Forest");
+    assert.equal(narrative.includes(highlights), true);
+  });
+
   it("returns verified place names in chronological order with deterministic narration", () => {
     const timeline = buildJourneyTimeline(
       [
@@ -148,7 +182,7 @@ describe("journey timeline", () => {
     );
   });
 
-  it("uses a verified category fallback for an unnamed place", () => {
+  it("omits an unnamed or postcode-only discovery instead of using its category as a title", () => {
     const timeline = buildJourneyTimeline(
       [
         {
@@ -160,12 +194,67 @@ describe("journey timeline", () => {
           reason: "Country park",
           insertionIndex: 0,
           estimatedDetourMeters: 10,
+          displayName: "BB2 7LZ",
+          categoryName: "Lake",
         },
       ],
       [{ durationSeconds: 300, endLat: 0, endLng: 1 }],
     );
-    assert.equal(timeline[0].name, "Country park");
-    assert.equal(timeline[0].category, "Country park");
+    assert.deepEqual(timeline, []);
+    assert.equal(JSON.stringify(timeline).includes("BB2 7LZ"), false);
+    assert.equal(JSON.stringify(timeline).includes('"name":"Lake"'), false);
+    assert.deepEqual(featuredJourneyDiscoveries(timeline), []);
+  });
+
+  it("uses an existing verified alternative name and keeps valid named places visible", () => {
+    const base = {
+      lat: 0,
+      lng: 1,
+      types: [] as string[],
+      insertionIndex: 0,
+      estimatedDetourMeters: 10,
+    };
+    const timeline = buildJourneyTimeline(
+      [
+        {
+          ...base,
+          id: "alt",
+          primaryType: "lake",
+          reason: "Lake",
+          categoryName: "Lake",
+          displayName: "BB2 7LZ",
+          alternativeDisplayName: "Roddlesworth Reservoir",
+        },
+        {
+          ...base,
+          id: "wood",
+          primaryType: "woods",
+          reason: "Woodland",
+          displayName: "Wychwood Forest",
+        },
+        {
+          ...base,
+          id: "village",
+          primaryType: "locality",
+          reason: "Local town",
+          displayName: "Bibury",
+        },
+        {
+          ...base,
+          id: "landmark",
+          primaryType: "castle",
+          reason: "Historic site",
+          displayName: "Clitheroe Castle",
+        },
+      ],
+      [{ durationSeconds: 300, endLat: 0, endLng: 1 }],
+    );
+    assert.deepEqual(timeline.map((item) => item.name).sort(), [
+      "Bibury",
+      "Clitheroe Castle",
+      "Roddlesworth Reservoir",
+      "Wychwood Forest",
+    ]);
   });
 
   it("suppresses duplicate identities and equivalent place presentations", () => {

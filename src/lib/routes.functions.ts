@@ -146,7 +146,23 @@ export const planScenicRoute = createServerFn({ method: "POST" })
       routesAreMeaningfullyDifferent,
       selectRouteCandidate,
     } = await import("./route-selection");
+    const { safeEvaluateRouteCoherence } = await import("./route-coherence");
+    const { verifiedMeaningfulPlaceName } = await import("./scenic-waypoint");
+    const { routeResultNarrative, verifiedJourneyHighlights } = await import("./journey-timeline");
     const diagnosticDurationCeiling = durationCeiling(baseline.durationSeconds, data.extra_minutes);
+    const trustedBaselineShape = {
+      routeShapeEligible: true,
+      routeShapeRejectionReason: null,
+      reverseOverlapDistanceMeters: 0,
+      reverseOverlapRatio: 0,
+      waypointSpurDetected: false,
+      affectedWaypointIndex: null,
+      waypointAssociationStatus: "UNAVAILABLE",
+      routeShapeAnalysisStatus: "TRUSTED_BASELINE",
+    } as const;
+    const googleRouteShapes = googleDirections.map((directions, index) =>
+      index === 0 ? trustedBaselineShape : safeEvaluateRouteCoherence(directions.encodedPolyline),
+    );
     const generatedCandidateOutcomes: Array<{
       source: "fastest" | "google" | "scenik";
       intendedAddedMinutes: number | null;
@@ -164,12 +180,26 @@ export const planScenicRoute = createServerFn({ method: "POST" })
       waypointCount: number;
       requiredStopOrderPreserved: boolean;
       duplicate: boolean | null;
-      outcome: "ELIGIBLE" | "OVER_TIME_BUDGET" | "DUPLICATE_ROUTE" | "ROUTE_REQUEST_FAILED";
+      outcome:
+        | "ELIGIBLE"
+        | "OVER_TIME_BUDGET"
+        | "DUPLICATE_ROUTE"
+        | "INCOHERENT_ROUTE"
+        | "ROUTE_REQUEST_FAILED";
+      routeShapeEligible: boolean | null;
+      routeShapeRejectionReason: string | null;
+      reverseOverlapDistanceMeters: number | null;
+      reverseOverlapRatio: number | null;
+      waypointSpurDetected: boolean | null;
+      affectedWaypointIndex: number | null;
+      waypointAssociationStatus: string | null;
+      routeShapeAnalysisStatus: string | null;
     }> = googleDirections.map((directions, index, all) => {
       const duplicate = all
         .slice(0, index)
         .some((prior) => routesAreNearIdentical(prior, directions));
       const withinBudget = directions.durationSeconds <= diagnosticDurationCeiling;
+      const routeShape = googleRouteShapes[index];
       return {
         source: index === 0 ? "fastest" : "google",
         intendedAddedMinutes: null,
@@ -189,7 +219,21 @@ export const planScenicRoute = createServerFn({ method: "POST" })
         waypointCount: 0,
         requiredStopOrderPreserved: true,
         duplicate,
-        outcome: duplicate ? "DUPLICATE_ROUTE" : withinBudget ? "ELIGIBLE" : "OVER_TIME_BUDGET",
+        outcome: !withinBudget
+          ? "OVER_TIME_BUDGET"
+          : duplicate
+            ? "DUPLICATE_ROUTE"
+            : !routeShape.routeShapeEligible
+              ? "INCOHERENT_ROUTE"
+              : "ELIGIBLE",
+        routeShapeEligible: routeShape.routeShapeEligible,
+        routeShapeRejectionReason: routeShape.routeShapeRejectionReason,
+        reverseOverlapDistanceMeters: routeShape.reverseOverlapDistanceMeters,
+        reverseOverlapRatio: routeShape.reverseOverlapRatio,
+        waypointSpurDetected: routeShape.waypointSpurDetected,
+        affectedWaypointIndex: routeShape.affectedWaypointIndex,
+        waypointAssociationStatus: routeShape.waypointAssociationStatus,
+        routeShapeAnalysisStatus: routeShape.routeShapeAnalysisStatus,
       };
     });
     const distinctGoogleDirections = googleDirections.filter(
@@ -218,11 +262,13 @@ export const planScenicRoute = createServerFn({ method: "POST" })
         primaryType: string;
         types: string[];
         displayName?: string;
+        alternativeDisplayName?: string;
         categoryName?: string;
         rating?: number;
         userRatingCount?: number;
         photoUrl?: string;
       }>;
+      routeShapeEligible: boolean;
     }> = distinctGoogleDirections.map((directions, index) => ({
       directions,
       source: index === 0 ? "fastest" : "google",
@@ -231,6 +277,8 @@ export const planScenicRoute = createServerFn({ method: "POST" })
       constructionTargetMinutes: null,
       durationTargetClassification: null,
       scenicWaypoints: [],
+      routeShapeEligible:
+        googleRouteShapes[googleDirections.indexOf(directions)]?.routeShapeEligible ?? false,
     }));
 
     let scenikCandidateAdded = false;
@@ -242,6 +290,7 @@ export const planScenicRoute = createServerFn({ method: "POST" })
       primaryType: string;
       types: string[];
       displayName?: string;
+      alternativeDisplayName?: string;
       categoryName?: string;
       rating?: number;
       userRatingCount?: number;
@@ -408,6 +457,14 @@ export const planScenicRoute = createServerFn({ method: "POST" })
                   requiredStopOrderPreserved: true,
                   duplicate: null,
                   outcome: "ROUTE_REQUEST_FAILED",
+                  routeShapeEligible: null,
+                  routeShapeRejectionReason: null,
+                  reverseOverlapDistanceMeters: null,
+                  reverseOverlapRatio: null,
+                  waypointSpurDetected: null,
+                  affectedWaypointIndex: null,
+                  waypointAssociationStatus: null,
+                  routeShapeAnalysisStatus: null,
                 });
                 stableErrorCode = "SCENIK_CANDIDATE_UNAVAILABLE_FALLBACK";
                 rejectionReasons.add("ROUTE_REQUEST_FAILED");
@@ -434,6 +491,10 @@ export const planScenicRoute = createServerFn({ method: "POST" })
               const meaningfullyDifferent = rawCandidates.every((candidate) =>
                 routesAreMeaningfullyDifferent(candidate.directions, scenikDirections),
               );
+              const routeShape = safeEvaluateRouteCoherence(
+                scenikDirections.encodedPolyline,
+                corridorPlan.waypoints,
+              );
               const durationTargetClassification =
                 intendedAddedMinutes == null
                   ? null
@@ -458,32 +519,44 @@ export const planScenicRoute = createServerFn({ method: "POST" })
                 waypointCount: corridorPlan.waypoints.length,
                 requiredStopOrderPreserved: true,
                 duplicate: !meaningfullyDifferent,
-                outcome: !meaningfullyDifferent
-                  ? "DUPLICATE_ROUTE"
-                  : withinBudget
-                    ? "ELIGIBLE"
-                    : "OVER_TIME_BUDGET",
+                outcome: !withinBudget
+                  ? "OVER_TIME_BUDGET"
+                  : !meaningfullyDifferent
+                    ? "DUPLICATE_ROUTE"
+                    : !routeShape.routeShapeEligible
+                      ? "INCOHERENT_ROUTE"
+                      : "ELIGIBLE",
+                routeShapeEligible: routeShape.routeShapeEligible,
+                routeShapeRejectionReason: routeShape.routeShapeRejectionReason,
+                reverseOverlapDistanceMeters: routeShape.reverseOverlapDistanceMeters,
+                reverseOverlapRatio: routeShape.reverseOverlapRatio,
+                waypointSpurDetected: routeShape.waypointSpurDetected,
+                affectedWaypointIndex: routeShape.affectedWaypointIndex,
+                waypointAssociationStatus: routeShape.waypointAssociationStatus,
+                routeShapeAnalysisStatus: routeShape.routeShapeAnalysisStatus,
               });
               if (!withinBudget) {
                 scenicRoutesRejectedOverBudget += 1;
                 rejectionReasons.add("OVER_TIME_BUDGET");
               } else if (!meaningfullyDifferent) {
                 rejectionReasons.add("DUPLICATE_ROUTE");
+              } else if (!routeShape.routeShapeEligible) {
+                rejectionReasons.add("INCOHERENT_ROUTE");
               }
-              if ((withinBudget || withinUpgradeWindow) && meaningfullyDifferent) {
+              if (
+                (withinBudget || withinUpgradeWindow) &&
+                meaningfullyDifferent &&
+                routeShape.routeShapeEligible
+              ) {
                 rawCandidates.push({
                   directions: scenikDirections,
                   source: "scenik",
-                  selectedWaypointReason: corridorPlan.waypoints
-                    .map(
-                      (waypoint) =>
-                        waypoint.displayName ?? waypoint.categoryName ?? waypoint.reason,
-                    )
-                    .join(" and "),
+                  selectedWaypointReason: verifiedJourneyHighlights(corridorPlan.waypoints),
                   intendedAddedMinutes,
                   constructionTargetMinutes,
                   durationTargetClassification,
                   scenicWaypoints: corridorPlan.waypoints.map((waypoint) => ({ ...waypoint })),
+                  routeShapeEligible: true,
                 });
                 scenikCandidateAdded = true;
                 scenicCandidateCount += 1;
@@ -621,6 +694,7 @@ export const planScenicRoute = createServerFn({ method: "POST" })
     const { scoreScenicRoute } = await import("./scenic-score");
     const scoredCandidates = rawCandidates.flatMap((candidate, originalIndex) => {
       const { directions } = candidate;
+      if (originalIndex !== 0 && !candidate.routeShapeEligible) return [];
       try {
         const candidateSamples = routeCorridorSamples(start, end, directions.steps, 7);
         for (const waypoint of candidate.scenicWaypoints) {
@@ -650,6 +724,7 @@ export const planScenicRoute = createServerFn({ method: "POST" })
             source: candidate.source,
             selectedWaypointReason: candidate.selectedWaypointReason,
             evidence,
+            routeShapeEligible: candidate.routeShapeEligible,
           },
         ];
       } catch {
@@ -712,9 +787,13 @@ export const planScenicRoute = createServerFn({ method: "POST" })
             haversineDistanceMeters(anchors[a.insertionIndex], a) -
               haversineDistanceMeters(anchors[b.insertionIndex], b),
         )
-        .forEach((waypoint, offset) => {
+        .flatMap((waypoint) => {
+          const name = verifiedMeaningfulPlaceName(waypoint);
+          return name ? [{ waypoint, name }] : [];
+        })
+        .forEach(({ waypoint, name }, offset) => {
           candidateWaypoints.splice(waypoint.insertionIndex + offset, 0, {
-            name: waypoint.displayName ?? waypoint.reason,
+            name,
             lat: waypoint.lat,
             lng: waypoint.lng,
             description: verifiedDiscoveryDescription(waypoint.categoryName ?? waypoint.reason),
@@ -806,6 +885,14 @@ export const planScenicRoute = createServerFn({ method: "POST" })
           qualityEligible:
             diagnostic == null ? null : diagnostic.rejectionReason !== "BELOW_QUALITY_GUARDRAIL",
           scenicScore: diagnostic?.score ?? null,
+          routeShapeEligible: outcome.routeShapeEligible,
+          routeShapeRejectionReason: outcome.routeShapeRejectionReason,
+          reverseOverlapDistanceMeters: outcome.reverseOverlapDistanceMeters,
+          reverseOverlapRatio: outcome.reverseOverlapRatio,
+          waypointSpurDetected: outcome.waypointSpurDetected,
+          affectedWaypointIndex: outcome.affectedWaypointIndex,
+          waypointAssociationStatus: outcome.waypointAssociationStatus,
+          routeShapeAnalysisStatus: outcome.routeShapeAnalysisStatus,
         };
       });
       for (const attempt of longAttemptExecutions) {
@@ -824,6 +911,14 @@ export const planScenicRoute = createServerFn({ method: "POST" })
             budgetEligible: null,
             qualityEligible: null,
             scenicScore: null,
+            routeShapeEligible: null,
+            routeShapeRejectionReason: null,
+            reverseOverlapDistanceMeters: null,
+            reverseOverlapRatio: null,
+            waypointSpurDetected: null,
+            affectedWaypointIndex: null,
+            waypointAssociationStatus: null,
+            routeShapeAnalysisStatus: null,
           });
         }
       }
@@ -926,14 +1021,12 @@ export const planScenicRoute = createServerFn({ method: "POST" })
 
     return {
       title: selectedJourneyTitle,
-      narrative:
-        selectedWinner === "scenik" && selectedWaypointReason
-          ? `${data.extra_minutes > 10 ? "Your larger time allowance unlocked this route. " : ""}It adds ${Math.round(selection.measuredExtraTimeSeconds / 60)} minutes and includes a verified ${selectedWaypointReason.toLowerCase()}.`
-          : selection.measuredExtraTimeSeconds > 0
-            ? `This route remains within ${Math.round(selection.measuredExtraTimeSeconds / 60)} minutes of the fastest journey and scored higher on measurable route variety.`
-            : data.extra_minutes > 10
-              ? `Scenik searched further within your ${data.extra_minutes}-minute allowance, but no better route scored higher.`
-              : "This was the highest-scoring route within your allowance without adding journey time.",
+      narrative: routeResultNarrative({
+        selectedWinner,
+        selectedWaypointReason,
+        requestedExtraMinutes: data.extra_minutes,
+        measuredExtraTimeSeconds: selection.measuredExtraTimeSeconds,
+      }),
       scenic_score: score.total,
       score_breakdown: score.breakdown,
       evidenceSummary: {

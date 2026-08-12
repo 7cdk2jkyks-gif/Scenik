@@ -5,6 +5,7 @@ export type ScenicPlace = LatLng & {
   primaryType: string;
   types: string[];
   displayName?: string;
+  alternativeDisplayName?: string;
   categoryName?: string;
   rating?: number;
   userRatingCount?: number;
@@ -45,6 +46,33 @@ export const EMPTY_SCENIC_EVIDENCE: ScenicEvidenceCounts = {
   food: 0,
   otherPoi: 0,
 };
+
+const UK_POSTCODE_ONLY = /^(?:GIR\s?0AA|(?:[A-Z]{1,2}\d[A-Z\d]?|[A-Z]{1,2}\d{1,2})\s?\d[A-Z]{2})$/i;
+const COORDINATES_ONLY = /^\s*[-+]?\d{1,3}(?:\.\d+)?\s*[,/]\s*[-+]?\d{1,3}(?:\.\d+)?\s*$/;
+const PROVIDER_LOCATION_CODE_ONLY =
+  /^(?:[23456789CFGHJMPQRVWX]{4,}\+[23456789CFGHJMPQRVWX]{2,}|(?=[A-Z0-9]*[A-Z])(?=[A-Z0-9]*\d)[A-Z0-9]{8,})$/i;
+
+export function meaningfulPlaceDisplayName(value: string | null | undefined): string | undefined {
+  const name = value?.trim();
+  if (
+    !name ||
+    UK_POSTCODE_ONLY.test(name) ||
+    COORDINATES_ONLY.test(name) ||
+    PROVIDER_LOCATION_CODE_ONLY.test(name)
+  )
+    return undefined;
+  return name;
+}
+
+export function verifiedMeaningfulPlaceName(place: {
+  displayName?: string;
+  alternativeDisplayName?: string;
+}): string | undefined {
+  return (
+    meaningfulPlaceDisplayName(place.displayName) ??
+    meaningfulPlaceDisplayName(place.alternativeDisplayName)
+  );
+}
 
 const TYPE_REASON: Record<string, string> = {
   castle: "Historic site",
@@ -131,7 +159,7 @@ export function selectedPlaceTypes(moods: string[], themes: string[]): string[] 
 export function haversineDistanceMeters(a: LatLng, b: LatLng): number {
   const radians = (value: number) => (value * Math.PI) / 180;
   const dLat = radians(b.lat - a.lat);
-  const dLng = radians(b.lng - a.lng);
+  const dLng = radians(((((b.lng - a.lng + 540) % 360) + 360) % 360) - 180);
   const lat1 = radians(a.lat);
   const lat2 = radians(b.lat);
   const value = Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) ** 2;

@@ -4,15 +4,61 @@ import {
   candidateFitsTimeBudget,
   corridorSampleCount,
   evidenceForRoute,
+  haversineDistanceMeters,
+  meaningfulPlaceDisplayName,
   explorationLimits,
   planScenicWaypoint,
   planScenicWaypoints,
   routeCorridorSamples,
   routeMidpoint,
   selectedPlaceTypes,
+  verifiedMeaningfulPlaceName,
 } from "./scenic-waypoint";
 
 describe("scenic waypoint planning", () => {
+  it("measures dateline crossings over the shortest wrapped longitude delta", () => {
+    const eastbound = haversineDistanceMeters({ lat: 0, lng: 179.99 }, { lat: 0, lng: -179.99 });
+    const westbound = haversineDistanceMeters({ lat: 0, lng: -179.99 }, { lat: 0, lng: 179.99 });
+    assert.ok(eastbound > 2_000 && eastbound < 2_300);
+    assert.equal(eastbound, westbound);
+  });
+  it("rejects postcode, coordinate and provider-code display names", () => {
+    assert.equal(meaningfulPlaceDisplayName("BB2 7LZ"), undefined);
+    assert.equal(meaningfulPlaceDisplayName("51.7520, -1.2577"), undefined);
+    assert.equal(meaningfulPlaceDisplayName("9C3W9QCJ+2V"), undefined);
+    assert.equal(meaningfulPlaceDisplayName("   "), undefined);
+  });
+
+  it("preserves legitimate names containing numbers or postcode-like fragments", () => {
+    assert.equal(meaningfulPlaceDisplayName("7 Lakes Country Park"), "7 Lakes Country Park");
+    assert.equal(meaningfulPlaceDisplayName("BB2 Woodland Walk"), "BB2 Woodland Walk");
+    assert.equal(meaningfulPlaceDisplayName("Lake 32"), "Lake 32");
+  });
+
+  it("preserves Welsh, Scottish, Irish and Gaelic names without an Anglo-centric allow-list", () => {
+    for (const name of [
+      "Bwlchgwyn",
+      "Auchtermuchty",
+      "Dún Laoghaire",
+      "Baile a’ Chaolais",
+      "Llanfairpwllgwyngyll",
+      "Kilbride-Hill",
+      "St David's",
+    ])
+      assert.equal(meaningfulPlaceDisplayName(name), name);
+    assert.equal(meaningfulPlaceDisplayName("AB12CD34"), undefined);
+  });
+
+  it("uses a verified alternative name but never substitutes a category title", () => {
+    assert.equal(
+      verifiedMeaningfulPlaceName({
+        displayName: "BB2 7LZ",
+        alternativeDisplayName: "Roddlesworth Reservoir",
+      }),
+      "Roddlesworth Reservoir",
+    );
+    assert.equal(verifiedMeaningfulPlaceName({ displayName: "BB2 7LZ" }), undefined);
+  });
   it("maps selected preferences to verified Google place types deterministically", () => {
     assert.deepEqual(selectedPlaceTypes(["Romantic"], ["Historic"]).slice(0, 3), [
       "historical_place",
