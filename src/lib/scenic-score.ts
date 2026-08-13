@@ -65,6 +65,38 @@ const LEGACY_CATEGORY_MAXIMA = {
   diversity: 10,
 } as const;
 
+export function evidenceSupportCounts(input: {
+  evidence: ScenicEvidenceCounts;
+  moods: string[];
+  themes: string[];
+}) {
+  const { evidence, moods, themes } = input;
+  const theme = themes.reduce((sum, selectedTheme) => {
+    if (["Historic", "Castles & Ruins"].includes(selectedTheme)) return sum + evidence.historic;
+    if (selectedTheme === "Art & Culture") return sum + evidence.cultural + evidence.historic * 0.5;
+    if (["Coastal", "Lakes & Rivers", "Waterfalls"].includes(selectedTheme))
+      return sum + evidence.coastal + evidence.natural * 0.5;
+    if (["Forest", "Countryside", "Mountain", "Dog Friendly"].includes(selectedTheme))
+      return sum + evidence.natural;
+    if (["Scenic Viewpoints", "Stargazing"].includes(selectedTheme))
+      return sum + evidence.viewpoint;
+    if (selectedTheme === "Wildlife") return sum + evidence.wildlife + evidence.natural * 0.25;
+    if (selectedTheme === "Foodie") return sum + evidence.food;
+    if (selectedTheme === "Villages") return sum + evidence.otherPoi;
+    return sum;
+  }, 0);
+  const mood = moods.reduce((sum, selectedMood) => {
+    if (["Peaceful", "Relaxed", "Reflective", "Cosy", "Romantic"].includes(selectedMood))
+      return sum + evidence.natural + evidence.coastal + evidence.historic * 0.4;
+    if (["Adventurous", "Awestruck", "Energetic"].includes(selectedMood))
+      return sum + evidence.viewpoint + evidence.natural * 0.5 + evidence.wildlife * 0.5;
+    if (["Curious", "Inspired", "Nostalgic"].includes(selectedMood))
+      return sum + evidence.historic + evidence.cultural;
+    return sum;
+  }, 0);
+  return { natural: evidence.natural, theme, mood };
+}
+
 type CategoryValues = Pick<
   ScenicScoreBreakdown,
   | "natural_beauty"
@@ -184,28 +216,11 @@ export function scoreScenicRoute(input: {
     evidence.coastal * 1.2 +
     evidence.food * 1.5 +
     evidence.otherPoi * 1.2;
-  const themeEvidence = themes.reduce((sum, theme) => {
-    if (["Historic", "Castles & Ruins"].includes(theme)) return sum + evidence.historic;
-    if (theme === "Art & Culture") return sum + evidence.cultural + evidence.historic * 0.5;
-    if (["Coastal", "Lakes & Rivers", "Waterfalls"].includes(theme))
-      return sum + evidence.coastal + evidence.natural * 0.5;
-    if (["Forest", "Countryside", "Mountain", "Dog Friendly"].includes(theme))
-      return sum + evidence.natural;
-    if (["Scenic Viewpoints", "Stargazing"].includes(theme)) return sum + evidence.viewpoint;
-    if (theme === "Wildlife") return sum + evidence.wildlife + evidence.natural * 0.25;
-    if (theme === "Foodie") return sum + evidence.food;
-    if (theme === "Villages") return sum + evidence.otherPoi;
-    return sum;
-  }, 0);
-  const moodEvidence = moods.reduce((sum, mood) => {
-    if (["Peaceful", "Relaxed", "Reflective", "Cosy", "Romantic"].includes(mood))
-      return sum + evidence.natural + evidence.coastal + evidence.historic * 0.4;
-    if (["Adventurous", "Awestruck", "Energetic"].includes(mood))
-      return sum + evidence.viewpoint + evidence.natural * 0.5 + evidence.wildlife * 0.5;
-    if (["Curious", "Inspired", "Nostalgic"].includes(mood))
-      return sum + evidence.historic + evidence.cultural;
-    return sum;
-  }, 0);
+  const { theme: themeEvidence, mood: moodEvidence } = evidenceSupportCounts({
+    evidence,
+    moods,
+    themes,
+  });
 
   const naturalBeauty = clamp(
     4 + Math.min(18, naturalEvidence) + Math.min(3, Math.max(0, detourRatio - 1) * 8),

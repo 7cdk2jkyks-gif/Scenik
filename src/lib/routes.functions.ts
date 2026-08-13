@@ -312,7 +312,6 @@ export const planScenicRoute = createServerFn({ method: "POST" })
         const {
           candidateFitsTimeBudget,
           corridorSampleCount,
-          evidenceForRoute: evidenceForExploration,
           routeCorridorSamples,
           selectedPlaceTypes,
         } = await import("./scenic-waypoint");
@@ -328,6 +327,7 @@ export const planScenicRoute = createServerFn({ method: "POST" })
           isTargetBudgetCandidate,
         } = await import("./corridor-exploration");
         const { runSequentialLongAttempts } = await import("./route-generation-diagnostics");
+        const { safeAssociateEvidenceWithRoute } = await import("./route-evidence-association");
         const { scoreScenicRoute: scoreExploredRoute } = await import("./scenic-score");
         const { upgradeOverrunToleranceSeconds } = await import("./route-upgrade");
         const moods = moodIn
@@ -389,6 +389,11 @@ export const planScenicRoute = createServerFn({ method: "POST" })
             }
             evidencePlaces = [...uniquePlaces.values()];
             deduplicatedPlaceCount = evidencePlaces.length;
+            const stageBaselineAssociation = safeAssociateEvidenceWithRoute({
+              encodedPolyline: baseline.encodedPolyline,
+              places: evidencePlaces,
+              proximityMeters: 750,
+            });
             const stageBaselineScore = scoreExploredRoute({
               start,
               end,
@@ -397,11 +402,7 @@ export const planScenicRoute = createServerFn({ method: "POST" })
               extraMinutes: data.extra_minutes,
               stopCount: waypoints.length,
               directions: baseline,
-              evidence: evidenceForExploration(
-                evidencePlaces,
-                routeCorridorSamples(start, end, baseline.steps, 7),
-                750,
-              ),
+              evidence: stageBaselineAssociation.evidence,
               fastestDurationSeconds: baseline.durationSeconds,
             }).total;
             bestExploredScore = Math.max(bestExploredScore, stageBaselineScore);
@@ -584,15 +585,12 @@ export const planScenicRoute = createServerFn({ method: "POST" })
                 scenikCandidateAdded = true;
                 scenicCandidateCount += 1;
                 if (withinBudget) scenicRoutesAccepted += 1;
-                const candidateSamples = routeCorridorSamples(
-                  start,
-                  end,
-                  scenikDirections.steps,
-                  7,
-                );
-                candidateSamples.push(
-                  ...corridorPlan.waypoints.map(({ lat, lng }) => ({ lat, lng })),
-                );
+                const candidateAssociation = safeAssociateEvidenceWithRoute({
+                  encodedPolyline: scenikDirections.encodedPolyline,
+                  places: evidencePlaces,
+                  waypoints: corridorPlan.waypoints,
+                  proximityMeters: 750,
+                });
                 const candidateScore = scoreExploredRoute({
                   start,
                   end,
@@ -601,7 +599,7 @@ export const planScenicRoute = createServerFn({ method: "POST" })
                   extraMinutes: data.extra_minutes,
                   stopCount: waypoints.length + corridorPlan.waypoints.length,
                   directions: scenikDirections,
-                  evidence: evidenceForExploration(evidencePlaces, candidateSamples, 750),
+                  evidence: candidateAssociation.evidence,
                   fastestDurationSeconds: baseline.durationSeconds,
                 }).total;
                 bestExploredScore = Math.max(bestExploredScore, candidateScore);
@@ -720,21 +718,20 @@ export const planScenicRoute = createServerFn({ method: "POST" })
       }
     }
 
-    const { evidenceForRoute, haversineDistanceMeters, routeCorridorSamples } =
-      await import("./scenic-waypoint");
-    const { scoreScenicRoute } = await import("./scenic-score");
+    const { haversineDistanceMeters } = await import("./scenic-waypoint");
+    const { safeAssociateEvidenceWithRoute } = await import("./route-evidence-association");
+    const { evidenceSupportCounts, scoreScenicRoute } = await import("./scenic-score");
     const scoredCandidates = rawCandidates.flatMap((candidate, originalIndex) => {
       const { directions } = candidate;
       if (originalIndex !== 0 && !candidate.routeShapeEligible) return [];
       try {
-        const candidateSamples = routeCorridorSamples(start, end, directions.steps, 7);
-        for (const waypoint of candidate.scenicWaypoints) {
-          candidateSamples.push({
-            lat: waypoint.lat,
-            lng: waypoint.lng,
-          });
-        }
-        const evidence = evidenceForRoute(evidencePlaces, candidateSamples, 750);
+        const evidenceAssociation = safeAssociateEvidenceWithRoute({
+          encodedPolyline: directions.encodedPolyline,
+          places: evidencePlaces,
+          waypoints: candidate.scenicWaypoints,
+          proximityMeters: 750,
+        });
+        const evidence = evidenceAssociation.evidence;
         const scoreResult = scoreScenicRoute({
           start,
           end,
@@ -756,6 +753,7 @@ export const planScenicRoute = createServerFn({ method: "POST" })
             source: candidate.source,
             selectedWaypointReason: candidate.selectedWaypointReason,
             evidence,
+            evidenceAssociation,
             routeShapeEligible: candidate.routeShapeEligible,
           },
         ];
@@ -795,6 +793,7 @@ export const planScenicRoute = createServerFn({ method: "POST" })
         durationTargetClassification: generation?.durationTargetClassification ?? null,
         requiredStopOrderPreserved: true,
         scoreResult: scored?.scoreResult,
+        evidenceAssociation: scored?.evidenceAssociation,
       };
     });
     const directions = selection.selected.directions;
@@ -915,6 +914,19 @@ export const planScenicRoute = createServerFn({ method: "POST" })
       >[0]["candidateEligibility"] = generatedCandidateOutcomes.map((outcome) => {
         const diagnostic = candidateByRequestLocalId(candidateDiagnostics, outcome.candidateId);
         const breakdown = diagnostic?.scoreResult?.breakdown;
+        const evidenceSupport = diagnostic
+          ? evidenceSupportCounts({
+              evidence: diagnostic.evidence,
+              moods: moodIn
+                .split(",")
+                .map((value) => value.trim())
+                .filter(Boolean),
+              themes: themeIn
+                .split(",")
+                .map((value) => value.trim())
+                .filter(Boolean),
+            })
+          : null;
         return {
           candidateId: outcome.candidateId,
           candidateSource: outcome.source,
@@ -942,12 +954,23 @@ export const planScenicRoute = createServerFn({ method: "POST" })
               }
             : null,
           allowanceUtilisation: outcome.allowanceUtilisation,
-          evidenceEligible: diagnostic != null,
+          evidenceEligible: diagnostic?.evidenceAssociation?.status === "ANALYSED",
           targetBandEligible:
             diagnostic != null && diagnostic.eligible && diagnostic.allowanceUtilisation >= 0.75,
           selected: diagnostic?.selected ?? false,
           rejectionReason: diagnostic?.rejectionReason ?? outcome.outcome,
           finalSelectionReason: diagnostic?.selected ? finalSelectionReason : null,
+          geometryDistanceMeters: diagnostic?.evidenceAssociation?.geometryDistanceMeters ?? null,
+          evidenceSampleCount: diagnostic?.evidenceAssociation?.sampleCount ?? null,
+          evidenceConsidered: diagnostic?.evidenceAssociation?.evidenceConsidered ?? null,
+          evidenceMatchedToGeometry:
+            diagnostic?.evidenceAssociation?.evidenceMatchedToGeometry ?? null,
+          evidenceMatchedThroughWaypoints:
+            diagnostic?.evidenceAssociation?.evidenceMatchedThroughWaypoints ?? null,
+          naturalEvidenceCount: evidenceSupport?.natural ?? null,
+          themeEvidenceCount: evidenceSupport?.theme ?? null,
+          moodEvidenceCount: evidenceSupport?.mood ?? null,
+          evidenceAssociationStatus: diagnostic?.evidenceAssociation?.status ?? null,
           routeShapeEligible: outcome.routeShapeEligible,
           routeShapeRejectionReason: outcome.routeShapeRejectionReason,
           reverseOverlapDistanceMeters: outcome.reverseOverlapDistanceMeters,
@@ -984,6 +1007,15 @@ export const planScenicRoute = createServerFn({ method: "POST" })
             selected: false,
             rejectionReason: attempt.status,
             finalSelectionReason: null,
+            geometryDistanceMeters: null,
+            evidenceSampleCount: null,
+            evidenceConsidered: null,
+            evidenceMatchedToGeometry: null,
+            evidenceMatchedThroughWaypoints: null,
+            naturalEvidenceCount: null,
+            themeEvidenceCount: null,
+            moodEvidenceCount: null,
+            evidenceAssociationStatus: null,
             routeShapeEligible: null,
             routeShapeRejectionReason: null,
             reverseOverlapDistanceMeters: null,

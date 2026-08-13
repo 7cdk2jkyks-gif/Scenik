@@ -137,6 +137,15 @@ describe("route-generation diagnostic log", () => {
           selected: false,
           rejectionReason: "INCOHERENT_ROUTE",
           finalSelectionReason: "must-not-escape",
+          geometryDistanceMeters: 560_000,
+          evidenceSampleCount: 1_121,
+          evidenceConsidered: 70,
+          evidenceMatchedToGeometry: 4,
+          evidenceMatchedThroughWaypoints: 1,
+          naturalEvidenceCount: 3,
+          themeEvidenceCount: 3,
+          moodEvidenceCount: 1.5,
+          evidenceAssociationStatus: "ANALYSED",
           routeShapeEligible: false,
           routeShapeRejectionReason: "WAYPOINT_SPUR",
           reverseOverlapDistanceMeters: 2_400,
@@ -190,6 +199,15 @@ describe("route-generation diagnostic log", () => {
       selected: false,
       rejectionReason: "INCOHERENT_ROUTE",
       finalSelectionReason: null,
+      geometryDistanceMeters: 560_000,
+      evidenceSampleCount: 1_121,
+      evidenceConsidered: 70,
+      evidenceMatchedToGeometry: 4,
+      evidenceMatchedThroughWaypoints: 1,
+      naturalEvidenceCount: 3,
+      themeEvidenceCount: 3,
+      moodEvidenceCount: 1.5,
+      evidenceAssociationStatus: "ANALYSED",
       routeShapeEligible: false,
       routeShapeRejectionReason: "WAYPOINT_SPUR",
       reverseOverlapDistanceMeters: 2_400,
@@ -448,5 +466,279 @@ describe("route-generation diagnostic log", () => {
     );
     assert.equal(JSON.stringify(diagnostic).includes("coordinates"), false);
     assert.equal(JSON.stringify(diagnostic).includes("polyline"), false);
+  });
+
+  it("rejects non-scalar association diagnostics from response, log and clipboard projections", () => {
+    const sensitive = {
+      coordinates: [51.7, -1.2],
+      placeId: "place-secret",
+      polyline: "polyline-secret",
+      name: "name-secret",
+      address: "address-secret",
+      userId: "user-secret",
+      authentication: "auth-secret",
+      apiKey: "key-secret",
+      token: "token-secret",
+      secret: "value-secret",
+    };
+    const input = {
+      correlationId: "strict-scalars",
+      requestedExtraMinutes: 30,
+      baselineDurationSeconds: 3_600,
+      plannedExplorationStages: [],
+      attemptsPlanned: 1,
+      attemptsCompleted: 1,
+      intendedTargetMinutes: [],
+      adaptiveTargetMinutes: [],
+      actualAddedMinutesReturned: 10,
+      outcomeClassification: "TARGET_MET",
+      candidateEligibility: [
+        {
+          candidateId: "scenic-stage-1",
+          candidateSource: "scenik" as const,
+          explorationStage: 1,
+          intendedTargetMinutes: null,
+          adaptiveTargetMinutes: null,
+          actualAddedMinutes: 10,
+          outcomeClassification: "ELIGIBLE",
+          duplicateEligible: true,
+          budgetEligible: true,
+          qualityEligible: true,
+          scenicScore: 70,
+          geometryDistanceMeters: sensitive,
+          evidenceSampleCount: [sensitive],
+          evidenceConsidered: "70",
+          evidenceMatchedToGeometry: Number.NaN,
+          evidenceMatchedThroughWaypoints: -1,
+          naturalEvidenceCount: Number.POSITIVE_INFINITY,
+          themeEvidenceCount: sensitive,
+          moodEvidenceCount: [],
+          evidenceAssociationStatus: sensitive,
+        },
+      ],
+      candidateScenicScores: [70],
+      finalSelectionReason: "ONLY_ELIGIBLE_ROUTE",
+      totalServerProcessingDurationMs: 100,
+    } as unknown as Parameters<typeof buildRouteGenerationDiagnostic>[0];
+    const diagnostic = buildRouteGenerationDiagnostic(input);
+    assert.deepEqual(
+      {
+        geometryDistanceMeters: diagnostic.candidateEligibility[0].geometryDistanceMeters,
+        evidenceSampleCount: diagnostic.candidateEligibility[0].evidenceSampleCount,
+        evidenceConsidered: diagnostic.candidateEligibility[0].evidenceConsidered,
+        evidenceMatchedToGeometry: diagnostic.candidateEligibility[0].evidenceMatchedToGeometry,
+        evidenceMatchedThroughWaypoints:
+          diagnostic.candidateEligibility[0].evidenceMatchedThroughWaypoints,
+        naturalEvidenceCount: diagnostic.candidateEligibility[0].naturalEvidenceCount,
+        themeEvidenceCount: diagnostic.candidateEligibility[0].themeEvidenceCount,
+        moodEvidenceCount: diagnostic.candidateEligibility[0].moodEvidenceCount,
+        evidenceAssociationStatus: diagnostic.candidateEligibility[0].evidenceAssociationStatus,
+      },
+      {
+        geometryDistanceMeters: null,
+        evidenceSampleCount: null,
+        evidenceConsidered: null,
+        evidenceMatchedToGeometry: null,
+        evidenceMatchedThroughWaypoints: null,
+        naturalEvidenceCount: null,
+        themeEvidenceCount: null,
+        moodEvidenceCount: null,
+        evidenceAssociationStatus: null,
+      },
+    );
+    const outputs = [
+      JSON.stringify(internalRouteDiagnosticResponse(true, diagnostic)),
+      serializeRouteGenerationDiagnostic(input),
+      formatRouteGenerationDiagnosticForClipboard(diagnostic),
+    ];
+    for (const output of outputs)
+      for (const forbidden of Object.values(sensitive).flat())
+        assert.equal(output.includes(String(forbidden)), false);
+  });
+
+  it("joins scored association details into final diagnostics only by request-local candidate ID", () => {
+    const scored = [
+      {
+        candidateId: "scenic-stage-5",
+        durationSeconds: 4_500,
+        score: 73,
+        scoreBreakdown: {
+          naturalBeauty: 9.4,
+          pointsOfInterest: 7,
+          moodMatch: 6.7,
+          roadCharacter: 8,
+          themeMatch: 10,
+          diversity: 6,
+        },
+        evidenceAssociation: {
+          geometryDistanceMeters: 560_000,
+          sampleCount: 1_121,
+          evidenceConsidered: 70,
+          evidenceMatchedToGeometry: 5,
+          evidenceMatchedThroughWaypoints: 1,
+          status: "ANALYSED",
+        },
+        routeShapeEligible: true,
+        selected: true,
+      },
+      {
+        candidateId: "scenic-stage-4",
+        durationSeconds: 4_700,
+        score: 42,
+        scoreBreakdown: {
+          naturalBeauty: 2.2,
+          pointsOfInterest: 4,
+          moodMatch: 2.5,
+          roadCharacter: 8,
+          themeMatch: 2.7,
+          diversity: 5,
+        },
+        evidenceAssociation: {
+          geometryDistanceMeters: 558_000,
+          sampleCount: 1_117,
+          evidenceConsidered: 70,
+          evidenceMatchedToGeometry: 1,
+          evidenceMatchedThroughWaypoints: 0,
+          status: "ANALYSED",
+        },
+        routeShapeEligible: false,
+        selected: false,
+      },
+    ];
+    const eligibility = ["scenic-stage-4", "scenic-stage-5"].map((candidateId) => {
+      const candidate = candidateByRequestLocalId(scored, candidateId)!;
+      return {
+        candidateId,
+        candidateSource: "scenik" as const,
+        explorationStage: candidateId === "scenic-stage-4" ? 4 : 5,
+        intendedTargetMinutes: null,
+        adaptiveTargetMinutes: null,
+        actualAddedMinutes: candidate.durationSeconds / 60,
+        outcomeClassification: candidate.routeShapeEligible ? "ELIGIBLE" : "INCOHERENT_ROUTE",
+        duplicateEligible: true,
+        budgetEligible: true,
+        qualityEligible: candidate.score >= 60,
+        scenicScore: candidate.score,
+        scoreBreakdown: candidate.scoreBreakdown,
+        selected: candidate.selected,
+        geometryDistanceMeters: candidate.evidenceAssociation.geometryDistanceMeters,
+        evidenceSampleCount: candidate.evidenceAssociation.sampleCount,
+        evidenceConsidered: candidate.evidenceAssociation.evidenceConsidered,
+        evidenceMatchedToGeometry: candidate.evidenceAssociation.evidenceMatchedToGeometry,
+        evidenceMatchedThroughWaypoints:
+          candidate.evidenceAssociation.evidenceMatchedThroughWaypoints,
+        evidenceAssociationStatus: candidate.evidenceAssociation.status,
+        routeShapeEligible: candidate.routeShapeEligible,
+      };
+    });
+    const diagnostic = buildRouteGenerationDiagnostic({
+      correlationId: "integration-lineage",
+      requestedExtraMinutes: 85,
+      baselineDurationSeconds: 3_600,
+      plannedExplorationStages: [],
+      attemptsPlanned: 2,
+      attemptsCompleted: 2,
+      intendedTargetMinutes: [],
+      adaptiveTargetMinutes: [],
+      actualAddedMinutesReturned: 15,
+      outcomeClassification: "NO_TARGET_BAND_ROUTE",
+      candidateEligibility: eligibility,
+      candidateScenicScores: scored.map(({ score }) => score),
+      finalSelectionReason: "BELOW_TARGET_BEST_BALANCE",
+      totalServerProcessingDurationMs: 500,
+    });
+    assert.deepEqual(
+      diagnostic.candidateEligibility.map((candidate) => ({
+        candidateId: candidate.candidateId,
+        score: candidate.scenicScore,
+        sampleCount: candidate.evidenceSampleCount,
+        geometryMatches: candidate.evidenceMatchedToGeometry,
+        routeShapeEligible: candidate.routeShapeEligible,
+        selected: candidate.selected,
+      })),
+      [
+        {
+          candidateId: "scenic-stage-4",
+          score: 42,
+          sampleCount: 1_117,
+          geometryMatches: 1,
+          routeShapeEligible: false,
+          selected: false,
+        },
+        {
+          candidateId: "scenic-stage-5",
+          score: 73,
+          sampleCount: 1_121,
+          geometryMatches: 5,
+          routeShapeEligible: true,
+          selected: true,
+        },
+      ],
+    );
+    const log = serializeRouteGenerationDiagnostic(diagnostic);
+    assert.ok(log.startsWith("scenik-route-engine-v2 "));
+    assert.doesNotThrow(() => JSON.parse(log.slice("scenik-route-engine-v2 ".length)));
+    assert.doesNotThrow(() => JSON.parse(formatRouteGenerationDiagnosticForClipboard(diagnostic)));
+    assert.deepEqual(internalRouteDiagnosticResponse(true, diagnostic), {
+      routeGenerationDiagnostics: diagnostic,
+    });
+  });
+
+  it("projects null aggregates for mixed missing association diagnostics without throwing", () => {
+    const scored = [
+      { candidateId: "with", evidenceAssociation: { status: "ANALYSED", sampleCount: 12 } },
+      { candidateId: "without", evidenceAssociation: undefined },
+    ];
+    const candidates = ["with", "without", "absent"].map((candidateId) => {
+      const association = candidateByRequestLocalId(scored, candidateId)?.evidenceAssociation;
+      return {
+        candidateId,
+        candidateSource: "scenik" as const,
+        explorationStage: 1,
+        intendedTargetMinutes: null,
+        adaptiveTargetMinutes: null,
+        actualAddedMinutes: null,
+        outcomeClassification: "ELIGIBLE",
+        duplicateEligible: true,
+        budgetEligible: true,
+        qualityEligible: true,
+        scenicScore: null,
+        evidenceSampleCount: association?.sampleCount ?? null,
+        evidenceAssociationStatus: association?.status ?? null,
+      };
+    });
+    const diagnostic = buildRouteGenerationDiagnostic({
+      correlationId: "mixed-association",
+      requestedExtraMinutes: 30,
+      baselineDurationSeconds: 3_600,
+      plannedExplorationStages: [],
+      attemptsPlanned: 3,
+      attemptsCompleted: 3,
+      intendedTargetMinutes: [],
+      adaptiveTargetMinutes: [],
+      actualAddedMinutesReturned: 0,
+      outcomeClassification: "NO_TARGET_BAND_ROUTE",
+      candidateEligibility: candidates,
+      candidateScenicScores: [],
+      finalSelectionReason: null,
+      totalServerProcessingDurationMs: 100,
+    });
+    assert.deepEqual(
+      diagnostic.candidateEligibility.map((candidate) => [
+        candidate.candidateId,
+        candidate.evidenceSampleCount,
+        candidate.evidenceAssociationStatus,
+      ]),
+      [
+        ["with", 12, "ANALYSED"],
+        ["without", null, null],
+        ["absent", null, null],
+      ],
+    );
+    assert.doesNotThrow(() => formatRouteGenerationDiagnosticForClipboard(diagnostic));
+    assert.doesNotThrow(() => serializeRouteGenerationDiagnostic(diagnostic));
+    assert.deepEqual(internalRouteDiagnosticResponse(true, diagnostic), {
+      routeGenerationDiagnostics: diagnostic,
+    });
   });
 });

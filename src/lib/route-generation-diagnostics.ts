@@ -82,6 +82,15 @@ type SafeAttemptDiagnostic = {
   selected?: boolean;
   rejectionReason?: string | null;
   finalSelectionReason?: string | null;
+  geometryDistanceMeters?: number | null;
+  evidenceSampleCount?: number | null;
+  evidenceConsidered?: number | null;
+  evidenceMatchedToGeometry?: number | null;
+  evidenceMatchedThroughWaypoints?: number | null;
+  naturalEvidenceCount?: number | null;
+  themeEvidenceCount?: number | null;
+  moodEvidenceCount?: number | null;
+  evidenceAssociationStatus?: string | null;
   routeShapeEligible?: boolean | null;
   routeShapeRejectionReason?: string | null;
   reverseOverlapDistanceMeters?: number | null;
@@ -91,6 +100,30 @@ type SafeAttemptDiagnostic = {
   waypointAssociationStatus?: string | null;
   routeShapeAnalysisStatus?: string | null;
 };
+
+const SAFE_EVIDENCE_ASSOCIATION_STATUSES = new Set([
+  "ANALYSED",
+  "MISSING_GEOMETRY",
+  "MALFORMED_GEOMETRY",
+  "GEOMETRY_LIMIT_EXCEEDED",
+  "SAMPLE_LIMIT_EXCEEDED",
+  "INDEX_LIMIT_EXCEEDED",
+  "ASSOCIATION_FAILED",
+  "WORK_LIMIT_EXCEEDED",
+]);
+
+function safeNonNegativeNumber(value: unknown, integer = false): number | null {
+  return typeof value === "number" &&
+    Number.isFinite(value) &&
+    value >= 0 &&
+    (!integer || Number.isInteger(value))
+    ? value
+    : null;
+}
+
+function safeEvidenceAssociationStatus(value: unknown): string | null {
+  return typeof value === "string" && SAFE_EVIDENCE_ASSOCIATION_STATUSES.has(value) ? value : null;
+}
 
 export function buildRouteGenerationDiagnostic(input: {
   correlationId: string;
@@ -159,6 +192,18 @@ export function buildRouteGenerationDiagnostic(input: {
       selected: candidate.selected ?? false,
       rejectionReason: candidate.rejectionReason ?? null,
       finalSelectionReason: candidate.selected ? (candidate.finalSelectionReason ?? null) : null,
+      geometryDistanceMeters: safeNonNegativeNumber(candidate.geometryDistanceMeters, true),
+      evidenceSampleCount: safeNonNegativeNumber(candidate.evidenceSampleCount, true),
+      evidenceConsidered: safeNonNegativeNumber(candidate.evidenceConsidered, true),
+      evidenceMatchedToGeometry: safeNonNegativeNumber(candidate.evidenceMatchedToGeometry, true),
+      evidenceMatchedThroughWaypoints: safeNonNegativeNumber(
+        candidate.evidenceMatchedThroughWaypoints,
+        true,
+      ),
+      naturalEvidenceCount: safeNonNegativeNumber(candidate.naturalEvidenceCount),
+      themeEvidenceCount: safeNonNegativeNumber(candidate.themeEvidenceCount),
+      moodEvidenceCount: safeNonNegativeNumber(candidate.moodEvidenceCount),
+      evidenceAssociationStatus: safeEvidenceAssociationStatus(candidate.evidenceAssociationStatus),
       routeShapeEligible: candidate.routeShapeEligible ?? null,
       routeShapeRejectionReason: candidate.routeShapeRejectionReason ?? null,
       reverseOverlapDistanceMeters: candidate.reverseOverlapDistanceMeters ?? null,
