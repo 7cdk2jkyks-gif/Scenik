@@ -1,12 +1,11 @@
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useServerFn } from "@tanstack/react-start";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Card } from "@/components/ui/card";
 import { supabase } from "@/integrations/supabase/client";
-import { lovable } from "@/integrations/lovable";
 import { toast } from "sonner";
 import { Logo } from "@/components/Logo";
 import { AppleSignInButton } from "@/components/AppleSignInButton";
@@ -16,8 +15,32 @@ import { canUseNativeAuth, nativeSignIn } from "@/lib/native-auth";
 import { getPublicOrigin, isNativePlatform, isIOS } from "@/lib/native";
 import { exchangeNativeGoogleToken } from "@/lib/native-google.functions";
 import { markNativeAuthCompleted, restoreNativeSession } from "@/lib/native-auth-transition";
+import {
+  selectOAuthPlatformFlow,
+  startWebOAuth,
+  webOAuthErrorMessage,
+  type WebOAuthErrorKind,
+} from "@/lib/web-auth";
+import {
+  authFailureMessage,
+  classifyAuthFailure,
+  safeEmailAuthMessage,
+  type AuthFailureStage,
+} from "@/lib/auth-hardening";
+import {
+  createAuthenticationAttemptCoordinator,
+  executeEmailAuthentication,
+  executeGuestAuthentication,
+  executeSocialAuthentication,
+} from "@/lib/auth-attempt-coordinator";
 
 export const Route = createFileRoute("/auth")({
+  validateSearch: (search: Record<string, unknown>) => ({
+    oauthError:
+      search.oauthError === "cancelled" || search.oauthError === "failed"
+        ? (search.oauthError as WebOAuthErrorKind)
+        : undefined,
+  }),
   head: () => ({
     meta: [
       { title: "Sign in — Scenik" },
@@ -29,6 +52,7 @@ export const Route = createFileRoute("/auth")({
 
 function AuthPage() {
   const navigate = useNavigate();
+  const { oauthError } = Route.useSearch();
   const googleBridge = useServerFn(exchangeNativeGoogleToken);
   const [mode, setMode] = useState<"signin" | "signup">("signin");
   const [email, setEmail] = useState("");
@@ -37,24 +61,39 @@ function AuthPage() {
   // `loading` is ONLY ever set by an explicit user interaction. Nothing on
   // mount — native or web — may set it true.
   const [loading, setLoading] = useState(false);
-  const [authError, setAuthError] = useState<string | null>(null);
-
-  function startLoading(_source: string) {
-    setLoading(true);
+  const mounted = useRef(true);
+  const attemptCoordinator = useRef<ReturnType<
+    typeof createAuthenticationAttemptCoordinator
+  > | null>(null);
+  if (!attemptCoordinator.current) {
+    attemptCoordinator.current = createAuthenticationAttemptCoordinator({
+      isMounted: () => mounted.current,
+      setLoading,
+    });
   }
-  function stopLoading() {
-    setLoading(false);
-  }
+  const [authError, setAuthError] = useState<string | null>(() => webOAuthErrorMessage(oauthError));
   function log(line: string) {
     console.log("[Auth]", line);
   }
 
-  function reportStageFailure(stage: string, error: unknown) {
-    const exception = error instanceof Error ? error : new Error(String(error));
-    const detail = `${stage} failed: ${exception.message}\n${exception.stack ?? "Source line unavailable"}`;
-    console.error(`[Auth] ${detail}`);
-    setAuthError(`${stage} couldn’t be completed. Please try again.`);
-    toast.error(`${stage} failed: ${exception.message}`);
+  function reportStageFailure(input: {
+    provider: "apple" | "google";
+    stage: AuthFailureStage;
+    error: unknown;
+    native: boolean;
+  }) {
+    const classification = classifyAuthFailure({
+      error: input.error,
+      stage: input.stage,
+      nativeProvider: input.native ? input.provider : undefined,
+    });
+    console.error("[Auth]", { classification, provider: input.provider, stage: input.stage });
+    const message = authFailureMessage(classification);
+    if (mounted.current) {
+      setAuthError(message);
+      if (classification === "AUTH_CANCELLED") toast.info(message);
+      else toast.error(message);
+    }
   }
 
   function withAuthTimeout<T>(promise: PromiseLike<T>, label: string, ms = 30_000): Promise<T> {
@@ -67,6 +106,7 @@ function AuthPage() {
   }
 
   useEffect(() => {
+    mounted.current = true;
     let cancelled = false;
     const native = isNativePlatform();
     // Defensive: nothing may leave a persisted "loading" flag behind.
@@ -97,11 +137,12 @@ function AuthPage() {
         if (cancelled) return;
         log(`session restore completed (session: ${session ? "yes" : "no"})`);
       })
-      .catch((err) => {
+      .catch(() => {
         if (cancelled) return;
-        log(
-          `session restore timed out or failed: ${err instanceof Error ? err.message : "unknown"}`,
-        );
+        console.error("[Auth]", {
+          classification: "AUTH_SESSION_FAILED",
+          stage: "session_restore",
+        });
       })
       .finally(() => {
         if (cancelled) return;
@@ -110,6 +151,7 @@ function AuthPage() {
 
     return () => {
       cancelled = true;
+      mounted.current = false;
     };
   }, [navigate]);
 
@@ -120,29 +162,31 @@ function AuthPage() {
       return;
     }
 
-    startLoading("email");
-    try {
-      if (mode === "signup") {
-        const { error } = await supabase.auth.signUp({
+    await attemptCoordinator.current?.run({
+      method: "email",
+      execute: () =>
+        executeEmailAuthentication({
+          auth: supabase.auth,
+          mode,
           email,
           password,
-          options: { emailRedirectTo: getPublicOrigin() + "/auth" },
-        });
-        if (error) throw error;
-        capture(AnalyticsEvent.UserSignedUp, { method: "email" });
-        toast.success("Account created. Check your email if confirmation is required.");
-        navigate({ to: "/plan" });
-      } else {
-        const { error } = await supabase.auth.signInWithPassword({ email, password });
-        if (error) throw error;
-        capture(AnalyticsEvent.UserSignedIn, { method: "email" });
-        navigate({ to: "/plan" });
-      }
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Something went wrong");
-    } finally {
-      stopLoading();
-    }
+          emailRedirectTo: getPublicOrigin() + "/auth",
+        }),
+      onSuccess: async (completedMode) => {
+        capture(
+          completedMode === "signup" ? AnalyticsEvent.UserSignedUp : AnalyticsEvent.UserSignedIn,
+          { method: "email" },
+        );
+        if (completedMode === "signup") {
+          toast.success("Account created. Check your email if confirmation is required.");
+        }
+        await navigate({ to: "/plan" });
+      },
+      onFailure: (error) => {
+        console.error("[Auth]", { classification: "AUTH_EMAIL_FAILED", stage: "email" });
+        toast.error(safeEmailAuthMessage(error));
+      },
+    });
   }
 
   async function handleOAuth(provider: "google" | "apple") {
@@ -151,24 +195,37 @@ function AuthPage() {
       toast.error("Please accept the Terms & Conditions to continue.");
       return;
     }
-
     setAuthError(null);
-    startLoading(provider);
-    try {
-      log(`${provider} OAuth started (user interaction)`);
-      // On iOS/Android, use the native sign-in sheet so users never leave the app.
-      if (canUseNativeAuth(provider)) {
-        const result = await nativeSignIn(
+    const native = canUseNativeAuth(provider);
+    await attemptCoordinator.current?.run({
+      method: provider,
+      retainLockOnSuccess: !native,
+      execute: () => {
+        log(`${provider} OAuth started (user interaction)`);
+        return executeSocialAuthentication({
           provider,
-          provider === "google" ? googleBridge : undefined,
-        );
+          nativeAvailable: selectOAuthPlatformFlow(native) === "native",
+          nativeSignIn: (selectedProvider) =>
+            nativeSignIn(
+              selectedProvider,
+              selectedProvider === "google" ? googleBridge : undefined,
+            ),
+          startWebOAuth: (selectedProvider) =>
+            startWebOAuth({
+              auth: supabase.auth,
+              provider: selectedProvider,
+              origin: getPublicOrigin(),
+            }),
+        });
+      },
+      onSuccess: async (outcome) => {
+        if (outcome.flow === "web") return;
+        const result = outcome.result;
         log(`[${result.requestId}] ${provider} native result received`);
         log(`[${result.requestId}] Supabase session confirmed`);
         capture(mode === "signup" ? AnalyticsEvent.UserSignedUp : AnalyticsEvent.UserSignedIn, {
           method: provider,
         });
-        stopLoading();
-        log(`[${result.requestId}] loading cleared`);
         markNativeAuthCompleted();
         log(`[${result.requestId}] home/root auth refresh requested`);
         log(`[${result.requestId}] navigation to /plan started`);
@@ -176,64 +233,25 @@ function AuthPage() {
         void import("@/lib/revenuecat")
           .then((module) => module.configureRevenueCat(result.session.user.id))
           .then(() => log(`[${result.requestId}] RevenueCat identification completed`))
-          .catch((error: unknown) =>
-            console.warn(
-              `[Auth][${result.requestId}] RevenueCat identification non-fatal failure`,
-              error instanceof Error ? error.message : "unknown error",
-            ),
+          .catch(() =>
+            console.warn(`[Auth][${result.requestId}]`, {
+              classification: "AUTH_SESSION_FAILED",
+              stage: "revenuecat_identification",
+            }),
           );
-        void navigate({ to: "/plan", replace: true }).then(
-          () => log(`[${result.requestId}] navigation to /plan completed`),
-          (error: unknown) =>
-            console.warn(
-              `[Auth][${result.requestId}] post-auth navigation failed`,
-              error instanceof Error ? error.message : "unknown error",
-            ),
-        );
-        return;
-      }
-
-      if (provider === "google") {
-        console.log("[WebAuth] Google OAuth started");
-        const { error } = await supabase.auth.signInWithOAuth({
-          provider: "google",
-          options: { redirectTo: getPublicOrigin() + "/plan" },
-        });
-        if (error) throw error;
-        return;
-      }
-
-      console.log("[Auth] platform: web");
-      console.log("[Auth] provider and selected flow:", provider, "lovable-broker");
-      console.log("[Auth] token exchange started (web)");
-      const res = await withAuthTimeout(
-        lovable.auth.signInWithOAuth(provider, {
-          redirect_uri: getPublicOrigin() + "/auth",
-        }),
-        `${provider === "apple" ? "Apple" : "Google"} OAuth`,
-      );
-      if (res.error) {
-        const msg =
-          res.error.message || `${provider === "apple" ? "Apple" : "Google"} sign-in failed`;
-        console.log("[Auth] token exchange error:", msg);
-        setAuthError(msg);
-        toast.error(msg);
-        return;
-      }
-      if (res.redirected) return;
-      console.log("[Auth] token exchange success (web)");
-      console.log("[Auth] session created");
-      capture(mode === "signup" ? AnalyticsEvent.UserSignedUp : AnalyticsEvent.UserSignedIn, {
-        method: provider,
-      });
-      console.log("[Auth] navigation to /plan");
-      navigate({ to: "/plan" });
-    } catch (err) {
-      reportStageFailure(provider === "apple" ? "Apple sign-in" : "Google sign-in", err);
-    } finally {
-      stopLoading();
-      console.log("[Auth] loading state cleared");
-    }
+        try {
+          await navigate({ to: "/plan", replace: true });
+          log(`[${result.requestId}] navigation to /plan completed`);
+        } catch {
+          console.warn(`[Auth][${result.requestId}]`, {
+            classification: "AUTH_SESSION_FAILED",
+            stage: "post_auth_navigation",
+          });
+        }
+      },
+      onFailure: (error) =>
+        reportStageFailure({ provider, stage: native ? "provider" : "start", error, native }),
+    });
   }
 
   return (
@@ -367,18 +385,22 @@ function AuthPage() {
                 toast.error("Please accept the Terms & Conditions to continue.");
                 return;
               }
-              startLoading("guest");
-              try {
-                const { error } = await supabase.auth.signInAnonymously();
-                if (error) throw error;
-                capture(AnalyticsEvent.UserSignedIn, { method: "guest" });
-                toast.success("You're in — try Scenik as a guest.");
-                navigate({ to: "/plan" });
-              } catch (err) {
-                toast.error(err instanceof Error ? err.message : "Couldn't start guest session");
-              } finally {
-                stopLoading();
-              }
+              await attemptCoordinator.current?.run({
+                method: "guest",
+                execute: () => executeGuestAuthentication(supabase.auth),
+                onSuccess: async () => {
+                  capture(AnalyticsEvent.UserSignedIn, { method: "guest" });
+                  toast.success("You're in — try Scenik as a guest.");
+                  await navigate({ to: "/plan" });
+                },
+                onFailure: () => {
+                  console.error("[Auth]", {
+                    classification: "AUTH_START_FAILED",
+                    stage: "guest_session",
+                  });
+                  toast.error("We couldn’t start a guest session. Please try again.");
+                },
+              });
             }}
           >
             Continue as guest

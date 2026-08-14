@@ -358,6 +358,10 @@ function friendlyError(msg: string): string {
   if (/FREE_LIMIT_REACHED/.test(msg))
     return "You've used all 3 free routes this month. Upgrade to Premium for unlimited routes.";
   if (/PREMIUM_REQUIRED:multi_stop/.test(msg)) return "Multi-stop planning is a Premium feature.";
+  if (/ROUTE_GENERATION_METERING_READ_FAILED/.test(msg))
+    return "We couldn't verify your route allowance right now. Please try again.";
+  if (/ROUTE_GENERATION_METERING_INSERT_FAILED/.test(msg))
+    return "We couldn't record this route generation safely. Please try again.";
   if (/MAPS_NOT_CONFIGURED/.test(msg))
     return "Route service configuration error (MAPS_NOT_CONFIGURED). The server Google Maps key is unavailable.";
   if (/GEOCODING_ZERO_RESULTS/.test(msg))

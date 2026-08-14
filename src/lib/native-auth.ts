@@ -1,7 +1,7 @@
 // Native (in-app) social sign-in for Capacitor iOS/Android.
 // Uses @capgo/capacitor-social-login to keep users inside the app —
-// Apple shows the native sheet, Google uses the native flow. On web we
-// fall back to the Lovable OAuth broker.
+// Apple shows the native sheet, Google uses the native flow. Web OAuth is
+// handled separately by Supabase in the auth route.
 import { isNativePlatform, isIOS } from "./native";
 import { supabase } from "@/integrations/supabase/client";
 import type { NativeAuthResult } from "@/lib/native-auth-transition";
@@ -243,8 +243,8 @@ export async function nativeSignIn(
     const { data, error } = await supabase.auth.signInWithIdToken(credentials);
     alog(reqId, "apple: Supabase response received");
     if (error) {
-      alog(reqId, "token exchange error:", error.message);
-      settle("failure", error.message);
+      alog(reqId, "token exchange status:", "AUTH_PROVIDER_FAILED");
+      settle("failure", "AUTH_PROVIDER_FAILED");
       if (/audience/i.test(error.message)) {
         throw new Error(
           `Apple sign-in isn't authorised for this app yet. Add the native bundle identifier (${typeof aud === "string" ? aud : "com.GoScenik"}) to the accepted Apple client IDs in the app's auth settings.`,
@@ -275,8 +275,8 @@ export async function nativeSignIn(
     alog(reqId, "google: nonce mismatch/missing — clearing cached session and retrying once");
     try {
       await SocialLogin.logout({ provider: "google" });
-    } catch (e) {
-      alog(reqId, "google: logout before retry failed (continuing):", e);
+    } catch {
+      alog(reqId, "google: logout before retry status:", "AUTH_PROVIDER_FAILED");
     }
     attempt = await doGoogleLoginOnce(reqId);
     tokenNonce = attempt.payload?.["nonce"] as string | undefined;
@@ -302,11 +302,9 @@ export async function nativeSignIn(
   alog(reqId, "signInWithIdToken started");
   // No timeout: session-creating call.
   const { data: primaryData, error } = await supabase.auth.signInWithIdToken(credentials);
-  const primaryCode =
-    error?.code ?? error?.status ?? (primaryData.session ? "session_returned" : "no_session");
-  alog(reqId, "primary exchange status:", primaryCode);
+  alog(reqId, "primary exchange status:", primaryData.session ? "session_returned" : "no_session");
   if (error) {
-    alog(reqId, "primary exchange error:", error.message);
+    alog(reqId, "primary exchange error:", "AUTH_PROVIDER_FAILED");
     const errorCode = typeof error.code === "string" ? error.code.toLowerCase() : "";
     const audienceMessage = /audience|unacceptable audience in id_token|invalid.*client/i.test(
       error.message,
@@ -348,11 +346,11 @@ export async function nativeSignIn(
           token_hash: bridge.tokenHash,
         });
         alog(reqId, "verifyOtp returned; session:", Boolean(otpData?.session));
-        if (otpError) throw new Error(`verifyOtp failed: ${otpError.message}`);
+        if (otpError) throw new Error("Native Google verification failed");
         if (!otpData.session) throw new Error("verifyOtp completed without returning a session");
         settle("success", "google session created via bridge");
         return { requestId: reqId, session: otpData.session };
-      } catch (fallbackError) {
+      } catch {
         alog(reqId, "bridge request reached server:", bridgeReached);
         // Last check before declaring failure: if a session exists anyway,
         // this attempt succeeded and must not report an error.
@@ -361,13 +359,11 @@ export async function nativeSignIn(
           settle("success", "session present despite fallback error");
           return { requestId: reqId, session: check.session };
         }
-        const message =
-          fallbackError instanceof Error ? fallbackError.message : "Native Google fallback failed";
-        settle("failure", message);
-        throw new Error(`Native Google fallback failed: ${message}`);
+        settle("failure", "AUTH_PROVIDER_FAILED");
+        throw new Error("Native Google fallback failed");
       }
     }
-    settle("failure", error.message);
+    settle("failure", "AUTH_PROVIDER_FAILED");
     throw error;
   }
   alog(reqId, "session returned:", Boolean(primaryData.session));

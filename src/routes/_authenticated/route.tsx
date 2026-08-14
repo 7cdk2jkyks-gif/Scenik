@@ -11,6 +11,11 @@ import { TermsGate } from "@/components/TermsGate";
 import { capture } from "@/lib/analytics/client";
 import { AnalyticsEvent } from "@/lib/analytics/events";
 import { isNativePlatform } from "@/lib/native";
+import {
+  classifyOAuthReturnError,
+  restoreWebOAuthSession,
+  webSessionOutcome,
+} from "@/lib/web-auth";
 
 const OAUTH_RESTORE_TIMEOUT_MS = 2_000;
 
@@ -23,28 +28,7 @@ function isOAuthReturn(): boolean {
 
 async function restoreBrowserOAuthSession() {
   console.log("[WebAuth] session restore started");
-  const initial = await supabase.auth.getSession();
-  if (initial.error || initial.data.session) {
-    console.log("[WebAuth] session restore completed:", Boolean(initial.data.session));
-    return initial;
-  }
-
-  const restored = await new Promise<typeof initial>((resolve) => {
-    let settled = false;
-    const finish = (result: typeof initial) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeout);
-      subscription.subscription.unsubscribe();
-      resolve(result);
-    };
-    const { data: subscription } = supabase.auth.onAuthStateChange((_event, session) => {
-      if (session) finish({ data: { session }, error: null });
-    });
-    const timeout = window.setTimeout(() => {
-      void supabase.auth.getSession().then(finish);
-    }, OAUTH_RESTORE_TIMEOUT_MS);
-  });
+  const restored = await restoreWebOAuthSession(supabase.auth, OAUTH_RESTORE_TIMEOUT_MS);
   console.log("[WebAuth] session restore completed:", Boolean(restored.data.session));
   return restored;
 }
@@ -53,6 +37,12 @@ export const Route = createFileRoute("/_authenticated")({
   ssr: false,
   beforeLoad: async () => {
     console.log("[WebAuth] /plan guard started");
+    const oauthError =
+      typeof window === "undefined" ? null : classifyOAuthReturnError(window.location.search);
+    if (oauthError) {
+      console.log("[WebAuth] OAuth provider returned a sanitized error state");
+      throw redirect({ to: "/auth", search: { oauthError } });
+    }
     const oauthReturn = isOAuthReturn();
     if (oauthReturn) console.log("[WebAuth] OAuth return detected");
     if (typeof window !== "undefined")
@@ -60,16 +50,13 @@ export const Route = createFileRoute("/_authenticated")({
     const { data: sessionData, error } = oauthReturn
       ? await restoreBrowserOAuthSession()
       : await supabase.auth.getSession();
-    console.log("[WebAuth] /plan guard session:", Boolean(sessionData.session));
-    if (error) {
-      console.error(
-        "[Auth] /plan client session check failed",
-        error.message,
-        error.stack ?? "Source line unavailable",
-      );
-      throw error;
+    const sessionOutcome = webSessionOutcome({ data: sessionData, error });
+    console.log("[WebAuth] /plan guard session:", sessionOutcome === "authenticated");
+    if (sessionOutcome === "failed") {
+      console.error("[Auth]", { classification: "AUTH_SESSION_FAILED", stage: "session_restore" });
+      throw redirect({ to: "/auth", search: { oauthError: "failed" } });
     }
-    if (sessionData.session?.user) {
+    if (sessionOutcome === "authenticated" && sessionData.session?.user) {
       console.log("[Auth] /plan auth check resolved from session");
       console.log("[WebAuth] navigation completed");
       return { user: sessionData.session.user };
