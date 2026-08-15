@@ -99,6 +99,14 @@ type SafeAttemptDiagnostic = {
   affectedWaypointIndex?: number | null;
   waypointAssociationStatus?: string | null;
   routeShapeAnalysisStatus?: string | null;
+  refinementParentCandidateId?: string | null;
+  refinementUpperCandidateId?: string | null;
+  refinementAttemptNumber?: number | null;
+  refinementStrategy?: "RELATED_BRACKET" | "BOUNDED_EXPANSION" | null;
+  refinementBracketLowerMinutes?: number | null;
+  refinementBracketUpperMinutes?: number | null;
+  refinementTargetBandReached?: boolean | null;
+  refinementStopReason?: string | null;
 };
 
 const SAFE_EVIDENCE_ASSOCIATION_STATUSES = new Set([
@@ -121,8 +129,32 @@ function safeNonNegativeNumber(value: unknown, integer = false): number | null {
     : null;
 }
 
+function safeRefinementCount(value: unknown): number | null {
+  const count = safeNonNegativeNumber(value, true);
+  return count != null && count <= 2 ? count : null;
+}
+
 function safeEvidenceAssociationStatus(value: unknown): string | null {
   return typeof value === "string" && SAFE_EVIDENCE_ASSOCIATION_STATUSES.has(value) ? value : null;
+}
+
+const SAFE_REFINEMENT_STOP_REASONS = new Set([
+  "TARGET_REACHED",
+  "PROVIDER_REMAINED_BELOW_TARGET",
+  "NO_SAFE_REFINEMENT_BRACKET",
+  "NO_SUITABLE_WAYPOINT_PLAN",
+  "NO_RELATED_PLAN",
+  "PROVIDER_REQUEST_FAILED",
+  "PROVIDER_RESPONSE_REJECTED",
+  "PROVIDER_EVALUATION_FAILED",
+  "REFINED_CANDIDATES_OVER_BUDGET",
+  "REFINED_CANDIDATES_INCOHERENT",
+  "ATTEMPT_CAPACITY_EXHAUSTED",
+  "DISPROPORTIONATE_TO_BASELINE",
+]);
+
+function safeCandidateId(value: unknown): string | null {
+  return typeof value === "string" && /^[a-z0-9-]{1,64}$/i.test(value) ? value : null;
 }
 
 export function buildRouteGenerationDiagnostic(input: {
@@ -146,6 +178,17 @@ export function buildRouteGenerationDiagnostic(input: {
   candidateScenicScores: number[];
   finalSelectionReason: string | null;
   totalServerProcessingDurationMs: number;
+  durationRefinement?: {
+    attempted: boolean;
+    reachedTargetBand: boolean;
+    attemptsUsed: number;
+    safeConstructionsProduced: number;
+    providerRequestsStarted: number;
+    providerResponsesReturned: number;
+    providerRequestsFailed: number;
+    providerResponsesEvaluated: number;
+    stopReason: string;
+  } | null;
 }) {
   return {
     correlationId: input.correlationId,
@@ -212,10 +255,57 @@ export function buildRouteGenerationDiagnostic(input: {
       affectedWaypointIndex: candidate.affectedWaypointIndex ?? null,
       waypointAssociationStatus: candidate.waypointAssociationStatus ?? null,
       routeShapeAnalysisStatus: candidate.routeShapeAnalysisStatus ?? null,
+      ...(candidate.refinementAttemptNumber != null
+        ? {
+            refinementParentCandidateId: safeCandidateId(candidate.refinementParentCandidateId),
+            refinementUpperCandidateId: safeCandidateId(candidate.refinementUpperCandidateId),
+            refinementAttemptNumber: safeNonNegativeNumber(candidate.refinementAttemptNumber, true),
+            refinementStrategy:
+              candidate.refinementStrategy === "RELATED_BRACKET" ||
+              candidate.refinementStrategy === "BOUNDED_EXPANSION"
+                ? candidate.refinementStrategy
+                : null,
+            refinementBracketLowerMinutes: safeNonNegativeNumber(
+              candidate.refinementBracketLowerMinutes,
+            ),
+            refinementBracketUpperMinutes: safeNonNegativeNumber(
+              candidate.refinementBracketUpperMinutes,
+            ),
+            refinementTargetBandReached: candidate.refinementTargetBandReached === true,
+            refinementStopReason:
+              typeof candidate.refinementStopReason === "string" &&
+              SAFE_REFINEMENT_STOP_REASONS.has(candidate.refinementStopReason)
+                ? candidate.refinementStopReason
+                : null,
+          }
+        : {}),
     })),
     candidateScenicScores: [...input.candidateScenicScores],
     finalSelectionReason: input.finalSelectionReason,
     totalServerProcessingDurationMs: input.totalServerProcessingDurationMs,
+    ...(input.durationRefinement
+      ? {
+          durationRefinement: {
+            attempted: input.durationRefinement.attempted === true,
+            reachedTargetBand: input.durationRefinement.reachedTargetBand === true,
+            // attemptsUsed means actual provider requests started.
+            attemptsUsed: safeRefinementCount(input.durationRefinement.attemptsUsed) ?? 0,
+            safeConstructionsProduced:
+              safeRefinementCount(input.durationRefinement.safeConstructionsProduced) ?? 0,
+            providerRequestsStarted:
+              safeRefinementCount(input.durationRefinement.providerRequestsStarted) ?? 0,
+            providerResponsesReturned:
+              safeRefinementCount(input.durationRefinement.providerResponsesReturned) ?? 0,
+            providerRequestsFailed:
+              safeRefinementCount(input.durationRefinement.providerRequestsFailed) ?? 0,
+            providerResponsesEvaluated:
+              safeRefinementCount(input.durationRefinement.providerResponsesEvaluated) ?? 0,
+            stopReason: SAFE_REFINEMENT_STOP_REASONS.has(input.durationRefinement.stopReason)
+              ? input.durationRefinement.stopReason
+              : "NO_SAFE_REFINEMENT_BRACKET",
+          },
+        }
+      : {}),
   };
 }
 

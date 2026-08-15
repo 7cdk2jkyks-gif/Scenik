@@ -129,7 +129,6 @@ describe("route-generation diagnostic log", () => {
             roadCharacter: 8,
             themeMatch: 4,
             diversity: 6,
-            rationale: "must-not-escape",
           },
           allowanceUtilisation: 0.6,
           evidenceEligible: true,
@@ -154,7 +153,6 @@ describe("route-generation diagnostic log", () => {
           affectedWaypointIndex: 1,
           waypointAssociationStatus: "EXACT",
           routeShapeAnalysisStatus: "ANALYSED",
-          polyline: "nested-secret-polyline",
         },
       ],
       candidateScenicScores: [66, 72],
@@ -481,6 +479,39 @@ describe("route-generation diagnostic log", () => {
       token: "token-secret",
       secret: "value-secret",
     };
+    const invalidCandidate = {
+      candidateId: "scenic-stage-1",
+      candidateSource: "scenik" as const,
+      explorationStage: 1,
+      intendedTargetMinutes: null,
+      adaptiveTargetMinutes: null,
+      actualAddedMinutes: 10,
+      outcomeClassification: "ELIGIBLE",
+      duplicateEligible: true,
+      budgetEligible: true,
+      qualityEligible: true,
+      scenicScore: 70,
+      geometryDistanceMeters: null,
+      evidenceSampleCount: null,
+      evidenceConsidered: null,
+      evidenceMatchedToGeometry: null,
+      evidenceMatchedThroughWaypoints: null,
+      naturalEvidenceCount: null,
+      themeEvidenceCount: null,
+      moodEvidenceCount: null,
+      evidenceAssociationStatus: null,
+    };
+    Object.defineProperties(invalidCandidate, {
+      geometryDistanceMeters: { value: sensitive },
+      evidenceSampleCount: { value: [sensitive] },
+      evidenceConsidered: { value: "70" },
+      evidenceMatchedToGeometry: { value: Number.NaN },
+      evidenceMatchedThroughWaypoints: { value: -1 },
+      naturalEvidenceCount: { value: Number.POSITIVE_INFINITY },
+      themeEvidenceCount: { value: sensitive },
+      moodEvidenceCount: { value: [] },
+      evidenceAssociationStatus: { value: sensitive },
+    });
     const input = {
       correlationId: "strict-scalars",
       requestedExtraMinutes: 30,
@@ -492,34 +523,11 @@ describe("route-generation diagnostic log", () => {
       adaptiveTargetMinutes: [],
       actualAddedMinutesReturned: 10,
       outcomeClassification: "TARGET_MET",
-      candidateEligibility: [
-        {
-          candidateId: "scenic-stage-1",
-          candidateSource: "scenik" as const,
-          explorationStage: 1,
-          intendedTargetMinutes: null,
-          adaptiveTargetMinutes: null,
-          actualAddedMinutes: 10,
-          outcomeClassification: "ELIGIBLE",
-          duplicateEligible: true,
-          budgetEligible: true,
-          qualityEligible: true,
-          scenicScore: 70,
-          geometryDistanceMeters: sensitive,
-          evidenceSampleCount: [sensitive],
-          evidenceConsidered: "70",
-          evidenceMatchedToGeometry: Number.NaN,
-          evidenceMatchedThroughWaypoints: -1,
-          naturalEvidenceCount: Number.POSITIVE_INFINITY,
-          themeEvidenceCount: sensitive,
-          moodEvidenceCount: [],
-          evidenceAssociationStatus: sensitive,
-        },
-      ],
+      candidateEligibility: [invalidCandidate],
       candidateScenicScores: [70],
       finalSelectionReason: "ONLY_ELIGIBLE_ROUTE",
       totalServerProcessingDurationMs: 100,
-    } as unknown as Parameters<typeof buildRouteGenerationDiagnostic>[0];
+    };
     const diagnostic = buildRouteGenerationDiagnostic(input);
     assert.deepEqual(
       {
@@ -739,6 +747,207 @@ describe("route-generation diagnostic log", () => {
     assert.doesNotThrow(() => serializeRouteGenerationDiagnostic(diagnostic));
     assert.deepEqual(internalRouteDiagnosticResponse(true, diagnostic), {
       routeGenerationDiagnostics: diagnostic,
+    });
+  });
+
+  it("allow-lists aggregate duration-refinement lineage without route or place data", () => {
+    const diagnostic = buildRouteGenerationDiagnostic({
+      correlationId: "refinement-lineage",
+      requestedExtraMinutes: 30,
+      baselineDurationSeconds: 22_064,
+      plannedExplorationStages: [],
+      attemptsPlanned: 5,
+      attemptsCompleted: 5,
+      intendedTargetMinutes: [27],
+      adaptiveTargetMinutes: [27],
+      actualAddedMinutesReturned: 26.2,
+      outcomeClassification: "TARGET_MET",
+      candidateEligibility: [
+        {
+          candidateId: "duration-refinement-8",
+          candidateSource: "scenik",
+          explorationStage: 2,
+          intendedTargetMinutes: 27,
+          adaptiveTargetMinutes: 27,
+          actualAddedMinutes: 26.2,
+          outcomeClassification: "TARGET_BAND",
+          duplicateEligible: true,
+          budgetEligible: true,
+          qualityEligible: true,
+          scenicScore: 78,
+          refinementParentCandidateId: "scenic-stage-5",
+          refinementUpperCandidateId: "scenic-stage-4",
+          refinementAttemptNumber: 1,
+          refinementStrategy: "RELATED_BRACKET",
+          refinementBracketLowerMinutes: 18.1,
+          refinementBracketUpperMinutes: 41.4,
+          refinementTargetBandReached: true,
+          refinementStopReason: "TARGET_REACHED",
+          coordinates: [{ lat: 51, lng: -1 }],
+          waypoints: [{ lat: 52, lng: -2 }],
+          placeId: "private-place",
+          polyline: "private-polyline",
+          displayName: "private-name",
+          providerResponse: { private: true },
+        } as Parameters<typeof buildRouteGenerationDiagnostic>[0]["candidateEligibility"][number] &
+          Record<string, unknown>,
+      ],
+      candidateScenicScores: [78],
+      finalSelectionReason: "TARGET_BAND_HIGHEST_SCENIC_QUALITY",
+      totalServerProcessingDurationMs: 3_327,
+      durationRefinement: {
+        attempted: true,
+        reachedTargetBand: true,
+        attemptsUsed: 1,
+        safeConstructionsProduced: 1,
+        providerRequestsStarted: 1,
+        providerResponsesReturned: 1,
+        providerRequestsFailed: 0,
+        providerResponsesEvaluated: 1,
+        stopReason: "TARGET_REACHED",
+      },
+    });
+    const serialized = JSON.stringify(diagnostic);
+    assert.equal(serialized.includes("private"), false);
+    assert.deepEqual(diagnostic.durationRefinement, {
+      attempted: true,
+      reachedTargetBand: true,
+      attemptsUsed: 1,
+      safeConstructionsProduced: 1,
+      providerRequestsStarted: 1,
+      providerResponsesReturned: 1,
+      providerRequestsFailed: 0,
+      providerResponsesEvaluated: 1,
+      stopReason: "TARGET_REACHED",
+    });
+    assert.deepEqual(
+      {
+        refinementParentCandidateId: diagnostic.candidateEligibility[0].refinementParentCandidateId,
+        refinementUpperCandidateId: diagnostic.candidateEligibility[0].refinementUpperCandidateId,
+        refinementAttemptNumber: diagnostic.candidateEligibility[0].refinementAttemptNumber,
+        refinementStrategy: diagnostic.candidateEligibility[0].refinementStrategy,
+        refinementBracketLowerMinutes:
+          diagnostic.candidateEligibility[0].refinementBracketLowerMinutes,
+        refinementBracketUpperMinutes:
+          diagnostic.candidateEligibility[0].refinementBracketUpperMinutes,
+        refinementTargetBandReached: diagnostic.candidateEligibility[0].refinementTargetBandReached,
+        refinementStopReason: diagnostic.candidateEligibility[0].refinementStopReason,
+      },
+      {
+        refinementParentCandidateId: "scenic-stage-5",
+        refinementUpperCandidateId: "scenic-stage-4",
+        refinementAttemptNumber: 1,
+        refinementStrategy: "RELATED_BRACKET",
+        refinementBracketLowerMinutes: 18.1,
+        refinementBracketUpperMinutes: 41.4,
+        refinementTargetBandReached: true,
+        refinementStopReason: "TARGET_REACHED",
+      },
+    );
+  });
+
+  it("allow-lists provider failure as one attempted refinement without raw failure data", () => {
+    const diagnostic = buildRouteGenerationDiagnostic({
+      correlationId: "provider-failure",
+      requestedExtraMinutes: 30,
+      baselineDurationSeconds: 3_600,
+      plannedExplorationStages: [],
+      attemptsPlanned: 5,
+      attemptsCompleted: 5,
+      intendedTargetMinutes: [27],
+      adaptiveTargetMinutes: [27],
+      actualAddedMinutesReturned: 18,
+      outcomeClassification: "NO_TARGET_BAND_ROUTE",
+      candidateEligibility: [],
+      candidateScenicScores: [],
+      finalSelectionReason: null,
+      totalServerProcessingDurationMs: 10_000,
+      durationRefinement: {
+        attempted: true,
+        reachedTargetBand: false,
+        attemptsUsed: 1,
+        safeConstructionsProduced: 1,
+        providerRequestsStarted: 1,
+        providerResponsesReturned: 0,
+        providerRequestsFailed: 1,
+        providerResponsesEvaluated: 0,
+        stopReason: "PROVIDER_REQUEST_FAILED",
+        providerError: "secret provider body",
+        coordinates: [{ lat: 1, lng: 2 }],
+      } as Parameters<typeof buildRouteGenerationDiagnostic>[0]["durationRefinement"] &
+        Record<string, unknown>,
+    });
+    assert.deepEqual(diagnostic.durationRefinement, {
+      attempted: true,
+      reachedTargetBand: false,
+      attemptsUsed: 1,
+      safeConstructionsProduced: 1,
+      providerRequestsStarted: 1,
+      providerResponsesReturned: 0,
+      providerRequestsFailed: 1,
+      providerResponsesEvaluated: 0,
+      stopReason: "PROVIDER_REQUEST_FAILED",
+    });
+    assert.equal(JSON.stringify(diagnostic).includes("secret provider body"), false);
+    assert.equal(JSON.stringify(diagnostic).includes('"lat"'), false);
+
+    const responseRejected = buildRouteGenerationDiagnostic({
+      ...diagnostic,
+      correlationId: "provider-response-rejected",
+      durationRefinement: {
+        attempted: true,
+        reachedTargetBand: false,
+        attemptsUsed: 1,
+        safeConstructionsProduced: 1,
+        providerRequestsStarted: 1,
+        providerResponsesReturned: 1,
+        providerRequestsFailed: 0,
+        providerResponsesEvaluated: 1,
+        stopReason: "PROVIDER_RESPONSE_REJECTED",
+        rawProviderResponse: "must-not-escape",
+      } as Parameters<typeof buildRouteGenerationDiagnostic>[0]["durationRefinement"] &
+        Record<string, unknown>,
+    });
+    assert.equal(responseRejected.durationRefinement?.stopReason, "PROVIDER_RESPONSE_REJECTED");
+    assert.equal(JSON.stringify(responseRejected).includes("must-not-escape"), false);
+
+    const invalidCounts = buildRouteGenerationDiagnostic({
+      correlationId: "invalid-refinement-counts",
+      requestedExtraMinutes: 30,
+      baselineDurationSeconds: 3_600,
+      plannedExplorationStages: [],
+      attemptsPlanned: 0,
+      attemptsCompleted: 0,
+      intendedTargetMinutes: [],
+      adaptiveTargetMinutes: [],
+      actualAddedMinutesReturned: 0,
+      outcomeClassification: "NO_TARGET_BAND_ROUTE",
+      candidateEligibility: [],
+      candidateScenicScores: [],
+      finalSelectionReason: null,
+      totalServerProcessingDurationMs: 1,
+      durationRefinement: {
+        attempted: false,
+        reachedTargetBand: false,
+        attemptsUsed: 3,
+        safeConstructionsProduced: -1,
+        providerRequestsStarted: 2.5,
+        providerResponsesReturned: Number.NaN,
+        providerRequestsFailed: Number.POSITIVE_INFINITY,
+        providerResponsesEvaluated: 4,
+        stopReason: "NO_RELATED_PLAN",
+      },
+    });
+    assert.deepEqual(invalidCounts.durationRefinement, {
+      attempted: false,
+      reachedTargetBand: false,
+      attemptsUsed: 0,
+      safeConstructionsProduced: 0,
+      providerRequestsStarted: 0,
+      providerResponsesReturned: 0,
+      providerRequestsFailed: 0,
+      providerResponsesEvaluated: 0,
+      stopReason: "NO_RELATED_PLAN",
     });
   });
 });

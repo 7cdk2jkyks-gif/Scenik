@@ -41,6 +41,9 @@ export const planScenicRoute = createServerFn({ method: "POST" })
     let scenicRoutesAccepted = 0;
     let explorationExhausted = false;
     let longAttemptExecutions: import("./route-generation-diagnostics").LongAttemptExecution[] = [];
+    let durationRefinementResult:
+      | import("./route-duration-refinement").DurationRefinementResult
+      | null = null;
     const rejectionReasons = new Set<string>();
 
     const { executeProductionRouteGeneration } =
@@ -177,6 +180,14 @@ export const planScenicRoute = createServerFn({ method: "POST" })
           source: "fastest" | "google" | "scenik";
           intendedAddedMinutes: number | null;
           constructionTargetMinutes: number | null;
+          refinementParentCandidateId: string | null;
+          refinementUpperCandidateId: string | null;
+          refinementAttemptNumber: number | null;
+          refinementStrategy:
+            | import("./route-duration-refinement").DurationRefinementStrategy
+            | null;
+          refinementBracketLowerMinutes: number | null;
+          refinementBracketUpperMinutes: number | null;
           durationSeconds: number | null;
           addedMinutes: number | null;
           allowanceUtilisation: number | null;
@@ -216,6 +227,12 @@ export const planScenicRoute = createServerFn({ method: "POST" })
             source: index === 0 ? "fastest" : "google",
             intendedAddedMinutes: null,
             constructionTargetMinutes: null,
+            refinementParentCandidateId: null,
+            refinementUpperCandidateId: null,
+            refinementAttemptNumber: null,
+            refinementStrategy: null,
+            refinementBracketLowerMinutes: null,
+            refinementBracketUpperMinutes: null,
             durationSeconds: directions.durationSeconds,
             addedMinutes:
               Math.round(
@@ -334,6 +351,15 @@ export const planScenicRoute = createServerFn({ method: "POST" })
               explorationStages,
               isTargetBudgetCandidate,
             } = await import("./corridor-exploration");
+            const {
+              MAX_SCENIC_ROUTE_ATTEMPTS,
+              MAX_DERIVED_WAYPOINT_DISPLACEMENT_FROM_SOURCE_METERS,
+              createRequestLocalPlanFamily,
+              evaluateRefinedProviderCandidate,
+              orchestrateDurationRefinement,
+              recordRefinedProviderCandidate,
+              scoreAndSelectRouteCandidateCollection,
+            } = await import("./route-duration-refinement");
             const { runSequentialLongAttempts } = await import("./route-generation-diagnostics");
             const { safeAssociateEvidenceWithRoute } = await import("./route-evidence-association");
             const { scoreScenicRoute: scoreExploredRoute } = await import("./scenic-score");
@@ -356,8 +382,18 @@ export const planScenicRoute = createServerFn({ method: "POST" })
               }));
               const anchors = [routeInput.origin, ...requiredCoordinates, routeInput.destination];
               const uniquePlaces = new Map<string, (typeof evidencePlaces)[number]>();
+              const requestLocalEvidenceIds = new Map<string, string>();
               const attemptedSignatures = new Set<string>();
               const attemptedKinds = new Set<import("./corridor-exploration").ScenicCorridorKind>();
+              const constructionObservations: Array<{
+                plan: import("./corridor-exploration").ScenicCorridorPlan;
+                family: import("./route-duration-refinement").RequestLocalPlanFamily | null;
+                observation: import("./route-duration-refinement").DurationConstructionObservation;
+              }> = [];
+              const constructionFamilies = new Map<
+                string,
+                import("./route-duration-refinement").RequestLocalPlanFamily
+              >();
               const stages = explorationStages(data.extra_minutes);
               let bestExploredScore = 0;
               const exploredCandidateQuality: Array<{ score: number; utilisation: number }> = [];
@@ -394,8 +430,16 @@ export const planScenicRoute = createServerFn({ method: "POST" })
                 for (const result of placeResults) {
                   if (result.status !== "fulfilled") continue;
                   for (const place of result.value) {
-                    if (!uniquePlaces.has(place.id) && uniquePlaces.size < stage.cumulativePlaceCap)
+                    if (
+                      !uniquePlaces.has(place.id) &&
+                      uniquePlaces.size < stage.cumulativePlaceCap
+                    ) {
                       uniquePlaces.set(place.id, place);
+                      requestLocalEvidenceIds.set(
+                        place.id,
+                        `evidence-${requestLocalEvidenceIds.size + 1}`,
+                      );
+                    }
                   }
                 }
                 evidencePlaces = [...uniquePlaces.values()];
@@ -443,15 +487,33 @@ export const planScenicRoute = createServerFn({ method: "POST" })
                 };
                 const requestCandidate = (
                   plan: import("./corridor-exploration").ScenicCorridorPlan,
-                  lineageSource: "scenic-stage" | "long-target",
+                  lineageSource: "scenic-stage" | "long-target" | "duration-refinement",
+                  existingFamily?: import("./route-duration-refinement").RequestLocalPlanFamily,
                 ) => {
                   const candidateId = `${lineageSource}-${nextCandidateOrdinal++}`;
+                  const family = existingFamily
+                    ? {
+                        ...existingFamily,
+                        currentDisplacementMeters: plan.estimatedDetourMeters,
+                      }
+                    : createRequestLocalPlanFamily({
+                        familyId: `family-${nextCandidateOrdinal}`,
+                        origin: routeInput.origin,
+                        destination: routeInput.destination,
+                        requiredStops: requiredCoordinates,
+                        anchors: planningAnchors,
+                        sourceWaypointIds: plan.waypoints.map(
+                          (waypoint) => requestLocalEvidenceIds.get(waypoint.id) ?? "",
+                        ),
+                        plan,
+                      });
                   attemptedSignatures.add(plan.signature);
                   attemptedKinds.add(plan.kind);
                   scenicRouteRequestsAttempted += 1;
                   routesCallCount += 1;
                   return {
                     candidateId,
+                    family,
                     request: computeDirections({
                       origin: routeInput.origin,
                       destination: routeInput.destination,
@@ -470,6 +532,15 @@ export const planScenicRoute = createServerFn({ method: "POST" })
                   intendedAddedMinutes: number | null,
                   constructionTargetMinutes: number | null,
                   candidateId: string,
+                  refinement?: {
+                    parentCandidateId: string;
+                    upperCandidateId: string | null;
+                    attemptNumber: number;
+                    strategy: import("./route-duration-refinement").DurationRefinementStrategy;
+                    bracketLowerMinutes: number;
+                    bracketUpperMinutes: number | null;
+                  },
+                  existingRefinedRecording?: ReturnType<typeof recordRefinedProviderCandidate>,
                 ): number | null => {
                   scenicRouteRequestsCompleted += 1;
                   if (result.status === "rejected") {
@@ -479,6 +550,12 @@ export const planScenicRoute = createServerFn({ method: "POST" })
                       source: "scenik",
                       intendedAddedMinutes,
                       constructionTargetMinutes,
+                      refinementParentCandidateId: refinement?.parentCandidateId ?? null,
+                      refinementUpperCandidateId: refinement?.upperCandidateId ?? null,
+                      refinementAttemptNumber: refinement?.attemptNumber ?? null,
+                      refinementStrategy: refinement?.strategy ?? null,
+                      refinementBracketLowerMinutes: refinement?.bracketLowerMinutes ?? null,
+                      refinementBracketUpperMinutes: refinement?.bracketUpperMinutes ?? null,
                       durationSeconds: null,
                       addedMinutes: null,
                       allowanceUtilisation: null,
@@ -509,24 +586,45 @@ export const planScenicRoute = createServerFn({ method: "POST" })
                         60) *
                         10,
                     ) / 10;
-                  const withinBudget = candidateFitsTimeBudget(
-                    baseline.durationSeconds,
-                    scenikDirections.durationSeconds,
-                    data.extra_minutes,
-                  );
+                  const refinedEvaluation = refinement
+                    ? evaluateRefinedProviderCandidate({
+                        baseline,
+                        directions: scenikDirections,
+                        priorDirections: rawCandidates.map((candidate) => candidate.directions),
+                        shapingPlan: corridorPlan,
+                        evidencePlaces,
+                        start,
+                        end,
+                        mood: moodIn,
+                        theme: themeIn,
+                        requestedExtraMinutes: data.extra_minutes,
+                        requiredStopCount: waypoints.length,
+                      })
+                    : null;
+                  const withinBudget =
+                    refinedEvaluation?.withinBudget ??
+                    candidateFitsTimeBudget(
+                      baseline.durationSeconds,
+                      scenikDirections.durationSeconds,
+                      data.extra_minutes,
+                    );
                   const withinUpgradeWindow =
                     !withinBudget &&
                     scenikDirections.durationSeconds <=
                       baseline.durationSeconds +
                         budgetSeconds +
                         upgradeOverrunToleranceSeconds(data.extra_minutes);
-                  const meaningfullyDifferent = rawCandidates.every((candidate) =>
-                    routesAreMeaningfullyDifferent(candidate.directions, scenikDirections),
-                  );
-                  const routeShape = safeEvaluateRouteCoherence(
-                    scenikDirections.encodedPolyline,
-                    corridorPlan.waypoints,
-                  );
+                  const meaningfullyDifferent =
+                    refinedEvaluation?.meaningfullyDifferent ??
+                    rawCandidates.every((candidate) =>
+                      routesAreMeaningfullyDifferent(candidate.directions, scenikDirections),
+                    );
+                  const routeShape =
+                    refinedEvaluation?.routeShape ??
+                    safeEvaluateRouteCoherence(
+                      scenikDirections.encodedPolyline,
+                      corridorPlan.waypoints,
+                    );
                   const durationTargetClassification =
                     intendedAddedMinutes == null
                       ? null
@@ -535,12 +633,61 @@ export const planScenicRoute = createServerFn({ method: "POST" })
                           actualAddedMinutes,
                           data.extra_minutes,
                         );
+                  const candidateFamily = constructionFamilies.get(candidateId) ?? null;
+                  const refinedRecording =
+                    existingRefinedRecording ??
+                    (refinement && candidateFamily
+                      ? recordRefinedProviderCandidate({
+                          candidates: rawCandidates,
+                          candidateId,
+                          parentCandidateId: refinement.parentCandidateId,
+                          familyId: candidateFamily.familyId,
+                          attemptNumber: refinement.attemptNumber,
+                          explorationStage: stageIndex,
+                          directions: scenikDirections,
+                          shapingPlan: corridorPlan,
+                          evidencePlaces,
+                          start,
+                          end,
+                          mood: moodIn,
+                          theme: themeIn,
+                          requestedExtraMinutes: data.extra_minutes,
+                          requiredStopCount: waypoints.length,
+                          intendedAddedMinutes: intendedAddedMinutes ?? 0,
+                          constructionTargetMinutes: constructionTargetMinutes ?? 0,
+                        })
+                      : null);
+                  const constructionObservation =
+                    refinedRecording?.observation ??
+                    ({
+                      candidateId,
+                      relatedPlanKey: candidateFamily?.familyId ?? `unrelated-${candidateId}`,
+                      actualAddedMinutes,
+                      constructionValue:
+                        candidateFamily?.currentDisplacementMeters ??
+                        corridorPlan.estimatedDetourMeters,
+                      withinBudget,
+                      routeShapeEligible: routeShape.routeShapeEligible,
+                      duplicate: !meaningfullyDifferent,
+                      qualityEligible: false,
+                    } satisfies import("./route-duration-refinement").DurationConstructionObservation);
+                  constructionObservations.push({
+                    plan: corridorPlan,
+                    family: candidateFamily,
+                    observation: constructionObservation,
+                  });
                   generatedCandidateOutcomes.push({
                     candidateId,
                     explorationStage: stageIndex,
                     source: "scenik",
                     intendedAddedMinutes,
                     constructionTargetMinutes,
+                    refinementParentCandidateId: refinement?.parentCandidateId ?? null,
+                    refinementUpperCandidateId: refinement?.upperCandidateId ?? null,
+                    refinementAttemptNumber: refinement?.attemptNumber ?? null,
+                    refinementStrategy: refinement?.strategy ?? null,
+                    refinementBracketLowerMinutes: refinement?.bracketLowerMinutes ?? null,
+                    refinementBracketUpperMinutes: refinement?.bracketUpperMinutes ?? null,
                     durationSeconds: scenikDirections.durationSeconds,
                     addedMinutes: actualAddedMinutes,
                     allowanceUtilisation: candidateBudgetUtilisation(
@@ -548,7 +695,9 @@ export const planScenicRoute = createServerFn({ method: "POST" })
                       scenikDirections.durationSeconds,
                       data.extra_minutes,
                     ),
-                    durationTargetClassification,
+                    durationTargetClassification:
+                      refinedRecording?.durationTargetClassification ??
+                      durationTargetClassification,
                     estimatedDetourMeters: corridorPlan.estimatedDetourMeters,
                     waypointCount: corridorPlan.waypoints.length,
                     requiredStopOrderPreserved: true,
@@ -582,38 +731,52 @@ export const planScenicRoute = createServerFn({ method: "POST" })
                     meaningfullyDifferent &&
                     routeShape.routeShapeEligible
                   ) {
-                    rawCandidates.push({
-                      candidateId,
-                      explorationStage: stageIndex,
-                      directions: scenikDirections,
-                      source: "scenik",
-                      selectedWaypointReason: verifiedJourneyHighlights(corridorPlan.waypoints),
-                      intendedAddedMinutes,
-                      constructionTargetMinutes,
-                      durationTargetClassification,
-                      scenicWaypoints: corridorPlan.waypoints.map((waypoint) => ({ ...waypoint })),
-                      routeShapeEligible: true,
-                    });
+                    if (refinement && candidateFamily) {
+                      // The shared recorder already inserted or rejected this candidate.
+                    } else if (!refinement) {
+                      rawCandidates.push({
+                        candidateId,
+                        explorationStage: stageIndex,
+                        directions: scenikDirections,
+                        source: "scenik",
+                        selectedWaypointReason: verifiedJourneyHighlights(corridorPlan.waypoints),
+                        intendedAddedMinutes,
+                        constructionTargetMinutes,
+                        durationTargetClassification,
+                        scenicWaypoints: corridorPlan.waypoints.map((waypoint) => ({
+                          ...waypoint,
+                        })),
+                        routeShapeEligible: true,
+                      });
+                    }
                     scenikCandidateAdded = true;
                     scenicCandidateCount += 1;
                     if (withinBudget) scenicRoutesAccepted += 1;
-                    const candidateAssociation = safeAssociateEvidenceWithRoute({
-                      encodedPolyline: scenikDirections.encodedPolyline,
-                      places: evidencePlaces,
-                      waypoints: corridorPlan.waypoints,
-                      proximityMeters: 750,
-                    });
-                    const candidateScore = scoreExploredRoute({
-                      start,
-                      end,
-                      mood: moodIn,
-                      theme: themeIn,
-                      extraMinutes: data.extra_minutes,
-                      stopCount: waypoints.length + corridorPlan.waypoints.length,
-                      directions: scenikDirections,
-                      evidence: candidateAssociation.evidence,
-                      fastestDurationSeconds: baseline.durationSeconds,
-                    }).total;
+                    const candidateAssociation =
+                      refinedEvaluation?.evidenceAssociation ??
+                      safeAssociateEvidenceWithRoute({
+                        encodedPolyline: scenikDirections.encodedPolyline,
+                        places: evidencePlaces,
+                        waypoints: corridorPlan.waypoints,
+                        proximityMeters: 750,
+                      });
+                    const candidateScore =
+                      refinedEvaluation?.scoreResult.total ??
+                      scoreExploredRoute({
+                        start,
+                        end,
+                        mood: moodIn,
+                        theme: themeIn,
+                        extraMinutes: data.extra_minutes,
+                        stopCount: waypoints.length + corridorPlan.waypoints.length,
+                        directions: scenikDirections,
+                        evidence: candidateAssociation.evidence,
+                        fastestDurationSeconds: baseline.durationSeconds,
+                      }).total;
+                    if (!refinedRecording) {
+                      constructionObservation.qualityEligible =
+                        candidateScore >= 60 && bestExploredScore - candidateScore <= 6;
+                    }
                     bestExploredScore = Math.max(bestExploredScore, candidateScore);
                     if (withinBudget)
                       exploredCandidateQuality.push({
@@ -648,6 +811,8 @@ export const planScenicRoute = createServerFn({ method: "POST" })
                       const plan = planning.plans[0];
                       if (!plan) return { status: "NO_PLAN", actualAddedMinutes: null };
                       const requested = requestCandidate(plan, "long-target");
+                      if (requested.family)
+                        constructionFamilies.set(requested.candidateId, requested.family);
                       const [result] = await Promise.allSettled([requested.request]);
                       const actualAddedMinutes = recordCandidateResult(
                         plan,
@@ -673,10 +838,12 @@ export const planScenicRoute = createServerFn({ method: "POST" })
                     attemptedKinds,
                   });
                   updatePlanningDiagnostics(planning);
-                  const candidateRequests = planning.plans.map((plan) => ({
-                    plan,
-                    ...requestCandidate(plan, "scenic-stage"),
-                  }));
+                  const candidateRequests = planning.plans.map((plan) => {
+                    const requested = requestCandidate(plan, "scenic-stage");
+                    if (requested.family)
+                      constructionFamilies.set(requested.candidateId, requested.family);
+                    return { plan, ...requested };
+                  });
                   const candidateResults = await Promise.allSettled(
                     candidateRequests.map(({ request }) => request),
                   );
@@ -689,6 +856,70 @@ export const planScenicRoute = createServerFn({ method: "POST" })
                       candidateRequests[index].candidateId,
                     ),
                   );
+                }
+                if (stageIndex === stages.length - 1) {
+                  const maximumConstructionValue = Math.min(
+                    averageMetersPerSecond * stage.planningBudgetMinutes * 60 * 0.95,
+                    Math.max(
+                      0,
+                      ...constructionObservations.map(
+                        ({ observation }) => observation.constructionValue,
+                      ),
+                    ) + MAX_DERIVED_WAYPOINT_DISPLACEMENT_FROM_SOURCE_METERS,
+                  );
+                  const orchestration = await orchestrateDurationRefinement({
+                    candidates: rawCandidates,
+                    relatedCandidates: constructionObservations.flatMap(
+                      ({ observation, family }) =>
+                        family ? [{ candidateId: observation.candidateId, family }] : [],
+                    ),
+                    existingObservations: constructionObservations.map(
+                      ({ observation }) => observation,
+                    ),
+                    evidencePlaces,
+                    start,
+                    end,
+                    mood: moodIn,
+                    theme: themeIn,
+                    requestedExtraMinutes: data.extra_minutes,
+                    requiredStopCount: waypoints.length,
+                    attemptsAlreadyUsed: scenicRouteRequestsAttempted,
+                    maximumConstructionValue,
+                    explorationStage: stageIndex,
+                    request: (plan, family) => {
+                      if (scenicRouteRequestsAttempted >= MAX_SCENIC_ROUTE_ATTEMPTS)
+                        return {
+                          candidateId: "duration-refinement-capacity-exhausted",
+                          response: Promise.reject(new Error("ATTEMPT_CAPACITY_EXHAUSTED")),
+                        };
+                      const requested = requestCandidate(plan, "duration-refinement", family);
+                      if (requested.family)
+                        constructionFamilies.set(requested.candidateId, requested.family);
+                      return { candidateId: requested.candidateId, response: requested.request };
+                    },
+                    onProviderRejected: ({ plan, candidateId, refinement }) => {
+                      recordCandidateResult(
+                        plan,
+                        { status: "rejected", reason: null },
+                        refinement.intendedTargetMinutes,
+                        refinement.adaptiveTargetMinutes,
+                        candidateId,
+                        refinement,
+                      );
+                    },
+                    onRecorded: ({ plan, result, candidateId, refinement, recording }) => {
+                      recordCandidateResult(
+                        plan,
+                        result,
+                        refinement.intendedTargetMinutes,
+                        refinement.adaptiveTargetMinutes,
+                        candidateId,
+                        refinement,
+                        recording ?? undefined,
+                      );
+                    },
+                  });
+                  durationRefinementResult = orchestration.controller;
                 }
                 const qualityEquivalent = exploredCandidateQuality.filter(
                   (candidate) => bestExploredScore - candidate.score <= 3,
@@ -731,62 +962,22 @@ export const planScenicRoute = createServerFn({ method: "POST" })
         }
 
         const { haversineDistanceMeters } = await import("./scenic-waypoint");
-        const { safeAssociateEvidenceWithRoute } = await import("./route-evidence-association");
-        const { evidenceSupportCounts, scoreScenicRoute } = await import("./scenic-score");
-        const scoredCandidates = rawCandidates.flatMap((candidate, originalIndex) => {
-          const { directions } = candidate;
-          if (originalIndex !== 0 && !candidate.routeShapeEligible) return [];
-          try {
-            const evidenceAssociation = safeAssociateEvidenceWithRoute({
-              encodedPolyline: directions.encodedPolyline,
-              places: evidencePlaces,
-              waypoints: candidate.scenicWaypoints,
-              proximityMeters: 750,
-            });
-            const evidence = evidenceAssociation.evidence;
-            const scoreResult = scoreScenicRoute({
-              start,
-              end,
-              mood: moodIn,
-              theme: themeIn,
-              extraMinutes: data.extra_minutes,
-              stopCount: waypoints.length + candidate.scenicWaypoints.length,
-              directions,
-              evidence,
-              fastestDurationSeconds: baseline.durationSeconds,
-            });
-            return [
-              {
-                candidateId: candidate.candidateId,
-                directions,
-                score: scoreResult.total,
-                scoreResult,
-                originalIndex,
-                source: candidate.source,
-                selectedWaypointReason: candidate.selectedWaypointReason,
-                evidence,
-                evidenceAssociation,
-                routeShapeEligible: candidate.routeShapeEligible,
-              },
-            ];
-          } catch {
-            if (originalIndex === 0) {
-              console.info("[route-selection]", {
-                requestCorrelationId,
-                baselineRequestSuccess,
-                candidateCount: rawCandidates.length,
-                eligibleCount: 0,
-                requestedBudgetMinutes: data.extra_minutes,
-                selectedExtraTimeMinutes: 0,
-                errorCode: "SCORING_FAILED",
-              });
-              throw new Error("SCORING_FAILED");
-            }
-            stableErrorCode = "ALTERNATIVE_SCORING_FAILED_FALLBACK";
-            return [];
-          }
+        const { evidenceSupportCounts } = await import("./scenic-score");
+        const { scoreAndSelectRouteCandidateCollection } =
+          await import("./route-duration-refinement");
+        const finalCandidatePass = scoreAndSelectRouteCandidateCollection({
+          candidates: rawCandidates,
+          evidencePlaces,
+          start,
+          end,
+          mood: moodIn,
+          theme: themeIn,
+          requestedExtraMinutes: data.extra_minutes,
+          requiredStopCount: waypoints.length,
         });
-        const selection = selectRouteCandidate(scoredCandidates, data.extra_minutes);
+        const { scoredCandidates, selection } = finalCandidatePass;
+        if (finalCandidatePass.failedCandidateIds.length > 0)
+          stableErrorCode = "ALTERNATIVE_SCORING_FAILED_FALLBACK";
         const candidateDiagnostics = candidateSelectionDiagnostics(
           scoredCandidates,
           selection,
@@ -929,7 +1120,7 @@ export const planScenicRoute = createServerFn({ method: "POST" })
           >[0]["candidateEligibility"] = generatedCandidateOutcomes.map((outcome) => {
             const diagnostic = candidateByRequestLocalId(candidateDiagnostics, outcome.candidateId);
             const breakdown = diagnostic?.scoreResult?.breakdown;
-            const evidenceSupport = diagnostic
+            const evidenceSupport = diagnostic?.evidence
               ? evidenceSupportCounts({
                   evidence: diagnostic.evidence,
                   moods: moodIn
@@ -999,6 +1190,21 @@ export const planScenicRoute = createServerFn({ method: "POST" })
               affectedWaypointIndex: outcome.affectedWaypointIndex,
               waypointAssociationStatus: outcome.waypointAssociationStatus,
               routeShapeAnalysisStatus: outcome.routeShapeAnalysisStatus,
+              refinementParentCandidateId: outcome.refinementParentCandidateId,
+              refinementUpperCandidateId: outcome.refinementUpperCandidateId,
+              refinementAttemptNumber: outcome.refinementAttemptNumber,
+              refinementStrategy: outcome.refinementStrategy,
+              refinementBracketLowerMinutes: outcome.refinementBracketLowerMinutes,
+              refinementBracketUpperMinutes: outcome.refinementBracketUpperMinutes,
+              refinementTargetBandReached:
+                outcome.refinementAttemptNumber != null &&
+                outcome.durationTargetClassification === "TARGET_BAND" &&
+                outcome.outcome === "ELIGIBLE",
+              refinementStopReason:
+                outcome.candidateId ===
+                durationRefinementResult?.executions.at(-1)?.observation?.candidateId
+                  ? durationRefinementResult.stopReason
+                  : null,
             };
           });
           for (const attempt of longAttemptExecutions) {
@@ -1052,14 +1258,20 @@ export const planScenicRoute = createServerFn({ method: "POST" })
             requestedExtraMinutes: data.extra_minutes,
             baselineDurationSeconds: selection.fastestDurationSeconds,
             plannedExplorationStages: explorationTargets,
-            attemptsPlanned: intendedScenicRouteRequests,
+            attemptsPlanned: Math.max(intendedScenicRouteRequests, scenicRouteRequestsAttempted),
             attemptsCompleted: scenicRouteRequestsCompleted,
-            intendedTargetMinutes: longAttemptExecutions.map(
-              (attempt) => attempt.intendedTargetMinutes,
-            ),
-            adaptiveTargetMinutes: longAttemptExecutions.map(
-              (attempt) => attempt.adaptiveTargetMinutes,
-            ),
+            intendedTargetMinutes: [
+              ...longAttemptExecutions.map((attempt) => attempt.intendedTargetMinutes),
+              ...(durationRefinementResult?.executions.map(
+                (attempt) => attempt.intendedTargetMinutes,
+              ) ?? []),
+            ],
+            adaptiveTargetMinutes: [
+              ...longAttemptExecutions.map((attempt) => attempt.adaptiveTargetMinutes),
+              ...(durationRefinementResult?.executions.map(
+                (attempt) => attempt.adaptiveTargetMinutes,
+              ) ?? []),
+            ],
             actualAddedMinutesReturned:
               Math.round((selection.measuredExtraTimeSeconds / 60) * 10) / 10,
             outcomeClassification: selection.timeTargetOutcome,
@@ -1067,6 +1279,24 @@ export const planScenicRoute = createServerFn({ method: "POST" })
             candidateScenicScores: candidateDiagnostics.map((candidate) => candidate.score),
             finalSelectionReason,
             totalServerProcessingDurationMs: Date.now() - requestStartedAt,
+            durationRefinement: durationRefinementResult
+              ? {
+                  attempted: durationRefinementResult.attempted,
+                  reachedTargetBand: durationRefinementResult.reachedTargetBand,
+                  attemptsUsed: durationRefinementResult.executions.length,
+                  safeConstructionsProduced:
+                    durationRefinementResult.stateCounts.safeConstructionsProduced,
+                  providerRequestsStarted:
+                    durationRefinementResult.stateCounts.providerRequestsStarted,
+                  providerResponsesReturned:
+                    durationRefinementResult.stateCounts.providerResponsesReturned,
+                  providerRequestsFailed:
+                    durationRefinementResult.stateCounts.providerRequestsFailed,
+                  providerResponsesEvaluated:
+                    durationRefinementResult.stateCounts.providerResponsesEvaluated,
+                  stopReason: durationRefinementResult.stopReason,
+                }
+              : null,
           };
           const safeDiagnostic = buildRouteGenerationDiagnostic(diagnosticInput);
           internalRouteDiagnosticFields = internalRouteDiagnosticResponse(

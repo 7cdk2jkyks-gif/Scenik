@@ -33,6 +33,43 @@ function candidate(
 }
 
 describe("selectRouteCandidate", () => {
+  it("keeps the Production +18.1 fallback until a qualifying refined target exists", () => {
+    const baselineSeconds = 22_064;
+    const ordinary = [
+      { id: "baseline-0", added: 0, score: 72, coherent: true },
+      { id: "scenic-stage-4", added: 41.4, score: 0, coherent: false },
+      { id: "scenic-stage-5", added: 18.1, score: 79, coherent: true },
+      { id: "scenic-stage-6", added: 12.6, score: 78, coherent: true },
+      { id: "scenic-stage-7", added: 13.3, score: 77, coherent: true },
+    ].map(({ id, added, score, coherent }, index) => ({
+      ...candidate(index, baselineSeconds + added * 60, score),
+      candidateId: id,
+      routeShapeEligible: coherent,
+    }));
+    const before = selectRouteCandidate(ordinary, 30);
+    assert.equal(before.selected.candidateId, "scenic-stage-5");
+    assert.equal(before.timeTargetOutcome, "NO_TARGET_BAND_ROUTE");
+
+    const qualifyingRefinement = {
+      ...candidate(ordinary.length, baselineSeconds + 26.2 * 60, 78),
+      candidateId: "duration-refinement-8",
+      routeShapeEligible: true,
+    };
+    const after = selectRouteCandidate([...ordinary, qualifyingRefinement], 30);
+    assert.equal(after.selected.candidateId, "duration-refinement-8");
+    assert.equal(after.timeTargetOutcome, "TARGET_MET");
+
+    const weakRefinement = {
+      ...candidate(ordinary.length, baselineSeconds + 26.2 * 60, 59),
+      candidateId: "duration-refinement-weak",
+      routeShapeEligible: true,
+    };
+    assert.equal(
+      selectRouteCandidate([...ordinary, weakRefinement], 30).selected.candidateId,
+      "scenic-stage-5",
+    );
+  });
+
   it("models the captured 30-minute quality guardrail with stable candidate lineage", () => {
     const baselineSeconds = 21_600;
     const captured = [
