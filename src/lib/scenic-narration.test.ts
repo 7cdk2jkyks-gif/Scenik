@@ -101,4 +101,86 @@ describe("voice and settings fallbacks", () => {
     const deviceDefault = { name: "Device", lang: "fr-FR", default: true };
     expect(selectSpeechVoice([deviceDefault], "en-GB", "default")).toBe(deviceDefault);
   });
+
+  test("uses distinct approved British voices for profiles when available", () => {
+    const voices = [
+      { name: "Martha", lang: "en-GB", localService: true },
+      { name: "Daniel (Enhanced)", lang: "en-GB", localService: true },
+      { name: "Serena", lang: "en-GB", localService: true },
+    ];
+    expect(selectSpeechVoice(voices, "en-GB", "default")?.name).toBe("Serena");
+    expect(selectSpeechVoice(voices, "en-GB", "calm")?.name).toBe("Daniel (Enhanced)");
+    expect(selectSpeechVoice(voices, "en-GB", "warm")?.name).toBe("Martha");
+  });
+
+  test("selects deterministically when voice inventory order changes", () => {
+    const voices = [
+      { name: "Martha", lang: "en-GB", localService: true },
+      { name: "Daniel", lang: "en-GB", localService: true },
+      { name: "Serena", lang: "en-GB", localService: true },
+    ];
+    for (const profile of ["default", "calm", "warm"] as const) {
+      expect(selectSpeechVoice(voices, "en-GB", profile)?.name).toBe(
+        selectSpeechVoice([...voices].reverse(), "en-GB", profile)?.name,
+      );
+    }
+  });
+
+  test("uses normalized voice URI as the final duplicate-metadata tie-breaker", () => {
+    const first = {
+      name: "Daniel",
+      lang: "en-GB",
+      localService: true,
+      default: false,
+      voiceURI: "  com.example.voice-b  ",
+    };
+    const second = {
+      name: "Daniel",
+      lang: "en-GB",
+      localService: true,
+      default: false,
+      voiceURI: "com.example.voice-a",
+    };
+
+    expect(selectSpeechVoice([first, second], "en-GB", "calm")?.voiceURI?.trim()).toBe(
+      "com.example.voice-a",
+    );
+    expect(selectSpeechVoice([second, first], "en-GB", "calm")?.voiceURI?.trim()).toBe(
+      "com.example.voice-a",
+    );
+  });
+
+  test("handles missing and exactly equivalent voice URIs without array-position identity", () => {
+    const withoutUri = { name: "Daniel", lang: "en-GB", localService: true, default: false };
+    const withUri = { ...withoutUri, voiceURI: "com.example.daniel" };
+    expect(selectSpeechVoice([withUri, withoutUri], "en-GB", "calm")).toBe(withoutUri);
+    expect(selectSpeechVoice([withoutUri, withUri], "en-GB", "calm")).toBe(withoutUri);
+
+    const equivalentA = { ...withoutUri, voiceURI: "com.example.same" };
+    const equivalentB = { ...withoutUri, voiceURI: "com.example.same" };
+    expect(selectSpeechVoice([equivalentA, equivalentB], "en-GB", "calm")).toEqual(
+      selectSpeechVoice([equivalentB, equivalentA], "en-GB", "calm"),
+    );
+  });
+
+  test("uses one suitable British or English voice safely for every profile", () => {
+    const british = { name: "Daniel", lang: "en-GB", localService: true };
+    const english = { name: "Samantha", lang: "en-US", localService: true };
+    for (const profile of ["default", "calm", "warm"] as const) {
+      expect(selectSpeechVoice([british], "en-GB", profile)).toBe(british);
+      expect(selectSpeechVoice([english], "en-GB", profile)).toBe(english);
+    }
+  });
+
+  test("falls back to a safe non-English device voice", () => {
+    const french = { name: "Thomas", lang: "fr-FR", default: true };
+    expect(selectSpeechVoice([french], "en-GB", "default")).toBe(french);
+  });
+
+  test("never lets a novelty voice beat an ordinary fallback", () => {
+    const ordinary = { name: "British Voice", lang: "en-GB" };
+    const novelty = { name: "Whisper", lang: "en-GB", default: true, localService: true };
+    expect(selectSpeechVoice([novelty, ordinary], "en-GB", "calm")).toBe(ordinary);
+    expect(selectSpeechVoice([novelty], "en-GB", "warm")).toBeNull();
+  });
 });

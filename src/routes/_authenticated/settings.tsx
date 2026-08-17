@@ -131,9 +131,7 @@ function SettingsPage() {
       ) : (
         <Card className="mt-6 border-border bg-card p-5 shadow-paper sm:p-6">
           <h2 className="font-serif text-base font-semibold text-ink">Public profile</h2>
-          <p className="mt-1 text-xs text-muted-foreground">
-            Shown next to any routes or comments you share.
-          </p>
+          <p className="mt-1 text-xs text-muted-foreground">Shown next to any routes you share.</p>
 
           <div className="mt-4 space-y-4">
             <div>
@@ -548,13 +546,18 @@ function SubscriptionSection() {
               ? ` — ${usage.data.generationsThisMonth} of ${usage.data.freeLimit} routes used this month.`
               : "."}
           </p>
-          <div className="mt-3 flex flex-col gap-2 sm:flex-row">
-            <Link to="/pricing">
-              <Button className="shadow-stamp">
+          <div className="mt-3 grid auto-rows-fr gap-2">
+            <Link to="/pricing" className="h-full w-full">
+              <Button className="h-full min-h-11 w-full whitespace-normal rounded-xl px-4 py-2 text-center leading-snug shadow-stamp">
                 <Crown className="mr-2 h-4 w-4" /> Upgrade to Premium
               </Button>
             </Link>
-            <Button variant="outline" onClick={() => restore.mutate()} disabled={restore.isPending}>
+            <Button
+              variant="outline"
+              onClick={() => restore.mutate()}
+              disabled={restore.isPending}
+              className="h-full min-h-11 w-full whitespace-normal rounded-xl px-4 py-2 text-center leading-snug"
+            >
               {restore.isPending ? (
                 <Loader2 className="mr-2 h-4 w-4 animate-spin" />
               ) : (

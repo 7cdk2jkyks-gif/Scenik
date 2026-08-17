@@ -19,7 +19,7 @@ export const VOICE_PROFILES: Record<NarrationVoiceStyle, VoiceProfile> = {
     preferredLocale: "en-GB",
     preferredVoiceTraits: ["premium", "enhanced", "natural", "neural"],
     rate: 0.98,
-    pitch: 1.02,
+    pitch: 1,
     volume: 1,
     deliveryStyle: "friendly",
   },
@@ -28,9 +28,9 @@ export const VOICE_PROFILES: Record<NarrationVoiceStyle, VoiceProfile> = {
     label: "Calm",
     preferredLocale: "en-GB",
     preferredVoiceTraits: ["calm", "serene", "soft", "natural"],
-    rate: 0.86,
-    pitch: 0.92,
-    volume: 0.88,
+    rate: 0.78,
+    pitch: 0.87,
+    volume: 0.84,
     deliveryStyle: "reassuring",
   },
   warm: {
@@ -38,8 +38,8 @@ export const VOICE_PROFILES: Record<NarrationVoiceStyle, VoiceProfile> = {
     label: "Warm",
     preferredLocale: "en-GB",
     preferredVoiceTraits: ["warm", "friendly", "premium", "enhanced", "natural"],
-    rate: 1.06,
-    pitch: 1.08,
+    rate: 1.16,
+    pitch: 1.13,
     volume: 1,
     deliveryStyle: "bright",
   },
@@ -167,7 +167,47 @@ export type SpeechVoiceLike = {
   lang: string;
   default?: boolean;
   localService?: boolean;
+  voiceURI?: string;
 };
+
+// Closed, deterministic lists of ordinary English system voices. Exact base-name
+// matching avoids accidentally selecting novelty voices whose names happen to
+// contain a broad delivery-style keyword. Parenthesised quality suffixes are
+// ignored because Apple may expose the same voice as, for example, “Daniel
+// (Enhanced)”.
+const APPROVED_VOICE_ORDER: Record<NarrationVoiceStyle, readonly string[]> = {
+  default: ["serena", "daniel", "martha", "kate", "oliver", "stephanie", "samantha"],
+  calm: ["daniel", "oliver", "serena", "kate", "martha", "stephanie", "samantha"],
+  warm: ["martha", "kate", "stephanie", "serena", "samantha", "daniel", "oliver"],
+};
+
+const NOVELTY_VOICE_NAMES = new Set([
+  "albert",
+  "bad news",
+  "bahh",
+  "bells",
+  "boing",
+  "bubbles",
+  "cellos",
+  "fred",
+  "good news",
+  "organ",
+  "superstar",
+  "trinoids",
+  "whisper",
+  "wobble",
+  "zarvox",
+]);
+
+const baseVoiceName = (name: string) =>
+  name
+    .trim()
+    .toLowerCase()
+    .replace(/\s*\((?:enhanced|premium)\)\s*$/, "");
+
+const normalisedVoiceUri = (voiceURI?: string) => voiceURI?.trim().normalize("NFC") ?? "";
+
+const compareText = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
 
 export function selectSpeechVoice<T extends SpeechVoiceLike>(
   voices: T[],
@@ -175,27 +215,40 @@ export function selectSpeechVoice<T extends SpeechVoiceLike>(
   style: NarrationVoiceStyle,
 ): T | null {
   if (voices.length === 0) return null;
-  const profile = VOICE_PROFILES[style];
+  // Voices equal across every exposed field, including voiceURI, are semantically
+  // equivalent for selection; deliberately do not invent an array-index identity.
   const stable = (candidates: T[]) =>
     [...candidates].sort(
       (a, b) =>
         Number(Boolean(b.localService)) - Number(Boolean(a.localService)) ||
         Number(Boolean(b.default)) - Number(Boolean(a.default)) ||
-        a.name.localeCompare(b.name),
+        a.name.localeCompare(b.name) ||
+        compareText(normalisedVoiceUri(a.voiceURI), normalisedVoiceUri(b.voiceURI)),
     )[0] ?? null;
+  const approved = (candidates: T[]) => {
+    const order = APPROVED_VOICE_ORDER[style];
+    for (const preferredName of order) {
+      const match = stable(
+        candidates.filter((voice) => baseVoiceName(voice.name) === preferredName),
+      );
+      if (match) return match;
+    }
+    return null;
+  };
+  const safe = (voice: T) => !NOVELTY_VOICE_NAMES.has(baseVoiceName(voice.name));
   const isEnglish = (voice: T) => voice.lang.toLowerCase().startsWith("en");
   const isBritishEnglish = (voice: T) => voice.lang.toLowerCase() === "en-gb";
-  const hasPreferredTrait = (voice: T) => {
-    const name = voice.name.toLowerCase();
-    return profile.preferredVoiceTraits.some((trait) => name.includes(trait));
-  };
+  const british = voices.filter((voice) => safe(voice) && isBritishEnglish(voice));
+  const english = voices.filter((voice) => safe(voice) && isEnglish(voice));
+  const safeVoices = voices.filter(safe);
 
   return (
-    stable(voices.filter((voice) => isBritishEnglish(voice) && hasPreferredTrait(voice))) ??
-    stable(voices.filter(isBritishEnglish)) ??
-    stable(voices.filter(isEnglish)) ??
-    stable(voices.filter((voice) => voice.default)) ??
-    stable(voices)
+    approved(british) ??
+    stable(british) ??
+    approved(english) ??
+    stable(english) ??
+    stable(safeVoices.filter((voice) => voice.default)) ??
+    stable(safeVoices)
   );
 }
 

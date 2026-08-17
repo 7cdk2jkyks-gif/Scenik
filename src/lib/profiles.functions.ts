@@ -11,12 +11,18 @@ export const getMyProfile = createServerFn({ method: "GET" })
   .middleware([requireSupabaseAuth])
   .handler(async ({ context }) => {
     const { data, error } = await context.supabase
-      .from("profiles").select("*").eq("id", context.userId).maybeSingle();
+      .from("profiles")
+      .select("*")
+      .eq("id", context.userId)
+      .maybeSingle();
     if (error) throw new Error(error.message);
     if (data) return data;
     // ensure a row exists (idempotent fallback if trigger didn't fire)
     const { data: created, error: insErr } = await context.supabase
-      .from("profiles").insert({ id: context.userId, display_name: "Traveler" }).select().single();
+      .from("profiles")
+      .insert({ id: context.userId, display_name: "Traveler" })
+      .select()
+      .single();
     if (insErr) throw new Error(insErr.message);
     return created;
   });
@@ -32,7 +38,11 @@ export const updateMyProfile = createServerFn({ method: "POST" })
   .inputValidator((input: unknown) => UpdateInput.parse(input))
   .handler(async ({ data, context }) => {
     const { data: row, error } = await context.supabase
-      .from("profiles").update(data).eq("id", context.userId).select().single();
+      .from("profiles")
+      .update(data)
+      .eq("id", context.userId)
+      .select()
+      .single();
     if (error) throw new Error(error.message);
     return row;
   });
@@ -63,9 +73,12 @@ export const getPublicProfile = createServerFn({ method: "GET" })
     if (!profile) throw new Error("Profile not found.");
     const { data: routes } = await sb
       .from("routes")
-      .select("id, title, mood, theme, extra_minutes, start_address, end_address, scenic_score, like_count, comment_count, created_at")
-      .eq("user_id", data.id).eq("is_public", true)
-      .order("created_at", { ascending: false }).limit(40);
+      .select(
+        "id, title, mood, theme, extra_minutes, start_address, end_address, scenic_score, like_count, created_at",
+      )
+      .eq("user_id", data.id)
+      .eq("is_public", true)
+      .order("created_at", { ascending: false })
+      .limit(40);
     return { profile, routes: routes ?? [] };
   });
-

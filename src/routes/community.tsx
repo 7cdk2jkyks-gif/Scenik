@@ -12,12 +12,13 @@ import { StarRating, RatingDisplay } from "@/components/StarRating";
 import { supabase } from "@/integrations/supabase/client";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { Heart, MessageCircle, MapPin } from "lucide-react";
+import { MapPin } from "lucide-react";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { Logo } from "@/components/Logo";
 import { capture } from "@/lib/analytics/client";
 import { AnalyticsEvent } from "@/lib/analytics/events";
+import { CommunityFeedFooter, CommunitySortControls } from "@/components/CommunityControls";
 
 export const Route = createFileRoute("/community")({
   ssr: false,
@@ -174,20 +175,13 @@ function CommunityPage() {
                     : ""}
             </p>
           </div>
-          <div className="flex shrink-0 gap-1 rounded-full border border-border bg-background p-1">
-            {(["new", "top", "rated"] as const).map((s) => (
-              <button
-                key={s}
-                onClick={() => {
-                  setSort(s);
-                  capture(AnalyticsEvent.CommunityFeedSorted, { sort_by: s });
-                }}
-                className={`rounded-full px-4 py-1 text-xs font-medium transition ${sort === s ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-ink"}`}
-              >
-                {s === "new" ? "New" : s === "top" ? "Most loved" : "Top rated"}
-              </button>
-            ))}
-          </div>
+          <CommunitySortControls
+            value={sort}
+            onChange={(nextSort) => {
+              setSort(nextSort);
+              capture(AnalyticsEvent.CommunityFeedSorted, { sort_by: nextSort });
+            }}
+          />
         </div>
 
         {isLoading && <p className="mt-10 text-sm text-muted-foreground">Loading…</p>}
@@ -269,38 +263,27 @@ function CommunityPage() {
                     />
                   </div>
                 </div>
-                <div className="mt-3 flex items-center justify-between">
-                  <Link
-                    to="/u/$id"
-                    params={{ id: r.author.id }}
-                    className="text-xs text-muted-foreground hover:text-primary hover:underline"
-                  >
-                    by {r.author.display_name || "Traveler"}
-                  </Link>
-                  <div className="flex items-center gap-3 text-xs text-muted-foreground">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        if (!userId) {
-                          toast("Sign in to like routes");
-                          return;
-                        }
-                        like.mutate(r.id);
-                      }}
-                      className={`inline-flex items-center gap-1 transition ${isLiked ? "text-rose-600" : "hover:text-rose-600"}`}
-                    >
-                      <Heart className={`h-3.5 w-3.5 ${isLiked ? "fill-current" : ""}`} />{" "}
-                      {r.like_count}
-                    </button>
+                <CommunityFeedFooter
+                  creator={
                     <Link
-                      to="/community/$id"
-                      params={{ id: r.id }}
-                      className="inline-flex items-center gap-1 hover:text-primary"
+                      to="/u/$id"
+                      params={{ id: r.author.id }}
+                      className="text-xs text-muted-foreground hover:text-primary hover:underline"
                     >
-                      <MessageCircle className="h-3.5 w-3.5" /> {r.comment_count}
+                      by {r.author.display_name || "Traveler"}
                     </Link>
-                  </div>
-                </div>
+                  }
+                  title={r.title}
+                  likeCount={r.like_count}
+                  isLiked={isLiked}
+                  onToggleLike={() => {
+                    if (!userId) {
+                      toast("Sign in to like routes");
+                      return;
+                    }
+                    like.mutate(r.id);
+                  }}
+                />
               </Card>
             );
           })}

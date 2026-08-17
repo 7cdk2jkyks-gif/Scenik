@@ -33,6 +33,12 @@ import {
   shutdownNavigationSpeech,
   speakDuringActiveNavigation,
 } from "./local-speech";
+import {
+  loadNarrationPreferences,
+  saveNarrationPreferences,
+  speechTuning,
+  type NarrationPreferences,
+} from "./scenic-narration";
 
 type FakeUtterance = SpeechSynthesisUtterance & { text: string };
 
@@ -210,10 +216,56 @@ describe("local speech boundary", () => {
       state.boundary.speak({ text: "Preview", kind: "preview", profile });
     }
     expect(state.spoken.map(({ rate, pitch, volume }) => [rate, pitch, volume])).toEqual([
-      [0.98, 1.02, 1],
-      [0.86, 0.92, 0.88],
-      [1.06, 1.08, 1],
+      [0.98, 1, 1],
+      [0.78, 0.87, 0.84],
+      [1.16, 1.13, 1],
     ]);
+  });
+
+  test("propagates persisted Plan profiles through newly configured Production utterances", () => {
+    const deviceVoice = voice("Daniel", "en-GB", { localService: true });
+    const state = setup([deviceVoice]);
+    let stored: string | null = null;
+    const storage = {
+      getItem: () => stored,
+      setItem: (_key: string, value: string) => {
+        stored = value;
+      },
+    };
+    let preferences: NarrationPreferences = {
+      mode: "highlights",
+      voice: "default",
+      volume: 1,
+    };
+    const persistAndRestore = (voiceProfile: NarrationPreferences["voice"]) => {
+      saveNarrationPreferences({ ...preferences, voice: voiceProfile }, storage);
+      preferences = loadNarrationPreferences(storage);
+    };
+    const speakManoeuvre = (muted = false) =>
+      state.boundary.speak({
+        text: "Turn left",
+        kind: "navigation",
+        profile: preferences.voice,
+        volume: 1,
+        muted,
+      });
+
+    for (const profile of ["default", "calm", "warm"] as const) {
+      persistAndRestore(profile);
+      if (profile === "warm") state.boundary.prime(profile);
+      expect(speakManoeuvre()).toBe(true);
+      const utterance = state.spoken.at(-1);
+      expect(utterance).toMatchObject({
+        voice: deviceVoice,
+        ...speechTuning(profile),
+      });
+    }
+
+    expect(speakManoeuvre(true)).toBe(false);
+    expect(preferences.voice).toBe("warm");
+    expect(speakManoeuvre()).toBe(true);
+    expect(state.spoken.at(-1)).toMatchObject({ voice: deviceVoice, ...speechTuning("warm") });
+    expect(new Set(state.spoken.filter(({ text }) => text !== " ")).size).toBe(4);
   });
 
   test("refreshes an initially empty voice list when voiceschanged fires", () => {

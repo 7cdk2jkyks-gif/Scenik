@@ -77,68 +77,52 @@ export function journeyTitle(input: JourneyNamingInput): string {
 }
 
 export function journeyEvidenceLine(input: JourneyNamingInput): string {
-  const counts = input.evidence ?? {};
-  const categories = (input.discoveries ?? [])
-    .map((discovery) => discovery.category?.trim().toLowerCase() ?? "")
-    .filter(Boolean);
-  const categoryCount = (needles: string[]) =>
-    categories.filter((category) => includesAny(category, needles)).length;
+  const categories = (input.discoveries ?? []).map(
+    (discovery) => discovery.category?.trim().toLowerCase() ?? "",
+  );
+  const familyOrder = [
+    "woodland",
+    "natural",
+    "historic",
+    "waterside",
+    "viewpoint",
+    "cultural",
+    "other",
+  ] as const;
+  type SummaryFamily = (typeof familyOrder)[number];
+  const familyFor = (category: string): SummaryFamily => {
+    if (includesAny(category, ["wood", "forest"])) return "woodland";
+    if (includesAny(category, ["park", "nature", "reserve"])) return "natural";
+    if (includesAny(category, ["historic", "heritage", "castle", "museum", "ruin"]))
+      return "historic";
+    if (includesAny(category, ["lake", "river", "water", "coast", "beach", "harbour", "marina"]))
+      return "waterside";
+    if (includesAny(category, ["viewpoint", "scenic", "lookout", "observation"]))
+      return "viewpoint";
+    if (includesAny(category, ["gallery", "cultural", "art"])) return "cultural";
+    return "other";
+  };
+  const totals = Object.fromEntries(familyOrder.map((family) => [family, 0])) as Record<
+    SummaryFamily,
+    number
+  >;
+  categories.forEach((category) => {
+    totals[familyFor(category)] += 1;
+  });
   const numberWord = (count: number) =>
     count === 1 ? "one" : count === 2 ? "two" : count === 3 ? "three" : String(count);
   const signal = (label: string, count: number) =>
     `${numberWord(count)} ${label} ${count === 1 ? "discovery" : "discoveries"}`;
-
-  const woodlandCount = categoryCount(["wood", "forest"]);
-  const naturalCount = categoryCount(["park", "nature", "reserve"]);
-  const historicCount = categoryCount(["historic", "heritage", "castle", "museum", "ruin"]);
-  const watersideCount = categoryCount([
-    "lake",
-    "river",
-    "water",
-    "coast",
-    "beach",
-    "harbour",
-    "marina",
-  ]);
-  const viewpointCount = categoryCount(["viewpoint", "scenic", "lookout", "observation"]);
-  const culturalCount = categoryCount(["gallery", "cultural", "art"]);
-  const signals = [
-    woodlandCount > 0
-      ? signal("woodland", woodlandCount)
-      : (counts.natural ?? 0) > 0
-        ? signal("natural", counts.natural ?? 0)
-        : naturalCount > 0
-          ? signal("natural", naturalCount)
-          : null,
-    historicCount > 0
-      ? signal("historic", historicCount)
-      : (counts.historic ?? 0) > 0
-        ? signal("historic", counts.historic ?? 0)
-        : null,
-    watersideCount > 0
-      ? signal("waterside", watersideCount)
-      : (counts.coastal ?? 0) > 0
-        ? signal("waterside", counts.coastal ?? 0)
-        : null,
-    viewpointCount > 0
-      ? signal("viewpoint", viewpointCount)
-      : (counts.viewpoint ?? 0) > 0
-        ? signal("viewpoint", counts.viewpoint ?? 0)
-        : null,
-    culturalCount > 0
-      ? signal("cultural", culturalCount)
-      : (counts.cultural ?? 0) > 0
-        ? signal("cultural", counts.cultural ?? 0)
-        : null,
-  ].filter((value): value is string => value != null);
+  const signals = familyOrder.flatMap((family) =>
+    totals[family] > 0 ? [signal(family, totals[family])] : [],
+  );
 
   if (signals.length === 0) return "Measured road variety shaped this journey.";
-  const shown = signals.slice(0, 3);
   const phrase =
-    shown.length === 1
-      ? shown[0]
-      : shown.length === 2
-        ? `${shown[0]} and ${shown[1]}`
-        : `${shown.slice(0, -1).join(", ")}, and ${shown.at(-1)}`;
+    signals.length === 1
+      ? signals[0]
+      : signals.length === 2
+        ? `${signals[0]} and ${signals[1]}`
+        : `${signals.slice(0, -1).join(", ")}, and ${signals.at(-1)}`;
   return `${phrase.charAt(0).toUpperCase()}${phrase.slice(1)} shaped this journey.`;
 }
