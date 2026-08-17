@@ -6,9 +6,11 @@ import {
   discoveryPresentationState,
   discoveryCategoryPresentation,
   discoveryCardPresentation,
+  discoveryCountBand,
   featuredJourneyDiscoveries,
   hasFeaturedDiscoveryDetail,
   rankJourneyDiscoveries,
+  selectJourneyDiscoveries,
   routeResultNarrative,
   verifiedDiscoveryDescription,
   verifiedJourneyHighlights,
@@ -317,5 +319,251 @@ describe("journey timeline", () => {
         legacySummary: "Varied roads · River corridor",
       },
     );
+  });
+
+  it("scales desired discovery counts monotonically while retaining the fifteen-item bound", () => {
+    const fixtures = [
+      [20 * 60, 20_000, 2],
+      [60 * 60, 80_000, 4],
+      [2 * 60 * 60, 180_000, 7],
+      [4 * 60 * 60, 400_000, 12],
+      [6 * 60 * 60, 600_000, 14],
+      [20 * 60 * 60, 2_000_000, 15],
+    ] as const;
+    const targets = fixtures.map(([duration, distance, expected]) => {
+      const band = discoveryCountBand(duration, distance);
+      assert.equal(band.target, expected);
+      assert.ok(band.target <= 15);
+      return band.target;
+    });
+    assert.deepEqual(
+      targets,
+      [...targets].sort((a, b) => a - b),
+    );
+  });
+
+  it("never exceeds verified evidence and does not overload a short route", () => {
+    const evidence = Array.from({ length: 20 }, (_, index) => ({
+      atSeconds: 30 + index * 30,
+      name: `Place ${index}`,
+      category: "Park",
+      description: "Verified.",
+    }));
+    assert.equal(selectJourneyDiscoveries(evidence, 20 * 60, 20_000).length, 2);
+    assert.equal(selectJourneyDiscoveries(evidence.slice(0, 1), 6 * 60 * 60, 600_000).length, 1);
+  });
+
+  it("spreads long-route discoveries across route-progress sections", () => {
+    const duration = 6 * 60 * 60;
+    const evidence = Array.from({ length: 30 }, (_, index) => ({
+      atSeconds: 120 + index * 700,
+      name: `Distributed ${index}`,
+      category: index % 3 === 0 ? "Historic place" : index % 3 === 1 ? "Park" : "Art gallery",
+      description: "Verified.",
+      rating: 4 + (index % 5) / 10,
+    }));
+    const selected = selectJourneyDiscoveries(evidence, duration, 600_000, {
+      themes: ["Historic", "Art & Culture"],
+    });
+    assert.equal(selected.length, 14);
+    assert.deepEqual(
+      selected,
+      [...selected].sort((a, b) => a.atSeconds - b.atSeconds),
+    );
+    const quarters = new Set(
+      selected.map((item) => Math.min(3, Math.floor((item.atSeconds / duration) * 4))),
+    );
+    assert.ok(quarters.size >= 3);
+  });
+
+  it("limits endpoint clusters when distributed alternatives exist", () => {
+    const duration = 4 * 60 * 60;
+    const clustered = [
+      ...Array.from({ length: 12 }, (_, index) => ({
+        atSeconds: 10 + index,
+        name: `Origin ${index}`,
+        category: "Park",
+        description: "Verified.",
+        rating: 5,
+      })),
+      ...Array.from({ length: 12 }, (_, index) => ({
+        atSeconds: duration - 20 + index,
+        name: `Destination ${index}`,
+        category: "Historic place",
+        description: "Verified.",
+        rating: 5,
+      })),
+      ...[0.2, 0.4, 0.6, 0.8].map((progress, index) => ({
+        atSeconds: duration * progress,
+        name: `Middle ${index}`,
+        category: index % 2 ? "Art gallery" : "Woodland",
+        description: "Verified.",
+      })),
+    ];
+    const selected = selectJourneyDiscoveries(clustered, duration, 400_000);
+    assert.ok(selected.filter((item) => item.name.startsWith("Middle")).length >= 4);
+  });
+
+  it("deduplicates Place identity and presentation before distributed selection", () => {
+    const timeline = buildJourneyTimeline(
+      [
+        {
+          id: "same",
+          lat: 0,
+          lng: 1,
+          primaryType: "park",
+          types: ["park"],
+          displayName: "One Park",
+        },
+        {
+          id: "same",
+          lat: 0,
+          lng: 2,
+          primaryType: "park",
+          types: ["park"],
+          displayName: "One Park",
+        },
+        {
+          id: "other",
+          lat: 0,
+          lng: 2,
+          primaryType: "park",
+          types: ["park"],
+          displayName: "one-park",
+        },
+      ],
+      [
+        { durationSeconds: 300, endLat: 0, endLng: 1 },
+        { durationSeconds: 300, endLat: 0, endLng: 2 },
+      ],
+    );
+    assert.equal(timeline.length, 1);
+  });
+
+  it("keeps narration sparser than a long-route presentation", () => {
+    const timeline = Array.from({ length: 15 }, (_, index) => ({
+      atSeconds: index * 1_000,
+      name: `Place ${index}`,
+      category: "Park",
+      description: "Verified.",
+    }));
+    const narration = buildDiscoveryNarration(timeline, 6 * 60 * 60);
+    assert.equal(narration.length, 6);
+    assert.equal(narration[0].name, "Place 0");
+    assert.equal(narration.at(-1)?.name, "Place 14");
+  });
+
+  it("normalizes invalid discovery count inputs to finite bounded integers", () => {
+    const inputs = [
+      [Number.NaN, Number.NaN],
+      [Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY],
+      [Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY],
+      [-1, -1],
+      [0, 0],
+      [Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER],
+      [undefined as unknown as number, undefined as unknown as number],
+    ];
+    for (const [duration, distance] of inputs) {
+      const band = discoveryCountBand(duration, distance);
+      for (const value of [band.minimum, band.maximum, band.target]) {
+        assert.ok(Number.isFinite(value));
+        assert.ok(Number.isInteger(value));
+      }
+      assert.ok(band.minimum <= band.target && band.target <= band.maximum);
+      assert.ok(band.target <= 15);
+    }
+    assert.deepEqual(discoveryCountBand(Number.NaN, Number.NaN), {
+      minimum: 2,
+      maximum: 3,
+      target: 2,
+    });
+  });
+
+  it("assigns exact duration boundaries to their documented count bands", () => {
+    const second = 1;
+    const boundaries = [
+      [45 * 60 - second, 2, 3],
+      [45 * 60, 3, 5],
+      [45 * 60 + second, 3, 5],
+      [90 * 60 - second, 3, 5],
+      [90 * 60, 5, 8],
+      [90 * 60 + second, 5, 8],
+      [3 * 60 * 60 - second, 5, 8],
+      [3 * 60 * 60, 8, 12],
+      [3 * 60 * 60 + second, 8, 12],
+      [5 * 60 * 60 - second, 8, 12],
+      [5 * 60 * 60, 10, 15],
+      [5 * 60 * 60 + second, 10, 15],
+    ] as const;
+    const targets = boundaries.map(([duration, minimum, maximum]) => {
+      const band = discoveryCountBand(duration, 0);
+      assert.equal(band.minimum, minimum);
+      assert.equal(band.maximum, maximum);
+      return band.target;
+    });
+    assert.deepEqual(
+      targets,
+      [...targets].sort((a, b) => a - b),
+    );
+  });
+
+  it("selects equivalent evidence deterministically across input reorderings", () => {
+    const evidence = Array.from({ length: 12 }, (_, index) => ({
+      identity: `place-${index}`,
+      atSeconds: 100 + index * 300,
+      name: `Place ${index}`,
+      category: index % 2 ? "Park" : "Historic place",
+      description: "Verified.",
+      rating: 4.5,
+      distanceToRouteMeters: 100,
+    }));
+    const reorderings = [
+      evidence,
+      [...evidence].reverse(),
+      [...evidence.slice(4), ...evidence.slice(0, 4)],
+    ];
+    const selections = reorderings.map((items) =>
+      selectJourneyDiscoveries(items, 2 * 60 * 60, 180_000).map((item) => ({
+        identity: item.identity,
+        atSeconds: item.atSeconds,
+        category: item.category,
+      })),
+    );
+    assert.deepEqual(selections[1], selections[0]);
+    assert.deepEqual(selections[2], selections[0]);
+  });
+
+  it("applies narration caps immediately below, at and above each boundary", () => {
+    const timeline = Array.from({ length: 12 }, (_, index) => ({
+      identity: `narration-${index}`,
+      atSeconds: index * 1_000,
+      name: `Narration ${index}`,
+      category: "Park",
+      description: "Verified.",
+    }));
+    const cases = [
+      [90 * 60 - 1, 3],
+      [90 * 60, 5],
+      [90 * 60 + 1, 5],
+      [3 * 60 * 60 - 1, 5],
+      [3 * 60 * 60, 6],
+      [3 * 60 * 60 + 1, 6],
+    ] as const;
+    for (const [duration, cap] of cases) {
+      const narration = buildDiscoveryNarration(timeline, duration);
+      assert.equal(narration.length, cap);
+      assert.deepEqual(
+        narration.map(({ atSeconds }) => atSeconds),
+        [...narration].map(({ atSeconds }) => atSeconds).sort((a, b) => a - b),
+      );
+    }
+    assert.equal(buildDiscoveryNarration(timeline.slice(0, 2), 4 * 60 * 60).length, 2);
+    const missingProgress = buildDiscoveryNarration(
+      [{ ...timeline[0], atSeconds: Number.NaN }],
+      30 * 60,
+    )[0];
+    assert.equal(missingProgress.atSeconds, 0);
+    assert.equal(missingProgress.triggerAtSeconds, 0);
+    assert.ok(Number.isFinite(missingProgress.staleAfterSeconds));
   });
 });

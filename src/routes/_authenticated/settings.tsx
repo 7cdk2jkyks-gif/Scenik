@@ -20,7 +20,7 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import {
   Ruler,
@@ -45,10 +45,14 @@ import { AnalyticsEvent } from "@/lib/analytics/events";
 import {
   loadNarrationPreferences,
   saveNarrationPreferences,
+  VOICE_PROFILES,
   type NarrationPreferences,
   type NarrationMode,
   type NarrationVoiceStyle,
 } from "@/lib/scenic-narration";
+import { createBrowserSpeechBoundary, type LocalSpeechBoundary } from "@/lib/local-speech";
+
+const VOICE_PREVIEW_LINE = "Welcome to Scenik. Let’s take the road worth remembering.";
 
 export const Route = createFileRoute("/_authenticated/settings")({
   component: SettingsPage,
@@ -68,6 +72,7 @@ function SettingsPage() {
   const [narration, setNarration] = useState<NarrationPreferences>(() =>
     loadNarrationPreferences(typeof window === "undefined" ? null : window.localStorage),
   );
+  const speechBoundaryRef = useRef<LocalSpeechBoundary | null>(null);
   const displayedNarrationMode =
     narration.mode === "full" && !isPremium ? "highlights" : narration.mode;
   const updateNarration = (next: NarrationPreferences) => {
@@ -77,6 +82,23 @@ function SettingsPage() {
     } catch {
       toast.error("Narration settings could not be saved on this device.");
     }
+  };
+  useEffect(() => {
+    const boundary = createBrowserSpeechBoundary();
+    speechBoundaryRef.current = boundary;
+    return () => {
+      boundary?.dispose();
+      if (speechBoundaryRef.current === boundary) speechBoundaryRef.current = null;
+    };
+  }, []);
+
+  const previewVoice = () => {
+    speechBoundaryRef.current?.speak({
+      text: VOICE_PREVIEW_LINE,
+      kind: "preview",
+      profile: narration.voice,
+      volume: narration.volume,
+    });
   };
   useEffect(() => {
     if (!data) return;
@@ -225,20 +247,47 @@ function SettingsPage() {
             <Label className="mt-5 block">Voice</Label>
             <div className="mt-2 grid gap-2 sm:grid-cols-3">
               {[
-                { id: "default" as NarrationVoiceStyle, label: "Default" },
-                { id: "calm" as NarrationVoiceStyle, label: "Calm" },
-                { id: "warm" as NarrationVoiceStyle, label: "Warm" },
+                {
+                  id: "default" as NarrationVoiceStyle,
+                  label: VOICE_PROFILES.default.label,
+                  hint: "Natural and welcoming",
+                },
+                {
+                  id: "calm" as NarrationVoiceStyle,
+                  label: VOICE_PROFILES.calm.label,
+                  hint: "Softer and unhurried",
+                },
+                {
+                  id: "warm" as NarrationVoiceStyle,
+                  label: VOICE_PROFILES.warm.label,
+                  hint: "Brighter and lively",
+                },
               ].map((option) => (
                 <button
                   key={option.id}
                   type="button"
-                  onClick={() => updateNarration({ ...narration, voice: option.id })}
-                  className={`rounded-xl border px-3 py-2 text-sm font-medium transition ${narration.voice === option.id ? "border-primary bg-primary/5 text-primary" : "border-border bg-background text-ink hover:border-primary/40"}`}
+                  onClick={() => {
+                    speechBoundaryRef.current?.cancel();
+                    updateNarration({ ...narration, voice: option.id });
+                  }}
+                  className={`rounded-xl border px-3 py-2 text-left text-sm font-medium transition ${narration.voice === option.id ? "border-primary bg-primary/5 text-primary" : "border-border bg-background text-ink hover:border-primary/40"}`}
                 >
-                  {option.label}
+                  <span className="block">{option.label}</span>
+                  <span className="mt-0.5 block text-[10px] font-normal text-muted-foreground">
+                    {option.hint}
+                  </span>
                 </button>
               ))}
             </div>
+            <Button
+              type="button"
+              variant="outline"
+              className="mt-3"
+              onClick={previewVoice}
+              aria-label={`Preview ${VOICE_PROFILES[narration.voice].label} voice`}
+            >
+              <Volume2 className="mr-2 h-4 w-4" /> Preview voice
+            </Button>
 
             <div className="mt-5">
               <div className="flex items-center justify-between gap-3">

@@ -190,7 +190,7 @@ function Landing() {
             {
               n: "02",
               t: "How it should feel",
-              d: "Pick a mood and a theme — romantic coastal, adventurous historic, anything.",
+              d: "Pick your mood and theme — from romantic coastlines to adventurous history.",
             },
             {
               n: "03",

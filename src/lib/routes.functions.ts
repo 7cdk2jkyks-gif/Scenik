@@ -1006,6 +1006,9 @@ export const planScenicRoute = createServerFn({ method: "POST" })
         }
         const timeBudgetApplied = selection.candidates.length > 1;
         const selectedRawCandidate = rawCandidates[selection.selected.originalIndex];
+        const selectedScoredCandidate = scoredCandidates.find(
+          (candidate) => candidate.candidateId === selection.selected.candidateId,
+        );
         const selectedWaypointReason = selection.selected.selectedWaypointReason ?? null;
         const selectedWinner = selection.selected.source ?? "fastest";
         const { routeIdentityFingerprint } = await import("./route-presentation");
@@ -1042,11 +1045,23 @@ export const planScenicRoute = createServerFn({ method: "POST" })
           return candidateWaypoints;
         };
         const selectedWaypoints = waypointsForCandidate(selectedRawCandidate);
-        const { buildDiscoveryNarration, buildJourneyTimeline } =
+        const { buildDiscoveryNarration, buildJourneyTimeline, selectJourneyDiscoveries } =
           await import("./journey-timeline");
-        const journeyTimeline = buildJourneyTimeline(
-          selectedRawCandidate?.scenicWaypoints ?? [],
-          directions.steps,
+        const { safeAssociateEvidenceWithRoute } = await import("./route-evidence-association");
+        const selectedAssociation =
+          selectedScoredCandidate?.evidenceAssociation ??
+          safeAssociateEvidenceWithRoute({
+            encodedPolyline: directions.encodedPolyline,
+            places: evidencePlaces,
+            proximityMeters: 750,
+          });
+        const journeyTimeline = selectJourneyDiscoveries(
+          buildJourneyTimeline(selectedAssociation.matchedGeometryPlaces, directions.steps, {
+            moods: moodIn,
+            themes: themeIn,
+          }),
+          directions.durationSeconds,
+          directions.distanceMeters,
           { moods: moodIn, themes: themeIn },
         );
         const { journeyTitle } = await import("./journey-naming");
@@ -1055,7 +1070,10 @@ export const planScenicRoute = createServerFn({ method: "POST" })
           themes: themeIn,
           discoveries: journeyTimeline,
         });
-        const narrationEvents = buildDiscoveryNarration(journeyTimeline);
+        const narrationEvents = buildDiscoveryNarration(
+          journeyTimeline,
+          directions.durationSeconds,
+        );
         const { selectRouteUpgradeCandidate } = await import("./route-upgrade");
         const upgradeSelection = selectRouteUpgradeCandidate({
           selected: selection.selected,
@@ -1066,10 +1084,20 @@ export const planScenicRoute = createServerFn({ method: "POST" })
         const upgradeRawCandidate = upgradeSelection
           ? rawCandidates[upgradeSelection.candidate.originalIndex]
           : undefined;
+        const upgradeScoredCandidate = upgradeSelection
+          ? scoredCandidates.find(
+              (candidate) => candidate.originalIndex === upgradeSelection.candidate.originalIndex,
+            )
+          : undefined;
         const upgradeJourneyTimeline = upgradeSelection
-          ? buildJourneyTimeline(
-              upgradeRawCandidate?.scenicWaypoints ?? [],
-              upgradeSelection.candidate.directions.steps,
+          ? selectJourneyDiscoveries(
+              buildJourneyTimeline(
+                upgradeScoredCandidate?.evidenceAssociation.matchedGeometryPlaces ?? [],
+                upgradeSelection.candidate.directions.steps,
+                { moods: moodIn, themes: themeIn },
+              ),
+              upgradeSelection.candidate.directions.durationSeconds,
+              upgradeSelection.candidate.directions.distanceMeters,
               { moods: moodIn, themes: themeIn },
             )
           : [];
@@ -1356,7 +1384,10 @@ export const planScenicRoute = createServerFn({ method: "POST" })
                   (highlight) => `${highlight.name} · ${highlight.category}`,
                 ),
                 journeyTimeline: upgradeJourneyTimeline,
-                narrationEvents: buildDiscoveryNarration(upgradeJourneyTimeline),
+                narrationEvents: buildDiscoveryNarration(
+                  upgradeJourneyTimeline,
+                  upgradeSelection.candidate.directions.durationSeconds,
+                ),
                 directions: upgradeSelection.candidate.directions,
               },
             }

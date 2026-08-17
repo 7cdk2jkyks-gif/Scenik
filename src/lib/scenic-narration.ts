@@ -1,6 +1,50 @@
 export type NarrationMode = "off" | "highlights" | "full";
 export type NarrationVoiceStyle = "default" | "calm" | "warm";
 
+export type VoiceProfile = {
+  id: NarrationVoiceStyle;
+  label: string;
+  preferredLocale: "en-GB";
+  preferredVoiceTraits: readonly string[];
+  rate: number;
+  pitch: number;
+  volume: number;
+  deliveryStyle: "friendly" | "reassuring" | "bright";
+};
+
+export const VOICE_PROFILES: Record<NarrationVoiceStyle, VoiceProfile> = {
+  default: {
+    id: "default",
+    label: "Scenic Guide",
+    preferredLocale: "en-GB",
+    preferredVoiceTraits: ["premium", "enhanced", "natural", "neural"],
+    rate: 0.98,
+    pitch: 1.02,
+    volume: 1,
+    deliveryStyle: "friendly",
+  },
+  calm: {
+    id: "calm",
+    label: "Calm",
+    preferredLocale: "en-GB",
+    preferredVoiceTraits: ["calm", "serene", "soft", "natural"],
+    rate: 0.86,
+    pitch: 0.92,
+    volume: 0.88,
+    deliveryStyle: "reassuring",
+  },
+  warm: {
+    id: "warm",
+    label: "Warm",
+    preferredLocale: "en-GB",
+    preferredVoiceTraits: ["warm", "friendly", "premium", "enhanced", "natural"],
+    rate: 1.06,
+    pitch: 1.08,
+    volume: 1,
+    deliveryStyle: "bright",
+  },
+};
+
 export type NarrationPreferences = {
   mode: NarrationMode;
   voice: NarrationVoiceStyle;
@@ -127,29 +171,35 @@ export type SpeechVoiceLike = {
 
 export function selectSpeechVoice<T extends SpeechVoiceLike>(
   voices: T[],
-  locale: string,
+  _locale: string,
   style: NarrationVoiceStyle,
 ): T | null {
   if (voices.length === 0) return null;
-  const language = locale.toLowerCase().split("-")[0];
-  return [...voices].sort((a, b) => {
-    const score = (voice: T) => {
-      const name = voice.name.toLowerCase();
-      let value = voice.lang.toLowerCase().startsWith(language) ? 100 : 0;
-      if (voice.lang.toLowerCase() === locale.toLowerCase()) value += 20;
-      if (voice.localService) value += 8;
-      if (voice.default) value += style === "default" ? 15 : 5;
-      if (/premium|enhanced|neural|natural/.test(name)) value += 30;
-      if (style === "calm" && /calm|serene|soft/.test(name)) value += 12;
-      if (style === "warm" && /warm|friendly|natural/.test(name)) value += 12;
-      return value;
-    };
-    return score(b) - score(a) || a.name.localeCompare(b.name);
-  })[0];
+  const profile = VOICE_PROFILES[style];
+  const stable = (candidates: T[]) =>
+    [...candidates].sort(
+      (a, b) =>
+        Number(Boolean(b.localService)) - Number(Boolean(a.localService)) ||
+        Number(Boolean(b.default)) - Number(Boolean(a.default)) ||
+        a.name.localeCompare(b.name),
+    )[0] ?? null;
+  const isEnglish = (voice: T) => voice.lang.toLowerCase().startsWith("en");
+  const isBritishEnglish = (voice: T) => voice.lang.toLowerCase() === "en-gb";
+  const hasPreferredTrait = (voice: T) => {
+    const name = voice.name.toLowerCase();
+    return profile.preferredVoiceTraits.some((trait) => name.includes(trait));
+  };
+
+  return (
+    stable(voices.filter((voice) => isBritishEnglish(voice) && hasPreferredTrait(voice))) ??
+    stable(voices.filter(isBritishEnglish)) ??
+    stable(voices.filter(isEnglish)) ??
+    stable(voices.filter((voice) => voice.default)) ??
+    stable(voices)
+  );
 }
 
 export function speechTuning(style: NarrationVoiceStyle) {
-  if (style === "calm") return { rate: 0.9, pitch: 0.98 };
-  if (style === "warm") return { rate: 0.95, pitch: 1.04 };
-  return { rate: 0.98, pitch: 1 };
+  const profile = VOICE_PROFILES[style];
+  return { rate: profile.rate, pitch: profile.pitch, volume: profile.volume };
 }

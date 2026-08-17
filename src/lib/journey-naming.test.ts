@@ -50,4 +50,21 @@ describe("journeyEvidenceLine", () => {
       }),
     ).toBe("Two woodland discoveries shaped this journey.");
   });
+
+  test("uses deterministic British list grammar and mid-sentence casing", () => {
+    expect(
+      journeyEvidenceLine({
+        discoveries: [
+          { category: "Park" },
+          { category: "Nature reserve" },
+          { category: "Woodland" },
+          { category: "Historic place" },
+          { category: "Castle" },
+          { category: "Art gallery" },
+        ],
+      }),
+    ).toBe(
+      "One woodland discovery, two historic discoveries, and one cultural discovery shaped this journey.",
+    );
+  });
 });

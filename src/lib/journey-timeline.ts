@@ -2,6 +2,7 @@ import {
   haversineDistanceMeters,
   verifiedMeaningfulPlaceName,
   type LatLng,
+  type ScenicPlace,
   type ScenicWaypointPlan,
 } from "./scenic-waypoint";
 
@@ -138,7 +139,9 @@ export function featuredJourneyDiscoveries(
 }
 
 export function buildJourneyTimeline(
-  waypoints: ScenicWaypointPlan[],
+  waypoints: Array<
+    ScenicWaypointPlan | (ScenicPlace & { routeProgress?: number; distanceToRouteMeters?: number })
+  >,
   steps: TimedStep[],
   preferences: JourneyPreferences = {},
 ): JourneyTimelineEvent[] {
@@ -155,9 +158,12 @@ export function buildJourneyTimeline(
 
   const seenIdentities = new Set<string>();
   const seenPresentations = new Set<string>();
+  const totalDurationSeconds = timedSteps.at(-1)?.atSeconds ?? 0;
   const timeline = waypoints
     .flatMap((waypoint) => {
-      const category = waypoint.categoryName?.trim() || waypoint.reason;
+      const category =
+        waypoint.categoryName?.trim() ||
+        ("reason" in waypoint ? waypoint.reason : waypoint.primaryType.replaceAll("_", " "));
       const verifiedDisplayName = verifiedMeaningfulPlaceName(waypoint);
       if (!verifiedDisplayName || !category || timedSteps.length === 0) return [];
       const name = verifiedDisplayName;
@@ -173,15 +179,23 @@ export function buildJourneyTimeline(
           ? current
           : best,
       );
-      const distanceToRouteMeters = haversineDistanceMeters(closest.point, waypoint);
+      const routeProgress = "routeProgress" in waypoint ? waypoint.routeProgress : undefined;
+      const atSeconds =
+        routeProgress == null
+          ? closest.atSeconds
+          : Math.round(Math.max(0, Math.min(1, routeProgress)) * totalDurationSeconds);
+      const distanceToRouteMeters =
+        "distanceToRouteMeters" in waypoint && waypoint.distanceToRouteMeters != null
+          ? waypoint.distanceToRouteMeters
+          : haversineDistanceMeters(closest.point, waypoint);
       return [
         {
           identity: identity || undefined,
-          atSeconds: closest.atSeconds,
+          atSeconds,
           name,
           hasVerifiedDisplayName: !!verifiedDisplayName,
           category,
-          evidenceCategory: waypoint.reason,
+          evidenceCategory: "reason" in waypoint ? waypoint.reason : waypoint.primaryType,
           description: verifiedDiscoveryDescription(category),
           distanceToRouteMeters,
           rating: waypoint.rating,
@@ -244,6 +258,108 @@ function discoveryStrength(event: JourneyTimelineEvent, preferences: JourneyPref
   );
 }
 
+export type DiscoveryCountBand = { minimum: number; maximum: number; target: number };
+
+export function discoveryCountBand(
+  durationSeconds: number,
+  distanceMeters: number,
+): DiscoveryCountBand {
+  // Invalid provider/runtime values use the safest short-route, zero-distance fallback.
+  const safeDurationSeconds = Number.isFinite(durationSeconds) ? Math.max(0, durationSeconds) : 0;
+  const safeDistanceMeters = Number.isFinite(distanceMeters) ? Math.max(0, distanceMeters) : 0;
+  const minutes = safeDurationSeconds / 60;
+  const distance = safeDistanceMeters;
+  const [minimum, maximum, distanceStep] =
+    minutes < 45
+      ? [2, 3, 30_000]
+      : minutes < 90
+        ? [3, 5, 50_000]
+        : minutes < 180
+          ? [5, 8, 75_000]
+          : minutes < 300
+            ? [8, 12, 100_000]
+            : [10, 15, 125_000];
+  return {
+    minimum,
+    maximum,
+    target: Math.min(maximum, minimum + Math.floor(distance / distanceStep)),
+  };
+}
+
+const broadCategory = (event: JourneyTimelineEvent) =>
+  discoveryCategoryPresentation(event.category).label;
+
+const discoveryTime = (event: JourneyTimelineEvent) =>
+  Number.isFinite(event.atSeconds) ? Math.max(0, event.atSeconds) : 0;
+
+const compareDiscoveryIdentity = (a: JourneyTimelineEvent, b: JourneyTimelineEvent) =>
+  discoveryTime(a) - discoveryTime(b) ||
+  a.name.localeCompare(b.name) ||
+  a.category.localeCompare(b.category) ||
+  (a.identity ?? "").localeCompare(b.identity ?? "");
+
+export function selectJourneyDiscoveries(
+  timeline: JourneyTimelineEvent[] | null | undefined,
+  durationSeconds: number,
+  distanceMeters: number,
+  preferences: JourneyPreferences = {},
+): JourneyTimelineEvent[] {
+  const candidates = [...(timeline ?? [])];
+  if (candidates.length === 0) return [];
+  const target = Math.min(
+    discoveryCountBand(durationSeconds, distanceMeters).target,
+    candidates.length,
+  );
+  const journeySeconds = Math.max(
+    1,
+    Number.isFinite(durationSeconds) ? Math.max(0, durationSeconds) : 0,
+    ...candidates.map(discoveryTime),
+  );
+  const sectionCount = Math.min(target, Math.max(2, Math.ceil(target / 2)));
+  const section = (event: JourneyTimelineEvent) =>
+    Math.min(sectionCount - 1, Math.floor((discoveryTime(event) / journeySeconds) * sectionCount));
+  const byStrength = [...candidates].sort((a, b) => {
+    const difference = discoveryStrength(b, preferences) - discoveryStrength(a, preferences);
+    return difference || compareDiscoveryIdentity(a, b);
+  });
+  const selected: JourneyTimelineEvent[] = [];
+  for (let index = 0; index < sectionCount && selected.length < target; index += 1) {
+    const strongest = byStrength.find((candidate) => section(candidate) === index);
+    if (strongest) selected.push(strongest);
+  }
+  while (selected.length < target) {
+    const selectedCategories = new Set(selected.map(broadCategory));
+    const next = byStrength
+      .filter((candidate) => !selected.includes(candidate))
+      .map((candidate) => {
+        const separation = Math.min(
+          ...selected.map(
+            (chosen) => Math.abs(discoveryTime(chosen) - discoveryTime(candidate)) / journeySeconds,
+          ),
+        );
+        const endpointPenalty =
+          discoveryTime(candidate) / journeySeconds < 0.03 ||
+          discoveryTime(candidate) / journeySeconds > 0.97
+            ? 3
+            : 0;
+        return {
+          candidate,
+          score:
+            discoveryStrength(candidate, preferences) +
+            separation * 8 +
+            (selectedCategories.has(broadCategory(candidate)) ? 0 : 2) -
+            endpointPenalty,
+        };
+      })
+      .sort(
+        (a, b) => b.score - a.score || compareDiscoveryIdentity(a.candidate, b.candidate),
+      )[0]?.candidate;
+    if (!next) break;
+    selected.push(next);
+  }
+  return selected.sort(compareDiscoveryIdentity);
+}
+
 export function rankJourneyDiscoveries(
   timeline: JourneyTimelineEvent[] | null | undefined,
   preferences: JourneyPreferences = {},
@@ -253,7 +369,7 @@ export function rankJourneyDiscoveries(
     .sort((a, b) => {
       const strengthDifference =
         discoveryStrength(b, preferences) - discoveryStrength(a, preferences);
-      return strengthDifference || a.atSeconds - b.atSeconds || a.name.localeCompare(b.name);
+      return strengthDifference || compareDiscoveryIdentity(a, b);
     })
     .slice(0, Math.max(0, limit));
 }
@@ -276,15 +392,36 @@ export function discoveryPresentationState(
 
 export function buildDiscoveryNarration(
   timeline: JourneyTimelineEvent[],
+  durationSeconds?: number,
 ): DiscoveryNarrationEvent[] {
-  return timeline.map((event, index) => ({
-    ...event,
-    triggerAtSeconds: Math.max(0, event.atSeconds - 60),
-    staleAfterSeconds: event.atSeconds + 120,
-    text: event.hasVerifiedDisplayName
-      ? `You’re approaching ${event.name}, one of the featured discoveries on today’s journey.`
-      : "A featured discovery is approaching along today’s journey.",
-    priority: Math.max(1, timeline.length - index),
-    hasBeenSpoken: false,
-  }));
+  const narrationLimit =
+    durationSeconds == null
+      ? timeline.length
+      : durationSeconds < 90 * 60
+        ? 3
+        : durationSeconds < 3 * 60 * 60
+          ? 5
+          : 6;
+  const selected =
+    timeline.length <= narrationLimit
+      ? timeline
+      : Array.from(
+          { length: narrationLimit },
+          (_, index) =>
+            timeline[Math.round((index * (timeline.length - 1)) / (narrationLimit - 1))],
+        );
+  return selected.map((event, index) => {
+    const atSeconds = discoveryTime(event);
+    return {
+      ...event,
+      atSeconds,
+      triggerAtSeconds: Math.max(0, atSeconds - 60),
+      staleAfterSeconds: atSeconds + 120,
+      text: event.hasVerifiedDisplayName
+        ? `You’re approaching ${event.name}, one of the featured discoveries on today’s journey.`
+        : "A featured discovery is approaching along today’s journey.",
+      priority: Math.max(1, selected.length - index),
+      hasBeenSpoken: false,
+    };
+  });
 }

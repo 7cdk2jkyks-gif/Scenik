@@ -61,6 +61,10 @@ export type EvidenceAssociationResult = {
   evidenceMatchedThroughWaypoints: number;
   comparisons: number;
   status: EvidenceAssociationStatus;
+  /** Internal, candidate-local evidence. Never copied into diagnostics. */
+  matchedGeometryPlaces: Array<
+    ScenicPlace & { routeProgress: number; distanceToRouteMeters: number }
+  >;
 };
 
 class GeometryLimitError extends Error {}
@@ -194,29 +198,54 @@ function interpolateMinorArc(arc: ReturnType<typeof segmentArc>, fraction: numbe
   );
 }
 
+type SegmentProjection = { distanceMeters: number; fraction: number };
+
+/** Physical surface projection onto the bounded minor-great-circle arc travelled by a segment. */
+function sphericalPointToSegmentProjection(
+  point: LatLng,
+  from: LatLng,
+  to: LatLng,
+): SegmentProjection {
+  const target = unitVector(point);
+  const arc = segmentArc(from, to);
+  if (arc.degenerate)
+    return {
+      distanceMeters: centralAngle(target, arc.start) * EVIDENCE_EARTH_RADIUS_METERS,
+      fraction: 0,
+    };
+  const normal = normaliseVector(cross(arc.start, arc.end));
+  const projected = addVectors(target, scaleVector(normal, -dot(target, normal)));
+  const startDistance = centralAngle(target, arc.start);
+  const endDistance = centralAngle(target, arc.end);
+  let closestDistance = Math.min(startDistance, endDistance);
+  let fraction = startDistance <= endDistance ? 0 : 1;
+  if (magnitude(projected) >= EVIDENCE_VECTOR_NORMALISATION_TOLERANCE) {
+    const firstProjection = normaliseVector(projected);
+    for (const candidate of [firstProjection, scaleVector(firstProjection, -1) as UnitVector]) {
+      const travelledAngle = centralAngle(arc.start, candidate);
+      const coveredAngle = travelledAngle + centralAngle(candidate, arc.end);
+      const candidateDistance = centralAngle(target, candidate);
+      if (
+        coveredAngle <= arc.angle + EVIDENCE_ARC_CONTAINMENT_TOLERANCE_RADIANS &&
+        candidateDistance < closestDistance
+      ) {
+        closestDistance = candidateDistance;
+        fraction = Math.max(0, Math.min(1, travelledAngle / arc.angle));
+      }
+    }
+  }
+  const distance = closestDistance * EVIDENCE_EARTH_RADIUS_METERS;
+  if (!Number.isFinite(distance) || !Number.isFinite(fraction)) throw new GeometryModelError();
+  return { distanceMeters: Math.max(0, distance), fraction: Math.max(0, Math.min(1, fraction)) };
+}
+
 /** Physical surface distance to the bounded minor-great-circle arc travelled by a segment. */
 export function sphericalPointToSegmentDistanceMeters(
   point: LatLng,
   from: LatLng,
   to: LatLng,
 ): number {
-  const target = unitVector(point);
-  const arc = segmentArc(from, to);
-  if (arc.degenerate) return centralAngle(target, arc.start) * EVIDENCE_EARTH_RADIUS_METERS;
-  const normal = normaliseVector(cross(arc.start, arc.end));
-  const projected = addVectors(target, scaleVector(normal, -dot(target, normal)));
-  let closestDistance = Math.min(centralAngle(target, arc.start), centralAngle(target, arc.end));
-  if (magnitude(projected) >= EVIDENCE_VECTOR_NORMALISATION_TOLERANCE) {
-    const firstProjection = normaliseVector(projected);
-    for (const candidate of [firstProjection, scaleVector(firstProjection, -1) as UnitVector]) {
-      const coveredAngle = centralAngle(arc.start, candidate) + centralAngle(candidate, arc.end);
-      if (coveredAngle <= arc.angle + EVIDENCE_ARC_CONTAINMENT_TOLERANCE_RADIANS)
-        closestDistance = Math.min(closestDistance, centralAngle(target, candidate));
-    }
-  }
-  const distance = closestDistance * EVIDENCE_EARTH_RADIUS_METERS;
-  if (!Number.isFinite(distance)) throw new GeometryModelError();
-  return distance;
+  return sphericalPointToSegmentProjection(point, from, to).distanceMeters;
 }
 
 type Segment = { from: LatLng; to: LatLng };
@@ -314,6 +343,7 @@ const emptyResult = (
   evidenceMatchedThroughWaypoints: 0,
   comparisons: 0,
   status,
+  matchedGeometryPlaces: [],
 });
 
 export function associateEvidenceWithRoute(input: {
@@ -424,11 +454,27 @@ export function associateEvidenceWithRoute(input: {
   const maximumComparisons = Number.isFinite(requestedMaximum)
     ? Math.max(0, Math.min(EVIDENCE_ASSOCIATION_MAX_COMPARISONS, Math.floor(requestedMaximum)))
     : 0;
-  const matchedGeometry: ScenicPlace[] = [];
+  const segmentLengths = segmentIndex.segments.map(({ from, to }) =>
+    haversineDistanceMeters(from, to),
+  );
+  const segmentStarts = segmentLengths.reduce<number[]>(
+    (starts, length) => {
+      starts.push((starts.at(-1) ?? 0) + length);
+      return starts;
+    },
+    [0],
+  );
+  const matchedGeometry: Array<
+    ScenicPlace & { routeProgress: number; distanceToRouteMeters: number }
+  > = [];
   const matchedWaypoints: ScenicPlace[] = [];
   let comparisons = 0;
   for (const place of uniquePlaces) {
-    let geometryMatch = false;
+    let geometryMatch: {
+      segmentIndex: number;
+      distanceMeters: number;
+      fraction: number;
+    } | null = null;
     let nearbySegments: number[];
     try {
       nearbySegments = nearbySegmentIndexes(place, segmentIndex, indexLimits);
@@ -449,20 +495,35 @@ export function associateEvidenceWithRoute(input: {
           comparisons,
         };
       comparisons += 1;
+      const projection = sphericalPointToSegmentProjection(
+        place,
+        segmentIndex.segments[index].from,
+        segmentIndex.segments[index].to,
+      );
       if (
-        sphericalPointToSegmentDistanceMeters(
-          place,
-          segmentIndex.segments[index].from,
-          segmentIndex.segments[index].to,
-        ) <=
-        input.proximityMeters + EVIDENCE_DISTANCE_EPSILON_METERS
-      ) {
-        geometryMatch = true;
-        break;
-      }
+        projection.distanceMeters <= input.proximityMeters + EVIDENCE_DISTANCE_EPSILON_METERS &&
+        (!geometryMatch ||
+          projection.distanceMeters <
+            geometryMatch.distanceMeters - EVIDENCE_DISTANCE_EPSILON_METERS)
+      )
+        geometryMatch = { segmentIndex: index, ...projection };
     }
     if (geometryMatch) {
-      matchedGeometry.push(place);
+      const routeDistance = Math.max(1, geometry.distanceMeters);
+      matchedGeometry.push({
+        ...place,
+        types: [...place.types],
+        routeProgress: Math.max(
+          0,
+          Math.min(
+            1,
+            (segmentStarts[geometryMatch.segmentIndex] +
+              geometryMatch.fraction * segmentLengths[geometryMatch.segmentIndex]) /
+              routeDistance,
+          ),
+        ),
+        distanceToRouteMeters: geometryMatch.distanceMeters,
+      });
       continue;
     }
     let waypointMatch = false;
@@ -506,6 +567,7 @@ export function associateEvidenceWithRoute(input: {
     evidenceMatchedThroughWaypoints: matchedWaypoints.length,
     comparisons,
     status: "ANALYSED",
+    matchedGeometryPlaces: matchedGeometry.map((place) => ({ ...place, types: [...place.types] })),
   };
 }
 

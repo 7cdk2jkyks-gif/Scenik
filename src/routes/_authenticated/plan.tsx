@@ -142,12 +142,39 @@ import { buildJourneySummary, type JourneySummary } from "@/lib/journey-summary"
 import {
   loadNarrationPreferences,
   selectNarrationEvent,
-  selectSpeechVoice,
-  speechTuning,
   type NarrationPreferences,
 } from "@/lib/scenic-narration";
+import {
+  activateNavigationLifecycle,
+  acceptCurrentNavigationAlternate,
+  applyNavigationReplacementTransition,
+  applyTerminalNavigationTransition,
+  awaitCoordinatedNavigationRouteReplacement,
+  beginNavigationSession,
+  beginCoordinatedNavigationReplacement,
+  beginNavigationAlternateCalculation,
+  clearNavigationAlternateForCalculation,
+  createBrowserSpeechBoundary,
+  createNavigationAsyncCoordinator,
+  createNavigationSessionGuard,
+  deactivateNavigationAsyncLifecycle,
+  finishCoordinatedNavigationReplacement,
+  finishNavigationAlternateCalculation,
+  isCurrentNavigationReplacement,
+  navigationSessionCanSpeak,
+  publishNavigationAlternate,
+  speakDuringActiveNavigation,
+  type LocalSpeechBoundary,
+  type NavigationSpeechEndReason,
+} from "@/lib/local-speech";
 
 type Rating = "excellent" | "average" | "poor";
+type TrafficAlternateOffer = {
+  encodedPolyline: string;
+  savedSeconds: number;
+  durationSeconds: number;
+  distanceMeters: number;
+};
 const MISSING_OPTIONS = [
   "Better scenery",
   "Less traffic",
@@ -707,12 +734,7 @@ function PlanPage() {
   const [reportTarget, setReportTarget] = useState<{ lat: number; lng: number } | null>(null);
   const [userId, setUserId] = useState<string | null>(null);
   const [speedKmh, setSpeedKmh] = useState<number | null>(null);
-  const [altOffer, setAltOffer] = useState<{
-    encodedPolyline: string;
-    savedSeconds: number;
-    durationSeconds: number;
-    distanceMeters: number;
-  } | null>(null);
+  const [altOffer, setAltOffer] = useState<TrafficAlternateOffer | null>(null);
   const [clearSearchesOpen, setClearSearchesOpen] = useState(false);
   // After user chooses "Keep current route", suppress further offers unless a
   // materially better alternative appears (i.e. new traffic further along the route).
@@ -794,9 +816,12 @@ function PlanPage() {
   const spokenRef = useRef<Set<string>>(new Set());
   const narrationSpokenRef = useRef<Set<string>>(new Set());
   const lastNarrationAtRef = useRef<number | null>(null);
-  const speechKindRef = useRef<"navigation" | "narration" | null>(null);
   const lastStepIdxRef = useRef<number>(-1);
-  const warmVoiceRef = useRef<SpeechSynthesisVoice | null>(null);
+  const speechBoundaryRef = useRef<LocalSpeechBoundary | null>(null);
+  const navigationSessionRef = useRef(createNavigationSessionGuard());
+  const navigationAsyncRef = useRef(
+    createNavigationAsyncCoordinator<TrafficAlternateOffer>(navigationSessionRef.current),
+  );
   const altCheckingRef = useRef(false);
   const resultRef = useRef<HTMLDivElement | null>(null);
   const [routeCompleted, setRouteCompleted] = useState(false);
@@ -1054,23 +1079,20 @@ function PlanPage() {
     return () => window.removeEventListener("storage", syncPreferences);
   }, []);
 
-  // Prefer a high-quality local voice in the device locale, while allowing every
-  // platform to fall back to its own default voice inventory.
   useEffect(() => {
-    if (typeof window === "undefined" || !("speechSynthesis" in window)) return;
-    const pick = () => {
-      const voices = window.speechSynthesis.getVoices();
-      warmVoiceRef.current = selectSpeechVoice(
-        voices,
-        navigator.language || "en-US",
-        narrationPreferences.voice,
-      );
-    };
-    pick();
-    window.speechSynthesis.addEventListener?.("voiceschanged", pick);
+    const lifecycle = activateNavigationLifecycle(navigationSessionRef.current);
+    const navigationAsync = navigationAsyncRef.current;
+    const boundary = createBrowserSpeechBoundary();
+    speechBoundaryRef.current = boundary;
     return () => {
-      window.speechSynthesis.removeEventListener?.("voiceschanged", pick);
+      deactivateNavigationAsyncLifecycle(navigationAsync, lifecycle);
+      boundary?.dispose();
+      if (speechBoundaryRef.current === boundary) speechBoundaryRef.current = null;
     };
+  }, []);
+
+  useEffect(() => {
+    speechBoundaryRef.current?.cancel();
   }, [narrationPreferences.voice]);
 
   const searchesQuery = useQuery({
@@ -1246,7 +1268,7 @@ function PlanPage() {
       );
       setProgress(null);
       setResult(r);
-      setJourneyIntroOpen(true);
+      setJourneyIntroductionOpen(true);
       setRouteCompleted(false);
       spokenRef.current = new Set();
       setWaypointFact(null);
@@ -1399,18 +1421,20 @@ function PlanPage() {
     const payload = result.routeUpgradeCandidate.payload;
     const upgraded = applyRetainedRouteUpgrade(result, payload);
     const upgradedRoute = selectedRoutePresentation(upgraded);
-    setResult({
-      ...upgraded,
-      scoringDiagnostics:
-        upgraded.scoringDiagnostics && upgradedRoute
-          ? {
-              ...upgraded.scoringDiagnostics,
-              selectedDurationMinutes: Math.round(upgradedRoute.durationSeconds / 60),
-              mapDisplayedDurationMinutes: Math.round(upgradedRoute.durationSeconds / 60),
-              selectedMeasuredExtraMinutes: Math.round(payload.measuredExtraTimeSeconds / 60),
-              routeIdentityFingerprint: upgradedRoute.identityFingerprint,
-            }
-          : upgraded.scoringDiagnostics,
+    applyNavigationTransition(navOpen ? "replaced" : "continue", () => {
+      setResult({
+        ...upgraded,
+        scoringDiagnostics:
+          upgraded.scoringDiagnostics && upgradedRoute
+            ? {
+                ...upgraded.scoringDiagnostics,
+                selectedDurationMinutes: Math.round(upgradedRoute.durationSeconds / 60),
+                mapDisplayedDurationMinutes: Math.round(upgradedRoute.durationSeconds / 60),
+                selectedMeasuredExtraMinutes: Math.round(payload.measuredExtraTimeSeconds / 60),
+                routeIdentityFingerprint: upgradedRoute.identityFingerprint,
+              }
+            : upgraded.scoringDiagnostics,
+      });
     });
     setRouteSummary({
       distance: payload.directions.distance,
@@ -1450,6 +1474,7 @@ function PlanPage() {
   }
 
   function actuallyOpenNav() {
+    beginNavigationSession(navigationSessionRef.current);
     spokenRef.current = new Set();
     narrationSpokenRef.current = new Set();
     lastNarrationAtRef.current = null;
@@ -1470,20 +1495,7 @@ function PlanPage() {
     // Prime speech synthesis inside the user gesture. iOS Safari and some
     // desktop browsers (incl. custom-domain contexts) require an in-gesture
     // speak() call before any later programmatic speak() will actually play.
-    if (typeof window !== "undefined" && "speechSynthesis" in window) {
-      try {
-        window.speechSynthesis.cancel();
-        if (window.speechSynthesis.paused) window.speechSynthesis.resume();
-        const primer = new SpeechSynthesisUtterance(" ");
-        primer.volume = 0.01;
-        primer.rate = 1;
-        if (warmVoiceRef.current) primer.voice = warmVoiceRef.current;
-        primer.lang = warmVoiceRef.current?.lang ?? "en-US";
-        window.speechSynthesis.speak(primer);
-      } catch {
-        /* ignore */
-      }
-    }
+    speechBoundaryRef.current?.prime(narrationPreferences.voice);
     setNavOpen(true);
     void playHaptic("start");
     capture(AnalyticsEvent.NavigationStarted, {
@@ -1504,77 +1516,103 @@ function PlanPage() {
 
   function speak(text: string, kind: "navigation" | "narration" = "navigation") {
     if (!voiceOn) return false;
-    if (typeof window === "undefined" || !("speechSynthesis" in window)) return false;
-    try {
-      if (
-        kind === "narration" &&
-        (speechKindRef.current != null || window.speechSynthesis.speaking)
-      )
-        return false;
-      let clean = text
-        .replace(/<[^>]+>/g, "")
-        .replace(/\s+/g, " ")
-        .trim();
-      // Add tiny spoken pauses so the voice feels more human and less robotic.
-      clean = clean
-        .replace(/\b(OK|Okay), now\b/gi, "Okay, now")
-        .replace(/\bComing up in\b/gi, "coming up in")
-        .replace(/\bIn about\b/gi, "in about")
-        .replace(/\bRoute updated\b/gi, "Route updated");
+    return speakDuringActiveNavigation(
+      speechBoundaryRef.current,
+      routeCompleted || !navigationSessionCanSpeak(navigationSessionRef.current),
+      {
+        text,
+        kind,
+        profile: narrationPreferences.voice,
+        volume: kind === "narration" ? narrationPreferences.volume : 1,
+      },
+    );
+  }
 
-      const u = new SpeechSynthesisUtterance(clean);
-      if (warmVoiceRef.current) u.voice = warmVoiceRef.current;
-      const tuning = speechTuning(narrationPreferences.voice);
-      u.rate = tuning.rate;
-      u.pitch = tuning.pitch;
-      u.volume = kind === "narration" ? narrationPreferences.volume : 1;
-      u.lang = warmVoiceRef.current?.lang ?? navigator.language ?? "en-US";
-      u.onstart = () => {
-        speechKindRef.current = kind;
-      };
-      const clearSpeechState = () => {
-        if (speechKindRef.current === kind) speechKindRef.current = null;
-      };
-      u.onend = clearSpeechState;
-      u.onerror = clearSpeechState;
-      if (kind === "navigation") window.speechSynthesis.cancel();
-      if (window.speechSynthesis.paused) window.speechSynthesis.resume();
-      window.speechSynthesis.speak(u);
-      return true;
-    } catch {
-      return false;
+  function applyNavigationTransition(
+    transition: NavigationSpeechEndReason | "continue",
+    commit: () => void,
+  ) {
+    if (transition === "replaced") {
+      applyNavigationReplacementTransition(
+        speechBoundaryRef.current,
+        navigationAsyncRef.current,
+        () => {
+          setRerouting(false);
+          altCheckingRef.current = false;
+          setAltOffer(null);
+        },
+        commit,
+      );
+      return;
     }
+    if (transition === "continue") {
+      commit();
+      return;
+    }
+    applyTerminalNavigationTransition(
+      speechBoundaryRef.current,
+      navigationAsyncRef.current,
+      transition,
+      () => {
+        setRerouting(false);
+        altCheckingRef.current = false;
+        setAltOffer(null);
+      },
+      commit,
+    );
+  }
+
+  function setActiveNavigationOpen(open: boolean) {
+    applyNavigationTransition(open ? "continue" : "closed", () => setNavOpen(open));
+  }
+
+  function setJourneyIntroductionOpen(open: boolean) {
+    applyNavigationTransition("continue", () => setJourneyIntroOpen(open));
   }
 
   function toggleNavigationVoice() {
     setVoiceOn((enabled) => {
-      if (enabled && typeof window !== "undefined" && "speechSynthesis" in window) {
-        window.speechSynthesis.cancel();
-        speechKindRef.current = null;
-      }
+      if (enabled) speechBoundaryRef.current?.cancel();
       return !enabled;
     });
   }
 
   async function handleReroute(pos: { lat: number; lng: number }) {
     if (!result || rerouting) return;
+    const replacementToken = beginCoordinatedNavigationReplacement(navigationAsyncRef.current);
+    if (!replacementToken) return;
     setRerouting(true);
     toast("Rerouting…", { icon: <RefreshCw className="h-4 w-4 animate-spin" /> });
     try {
-      const fresh = await recomputeFn({
-        data: {
-          origin: pos,
-          destination: { lat: result.end.lat, lng: result.end.lng },
-          waypoints: [],
+      const replacement = await awaitCoordinatedNavigationRouteReplacement(
+        speechBoundaryRef.current,
+        navigationAsyncRef.current,
+        replacementToken,
+        () =>
+          recomputeFn({
+            data: {
+              origin: pos,
+              destination: { lat: result.end.lat, lng: result.end.lng },
+              waypoints: [],
+            },
+          }),
+        () => {
+          setRerouting(false);
+          altCheckingRef.current = false;
+          setAltOffer(null);
         },
-      });
-      setResult({
-        ...result,
-        directions: fresh,
-        selectedRouteDurationSeconds: fresh.durationSeconds,
-        journeyTimeline: [],
-        narrationEvents: [],
-      });
+        (replacement) => {
+          setResult({
+            ...result,
+            directions: replacement,
+            selectedRouteDurationSeconds: replacement.durationSeconds,
+            journeyTimeline: [],
+            narrationEvents: [],
+          });
+        },
+      );
+      if (replacement.status === "stale") return;
+      const fresh = replacement.replacement;
       setRouteSummary({ distance: fresh.distance, duration: fresh.duration, steps: fresh.steps });
       spokenRef.current = new Set();
       lastStepIdxRef.current = -1;
@@ -1585,10 +1623,12 @@ function PlanPage() {
       });
       speak("Route updated.");
     } catch {
+      if (!isCurrentNavigationReplacement(navigationSessionRef.current, replacementToken)) return;
       capture(AnalyticsEvent.NavigationRerouteFailed, { route_title: result?.title });
       toast.error("Couldn't reroute. Continuing on current route.");
     } finally {
-      setRerouting(false);
+      if (finishCoordinatedNavigationReplacement(navigationAsyncRef.current, replacementToken))
+        setRerouting(false);
     }
   }
 
@@ -1601,6 +1641,8 @@ function PlanPage() {
     // Traffic-aware alternates — only while navigating, on route, not currently rerouting
     if (!result || !navOpen || rerouting || altCheckingRef.current) return;
     if (!progress?.onRoute) return;
+    const altCheckRequest = beginNavigationAlternateCalculation(navigationAsyncRef.current);
+    if (!altCheckRequest) return;
     altCheckingRef.current = true;
     try {
       const fresh = await recomputeFn({
@@ -1632,14 +1674,18 @@ function PlanPage() {
       // better route available — not for the same offer the user already declined.
       const minSavings = 120 + (dismissedSavingsSec ?? 0);
       if (best && best.savedSeconds > minSavings) {
-        setAltOffer(best);
+        if (publishNavigationAlternate(navigationAsyncRef.current, altCheckRequest, best))
+          setAltOffer(best);
       } else if (!best) {
-        setAltOffer(null);
+        if (clearNavigationAlternateForCalculation(navigationAsyncRef.current, altCheckRequest))
+          setAltOffer(null);
       }
     } catch {
       /* noop */
     } finally {
-      altCheckingRef.current = false;
+      if (finishNavigationAlternateCalculation(navigationAsyncRef.current, altCheckRequest)) {
+        altCheckingRef.current = false;
+      }
     }
   }
 
@@ -1653,13 +1699,29 @@ function PlanPage() {
       duration: `${Math.round(altOffer.durationSeconds / 60)} min`,
       steps: result.directions?.steps ?? [],
     };
-    setResult({
-      ...result,
-      directions: fresh,
-      selectedRouteDurationSeconds: fresh.durationSeconds,
-      journeyTimeline: [],
-      narrationEvents: [],
-    });
+    const accepted = acceptCurrentNavigationAlternate(
+      speechBoundaryRef.current,
+      navigationAsyncRef.current,
+      altOffer,
+      () => {
+        setRerouting(false);
+        altCheckingRef.current = false;
+        setAltOffer(null);
+      },
+      () => {
+        setResult({
+          ...result,
+          directions: fresh,
+          selectedRouteDurationSeconds: fresh.durationSeconds,
+          journeyTimeline: [],
+          narrationEvents: [],
+        });
+      },
+    );
+    if (!accepted) {
+      setAltOffer(null);
+      return;
+    }
     setRouteSummary({ distance: fresh.distance, duration: fresh.duration, steps: fresh.steps });
     spokenRef.current = new Set();
     lastStepIdxRef.current = -1;
@@ -1724,9 +1786,7 @@ function PlanPage() {
       spokenEventIds: narrationSpokenRef.current,
       lastNarrationAtSeconds: lastNarrationAtRef.current,
       manoeuvreImminent: !!stepProgress && stepProgress.distanceToManeuverMeters <= 700,
-      navigationSpeaking:
-        speechKindRef.current === "navigation" ||
-        (typeof window !== "undefined" && window.speechSynthesis?.speaking),
+      navigationSpeaking: speechBoundaryRef.current?.isSpeaking() ?? false,
       rerouting,
       navigationCertain: progress.onRoute,
     });
@@ -1766,10 +1826,23 @@ function PlanPage() {
       distanceMiles: summary.distanceMeters / 1609.344,
       discoveries: summary.discoveries,
     });
-    saveAchievementProgress(userId, achievementResult.progress);
-    setCompletionSummary(summary);
-    setUnlockedAchievements(achievementResult.unlocked);
-    setRouteCompleted(true);
+    const completed = applyTerminalNavigationTransition(
+      speechBoundaryRef.current,
+      navigationAsyncRef.current,
+      "completed",
+      () => {
+        setRerouting(false);
+        altCheckingRef.current = false;
+        setAltOffer(null);
+      },
+      () => {
+        saveAchievementProgress(userId, achievementResult.progress);
+        setCompletionSummary(summary);
+        setUnlockedAchievements(achievementResult.unlocked);
+        setRouteCompleted(true);
+      },
+    );
+    if (!completed) return;
     capture(AnalyticsEvent.RouteCompleted, {
       title: summary.title,
       scenic_score: summary.scenicScore,
@@ -1831,9 +1904,12 @@ function PlanPage() {
 
     setMapError(null);
     setPlanError(null);
-    setResult(null);
-    setRouteSummary(null);
-    setProgress(null);
+    applyNavigationTransition(navOpen ? "cleared" : "continue", () => {
+      setNavOpen(false);
+      setResult(null);
+      setRouteSummary(null);
+      setProgress(null);
+    });
     const m = overrides?.moods ?? moods;
     const t = overrides?.themes ?? themes;
     plan.mutate({ mood: m.join(", "), theme: t.join(", ") });
@@ -2524,7 +2600,11 @@ function PlanPage() {
           )}
 
           <div
-            className={`relative aspect-[5/4] overflow-hidden rounded-2xl border border-border bg-muted shadow-paper transition-all duration-700 ease-out motion-reduce:transition-none sm:aspect-[16/10] ${revealClass(!result || revealStage >= 4)}`}
+            className={`relative overflow-hidden rounded-2xl border border-border bg-muted shadow-paper transition-all duration-700 ease-out motion-reduce:transition-none ${
+              result
+                ? "h-[clamp(24rem,calc(62dvh-env(safe-area-inset-top)-env(safe-area-inset-bottom)),38rem)] sm:h-[clamp(28rem,52dvh,42rem)] lg:h-auto lg:aspect-[16/10]"
+                : "aspect-[5/4] sm:aspect-[16/10]"
+            } ${revealClass(!result || revealStage >= 4)}`}
           >
             {plan.isPending ? (
               <JourneyLoadingExperience stage={loadingStage} />
@@ -2692,7 +2772,7 @@ function PlanPage() {
           </div>
 
           {result && selectedRoute && budgetExplanation && (
-            <Dialog open={journeyIntroOpen} onOpenChange={setJourneyIntroOpen}>
+            <Dialog open={journeyIntroOpen} onOpenChange={setJourneyIntroductionOpen}>
               <DialogContent
                 className="flex max-h-[calc(100dvh-1.5rem)] flex-col gap-0 overflow-hidden border-primary/20 bg-background p-0 sm:max-w-2xl"
                 style={{
@@ -2782,26 +2862,28 @@ function PlanPage() {
                       </div>
                     </div>
                   )}
-                  <DialogFooter className="sticky bottom-0 -mx-6 -mb-6 gap-2 border-t border-border bg-background/95 px-6 pt-4 pb-[max(1rem,env(safe-area-inset-bottom))] backdrop-blur sm:-mx-9 sm:px-9 sm:gap-2">
-                    <Button variant="outline" onClick={() => setJourneyIntroOpen(false)}>
-                      Explore details
-                    </Button>
-                    <Button
-                      onClick={() => {
-                        setJourneyIntroOpen(false);
-                        openNav();
-                      }}
-                    >
-                      <Navigation className="mr-2 h-4 w-4" /> Begin journey
-                    </Button>
-                  </DialogFooter>
                 </div>
+                <DialogFooter className="sticky bottom-0 shrink-0 gap-2 border-t border-border bg-background/95 px-6 pt-4 pb-[max(1rem,env(safe-area-inset-bottom))] backdrop-blur sm:px-9 sm:gap-2">
+                  <Button variant="outline" onClick={() => setJourneyIntroductionOpen(false)}>
+                    {result.journeyTimeline.length > topDiscoveries.length
+                      ? `View all ${result.journeyTimeline.length} discoveries`
+                      : "Explore details"}
+                  </Button>
+                  <Button
+                    onClick={() => {
+                      setJourneyIntroductionOpen(false);
+                      openNav();
+                    }}
+                  >
+                    <Navigation className="mr-2 h-4 w-4" /> Begin journey
+                  </Button>
+                </DialogFooter>
               </DialogContent>
             </Dialog>
           )}
 
           {result && (
-            <Dialog open={navOpen} onOpenChange={setNavOpen}>
+            <Dialog open={navOpen} onOpenChange={setActiveNavigationOpen}>
               <DialogContent className="!max-w-none !w-screen !h-[100dvh] !left-0 !top-0 !translate-x-0 !translate-y-0 !rounded-none !p-0 !border-0 !gap-0 flex flex-col overflow-hidden">
                 <DialogHeader className="shrink-0 px-4 pt-4 pb-2 sm:px-6">
                   <DialogTitle className="break-words pr-10 font-serif text-base sm:text-xl">
@@ -2983,7 +3065,11 @@ function PlanPage() {
                             >
                               Continue without location
                             </Button>
-                            <Button size="sm" variant="ghost" onClick={() => setNavOpen(false)}>
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              onClick={() => setActiveNavigationOpen(false)}
+                            >
                               Go back
                             </Button>
                           </div>
@@ -3063,7 +3149,7 @@ function PlanPage() {
 
                     <button
                       type="button"
-                      onClick={() => setNavOpen(false)}
+                      onClick={() => setActiveNavigationOpen(false)}
                       style={{ top: "max(1rem, env(safe-area-inset-top))" }}
                       className="absolute right-4 inline-flex items-center gap-1.5 rounded-full bg-background/95 px-3 py-1.5 text-xs font-medium text-ink shadow-paper hover:border-destructive/50 border border-border"
                     >
@@ -3289,7 +3375,7 @@ function PlanPage() {
                         variant="ghost"
                         className="w-full"
                         onClick={() => {
-                          setNavOpen(false);
+                          setActiveNavigationOpen(false);
                           setRouteCompleted(false);
                           setCompletionSummary(null);
                         }}
@@ -3321,7 +3407,10 @@ function PlanPage() {
                   <Button
                     type="button"
                     variant="outline"
-                    onClick={() => setResult(null)}
+                    onClick={() => {
+                      if (navOpen) setActiveNavigationOpen(false);
+                      setResult(null);
+                    }}
                     disabled={save.isPending}
                     className="w-full sm:w-auto"
                   >

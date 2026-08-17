@@ -84,7 +84,7 @@ export function journeyEvidenceLine(input: JourneyNamingInput): string {
   const categoryCount = (needles: string[]) =>
     categories.filter((category) => includesAny(category, needles)).length;
   const numberWord = (count: number) =>
-    count === 1 ? "One" : count === 2 ? "Two" : count === 3 ? "Three" : String(count);
+    count === 1 ? "one" : count === 2 ? "two" : count === 3 ? "three" : String(count);
   const signal = (label: string, count: number) =>
     `${numberWord(count)} ${label} ${count === 1 ? "discovery" : "discoveries"}`;
 
@@ -135,6 +135,10 @@ export function journeyEvidenceLine(input: JourneyNamingInput): string {
   if (signals.length === 0) return "Measured road variety shaped this journey.";
   const shown = signals.slice(0, 3);
   const phrase =
-    shown.length === 1 ? shown[0] : `${shown.slice(0, -1).join(", ")} and ${shown.at(-1)}`;
-  return `${phrase} shaped this journey.`;
+    shown.length === 1
+      ? shown[0]
+      : shown.length === 2
+        ? `${shown[0]} and ${shown[1]}`
+        : `${shown.slice(0, -1).join(", ")}, and ${shown.at(-1)}`;
+  return `${phrase.charAt(0).toUpperCase()}${phrase.slice(1)} shaped this journey.`;
 }

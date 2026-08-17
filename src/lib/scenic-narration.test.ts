@@ -4,6 +4,7 @@ import {
   loadNarrationPreferences,
   selectNarrationEvent,
   selectSpeechVoice,
+  speechTuning,
 } from "./scenic-narration";
 
 const event = { identity: "palace", atSeconds: 900, text: "Approaching Palace." };
@@ -59,7 +60,7 @@ describe("voice and settings fallbacks", () => {
         { name: "Premium French", lang: "fr-FR", localService: true },
       ],
       "en-GB",
-      "calm",
+      "default",
     );
     expect(chosen?.name).toBe("Enhanced Local");
   });
@@ -69,5 +70,35 @@ describe("voice and settings fallbacks", () => {
     expect(loadNarrationPreferences({ getItem: () => "bad json", setItem: () => {} })).toEqual(
       DEFAULT_NARRATION_PREFERENCES,
     );
+  });
+
+  test("restores every valid stored profile and rejects an invalid profile", () => {
+    const storage = (voice: string) => ({
+      getItem: () => JSON.stringify({ mode: "highlights", voice, volume: 0.7 }),
+      setItem: () => {},
+    });
+    expect(loadNarrationPreferences(storage("calm")).voice).toBe("calm");
+    expect(loadNarrationPreferences(storage("warm")).voice).toBe("warm");
+    expect(loadNarrationPreferences(storage("robot")).voice).toBe("default");
+  });
+
+  test("all profiles expose audibly distinct tuning", () => {
+    expect(
+      new Set(["default", "calm", "warm"].map((id) => JSON.stringify(speechTuning(id as never))))
+        .size,
+    ).toBe(3);
+  });
+
+  test("falls back from British English to English, then device default", () => {
+    const american = { name: "US Local", lang: "en-US", localService: true };
+    expect(
+      selectSpeechVoice(
+        [american, { name: "French", lang: "fr-FR", default: true }],
+        "en-GB",
+        "default",
+      ),
+    ).toBe(american);
+    const deviceDefault = { name: "Device", lang: "fr-FR", default: true };
+    expect(selectSpeechVoice([deviceDefault], "en-GB", "default")).toBe(deviceDefault);
   });
 });

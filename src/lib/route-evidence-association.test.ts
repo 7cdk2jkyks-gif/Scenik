@@ -369,6 +369,7 @@ describe("candidate route evidence association", () => {
     });
     assert.equal(result.evidenceMatchedToGeometry, 0);
     assert.equal(result.evidenceMatchedThroughWaypoints, 1);
+    assert.deepEqual(result.matchedGeometryPlaces, []);
     assert.equal(result.evidence.natural, 1);
   });
 
@@ -1002,6 +1003,10 @@ describe("candidate route evidence association", () => {
     assert.equal(forward.status, "ANALYSED");
     assert.deepEqual(forward.evidence, reversed.evidence);
     assert.equal(forward.evidenceMatchedToGeometry, reversed.evidenceMatchedToGeometry);
+    assert.deepEqual(
+      forward.matchedGeometryPlaces.map(({ id }) => id).sort(),
+      reversed.matchedGeometryPlaces.map(({ id }) => id).sort(),
+    );
 
     const reversedGeometry = associateEvidenceWithRoute({
       encodedPolyline: encode([...points].reverse()),
@@ -1009,6 +1014,10 @@ describe("candidate route evidence association", () => {
       proximityMeters: 750,
     });
     assert.deepEqual(forward.evidence, reversedGeometry.evidence);
+    assert.deepEqual(
+      forward.matchedGeometryPlaces.map(({ id }) => id).sort(),
+      reversedGeometry.matchedGeometryPlaces.map(({ id }) => id).sort(),
+    );
   });
 
   it("analyses 70 entirely distant Places without spending exact comparisons", () => {
@@ -1176,5 +1185,202 @@ describe("candidate route evidence association", () => {
       proximityMeters: 750,
     });
     assert.equal(second.evidence.natural, 0);
+  });
+
+  it("projects evidence onto the nearest travelled position instead of a segment midpoint", () => {
+    const route = encode([
+      { lat: 0, lng: 0 },
+      { lat: 0, lng: 0.1 },
+    ]);
+    const quarter = associateEvidenceWithRoute({
+      encodedPolyline: route,
+      places: [place("quarter", 0.001, 0.025)],
+      proximityMeters: 750,
+    }).matchedGeometryPlaces[0];
+    const late = associateEvidenceWithRoute({
+      encodedPolyline: route,
+      places: [place("late", 0.001, 0.09)],
+      proximityMeters: 750,
+    }).matchedGeometryPlaces[0];
+    assert.ok(Math.abs(quarter.routeProgress - 0.25) < 0.002);
+    assert.ok(Math.abs(late.routeProgress - 0.9) < 0.002);
+    assert.ok(Number.isFinite(quarter.distanceToRouteMeters));
+  });
+
+  it("chooses the geometrically nearest parallel segment and the earliest equal retrace", () => {
+    const parallel = associateEvidenceWithRoute({
+      encodedPolyline: encode([
+        { lat: 0.005, lng: 0 },
+        { lat: 0.005, lng: 0.1 },
+        { lat: 0, lng: 0.1 },
+        { lat: 0, lng: 0 },
+      ]),
+      places: [place("parallel", 0.001, 0.075)],
+      proximityMeters: 750,
+    }).matchedGeometryPlaces[0];
+    assert.ok(parallel.routeProgress > 0.5);
+    assert.ok(parallel.distanceToRouteMeters < 150);
+
+    const retraced = associateEvidenceWithRoute({
+      encodedPolyline: encode([
+        { lat: 0, lng: 0 },
+        { lat: 0, lng: 0.1 },
+        { lat: 0, lng: 0 },
+      ]),
+      places: [place("retrace", 0.001, 0.025)],
+      proximityMeters: 750,
+    }).matchedGeometryPlaces[0];
+    assert.ok(Math.abs(retraced.routeProgress - 0.125) < 0.002);
+  });
+
+  it("uses nearest projected distance at a self-crossing rather than segment order", () => {
+    const crossing = associateEvidenceWithRoute({
+      encodedPolyline: encode([
+        { lat: -0.02, lng: -0.02 },
+        { lat: 0.02, lng: 0.02 },
+        { lat: 0.02, lng: -0.02 },
+        { lat: -0.02, lng: 0.02 },
+      ]),
+      places: [place("crossing", 0.002, -0.001)],
+      proximityMeters: 750,
+    }).matchedGeometryPlaces[0];
+    assert.ok(crossing.routeProgress > 0.6);
+    assert.ok(crossing.distanceToRouteMeters < 100);
+  });
+
+  it("uses cumulative segment length and clamps endpoint and repeated-point projections", () => {
+    const result = associateEvidenceWithRoute({
+      encodedPolyline: encode([
+        { lat: 0, lng: 0 },
+        { lat: 0, lng: 0 },
+        { lat: 0, lng: 0.01 },
+        { lat: 0, lng: 0.1 },
+      ]),
+      places: [place("unequal", 0.001, 0.055), place("endpoint", 0.001, 0.1)],
+      proximityMeters: 750,
+    });
+    const unequal = result.matchedGeometryPlaces.find(({ id }) => id === "unequal")!;
+    const endpoint = result.matchedGeometryPlaces.find(({ id }) => id === "endpoint")!;
+    assert.ok(Math.abs(unequal.routeProgress - 0.55) < 0.002);
+    assert.ok(Math.abs(endpoint.routeProgress - 1) < 0.002);
+    for (const match of result.matchedGeometryPlaces) {
+      assert.ok(Number.isFinite(match.routeProgress));
+      assert.ok(Number.isFinite(match.distanceToRouteMeters));
+      assert.ok(match.routeProgress >= 0 && match.routeProgress <= 1);
+    }
+  });
+
+  it("reverses chronology and projects safely across the dateline and at high latitude", () => {
+    const evidence = [place("early", 0.001, 0.02), place("late", 0.001, 0.08)];
+    const forward = associateEvidenceWithRoute({
+      encodedPolyline: encode([
+        { lat: 0, lng: 0 },
+        { lat: 0, lng: 0.1 },
+      ]),
+      places: evidence,
+      proximityMeters: 750,
+    });
+    const reversed = associateEvidenceWithRoute({
+      encodedPolyline: encode([
+        { lat: 0, lng: 0.1 },
+        { lat: 0, lng: 0 },
+      ]),
+      places: evidence,
+      proximityMeters: 750,
+    });
+    assert.ok(
+      forward.matchedGeometryPlaces[0].routeProgress <
+        forward.matchedGeometryPlaces[1].routeProgress,
+    );
+    assert.ok(
+      reversed.matchedGeometryPlaces[0].routeProgress >
+        reversed.matchedGeometryPlaces[1].routeProgress,
+    );
+
+    const dateline = associateEvidenceWithRoute({
+      encodedPolyline: encode([
+        { lat: 10, lng: 179.9 },
+        { lat: 10, lng: -179.9 },
+      ]),
+      places: [place("dateline-progress", 10.001, -179.95)],
+      proximityMeters: 750,
+    }).matchedGeometryPlaces[0];
+    const polar = associateEvidenceWithRoute({
+      encodedPolyline: encode([
+        { lat: 80, lng: 0 },
+        { lat: 80, lng: 0.1 },
+      ]),
+      places: [place("polar-progress", 80.0005, 0.075)],
+      proximityMeters: 750,
+    }).matchedGeometryPlaces[0];
+    assert.ok(Math.abs(dateline.routeProgress - 0.75) < 0.01);
+    assert.ok(Math.abs(polar.routeProgress - 0.75) < 0.02);
+    assert.ok(Number.isFinite(dateline.distanceToRouteMeters));
+    assert.ok(Number.isFinite(polar.distanceToRouteMeters));
+  });
+
+  it("keeps the 750 metre projection threshold inclusive", () => {
+    const origin = { lat: 0, lng: 0.05 };
+    const onBoundary = destinationPoint(origin, 0, 750);
+    const outside = destinationPoint(origin, 0, 750.01);
+    const result = associateEvidenceWithRoute({
+      encodedPolyline: encode([
+        { lat: 0, lng: 0 },
+        { lat: 0, lng: 0.1 },
+      ]),
+      places: [
+        place("boundary", onBoundary.lat, onBoundary.lng),
+        place("outside", outside.lat, outside.lng),
+      ],
+      proximityMeters: 750,
+    });
+    assert.deepEqual(
+      result.matchedGeometryPlaces.map(({ id }) => id),
+      ["boundary"],
+    );
+  });
+
+  it("isolates candidate-local fields when candidates reuse the exact same Place object", () => {
+    const shared = place("shared", 0, 0.025);
+    shared.types.push("park");
+    const sourceSnapshot = structuredClone(shared);
+    const first = associateEvidenceWithRoute({
+      encodedPolyline: encode([
+        { lat: 0, lng: 0 },
+        { lat: 0, lng: 0.1 },
+      ]),
+      places: [shared],
+      proximityMeters: 750,
+    });
+    const firstSnapshot = structuredClone(first.matchedGeometryPlaces[0]);
+    const second = associateEvidenceWithRoute({
+      encodedPolyline: encode([
+        { lat: 0.004, lng: -0.1 },
+        { lat: 0.004, lng: 0.1 },
+      ]),
+      places: [shared],
+      proximityMeters: 750,
+    });
+    assert.deepEqual(shared, sourceSnapshot);
+    assert.deepEqual(first.matchedGeometryPlaces[0], firstSnapshot);
+    assert.notEqual(firstSnapshot.routeProgress, second.matchedGeometryPlaces[0].routeProgress);
+    assert.notEqual(
+      firstSnapshot.distanceToRouteMeters,
+      second.matchedGeometryPlaces[0].distanceToRouteMeters,
+    );
+    first.matchedGeometryPlaces[0].routeProgress = 1;
+    first.matchedGeometryPlaces[0].types.push("mutated");
+    assert.deepEqual(shared, sourceSnapshot);
+    assert.deepEqual(second.matchedGeometryPlaces[0].types, sourceSnapshot.types);
+
+    const repeatedSecond = associateEvidenceWithRoute({
+      encodedPolyline: encode([
+        { lat: 0.004, lng: -0.1 },
+        { lat: 0.004, lng: 0.1 },
+      ]),
+      places: [shared],
+      proximityMeters: 750,
+    });
+    assert.deepEqual(repeatedSecond.matchedGeometryPlaces, second.matchedGeometryPlaces);
   });
 });
