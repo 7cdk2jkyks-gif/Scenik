@@ -5,6 +5,7 @@ import {
   corridorSampleCount,
   evidenceForRoute,
   haversineDistanceMeters,
+  isValidLatLng,
   meaningfulPlaceDisplayName,
   explorationLimits,
   planScenicWaypoint,
@@ -157,6 +158,120 @@ describe("scenic waypoint planning", () => {
     );
     assert.equal(samples.length, 3);
     assert.ok(samples.every((sample) => sample.lng > 0 && sample.lng < 4));
+  });
+
+  it("samples both antimeridian directions over the shortest wrapped longitude path", () => {
+    const eastbound = routeCorridorSamples({ lat: 0, lng: 179 }, { lat: 0, lng: -179 }, [], 3);
+    const westbound = routeCorridorSamples({ lat: 0, lng: -179 }, { lat: 0, lng: 179 }, [], 3);
+    assert.deepEqual(eastbound, [
+      { lat: 0, lng: 179.5 },
+      { lat: 0, lng: -180 },
+      { lat: 0, lng: -179.5 },
+    ]);
+    assert.deepEqual(westbound, [...eastbound].reverse());
+    assert.equal(
+      eastbound.some((sample) => Math.abs(sample.lng) < 170),
+      false,
+    );
+    assert.deepEqual(routeMidpoint({ lat: 0, lng: 179 }, { lat: 0, lng: -179 }, []), {
+      lat: 0,
+      lng: -180,
+    });
+  });
+
+  it("retains equivalent samples for ordinary implicit and explicit provider segments", () => {
+    const implicit = routeCorridorSamples(
+      { lat: 0, lng: 0 },
+      { lat: 0, lng: 4 },
+      [
+        { endLat: 0, endLng: 1 },
+        { endLat: 0, endLng: 2 },
+        { endLat: 0, endLng: 3 },
+      ],
+      3,
+    );
+    const explicit = routeCorridorSamples(
+      { lat: 0, lng: 0 },
+      { lat: 0, lng: 4 },
+      [
+        { startLat: 0, startLng: 0, endLat: 0, endLng: 1 },
+        { startLat: 0, startLng: 1, endLat: 0, endLng: 2 },
+        { startLat: 0, startLng: 2, endLat: 0, endLng: 3 },
+        { startLat: 0, startLng: 3, endLat: 0, endLng: 4 },
+      ],
+      3,
+    );
+    assert.deepEqual(explicit, implicit);
+  });
+
+  it("keeps wrapped near-pole samples finite, bounded and chronological", () => {
+    const samples = routeCorridorSamples(
+      { lat: 89.9, lng: 179.5 },
+      { lat: 89.8, lng: -179.5 },
+      [],
+      3,
+    );
+    assert.equal(samples.length, 3);
+    assert.ok(samples.every(isValidLatLng));
+    assert.ok(samples.every((sample) => Math.abs(sample.lng) >= 179.5));
+    assert.ok(samples[0].lat > samples[1].lat && samples[1].lat > samples[2].lat);
+  });
+
+  it("rejects malformed coordinates and never bridges an invalid provider segment", () => {
+    for (const coordinate of [
+      null,
+      {},
+      { lat: 0 },
+      { lng: 0 },
+      { lat: "0", lng: 0 },
+      { lat: Number.NaN, lng: 0 },
+      { lat: Number.POSITIVE_INFINITY, lng: 0 },
+      { lat: 90.0001, lng: 0 },
+      { lat: -90.0001, lng: 0 },
+      { lat: 0, lng: 180.0001 },
+      { lat: 0, lng: -180.0001 },
+    ])
+      assert.equal(isValidLatLng(coordinate), false);
+    for (const coordinate of [
+      { lat: -90, lng: -180 },
+      { lat: 0, lng: 0 },
+      { lat: 90, lng: 180 },
+    ])
+      assert.equal(isValidLatLng(coordinate), true);
+
+    assert.deepEqual(
+      routeCorridorSamples(
+        { lat: 0, lng: 0 },
+        { lat: 0, lng: 10 },
+        [
+          { endLat: 0, endLng: 1 },
+          { endLat: 100, endLng: 5 },
+          { endLat: 0, endLng: 9 },
+        ],
+        3,
+      ),
+      [
+        { lat: 0, lng: 0.25 },
+        { lat: 0, lng: 0.5 },
+        { lat: 0, lng: 0.75 },
+      ],
+    );
+  });
+
+  it("ignores exact duplicates and repeated zero-length segments", () => {
+    const samples = routeCorridorSamples(
+      { lat: 0, lng: 0 },
+      { lat: 0, lng: 2 },
+      [
+        { endLat: 0, endLng: 0 },
+        { endLat: 0, endLng: 1 },
+        { endLat: 0, endLng: 1 },
+      ],
+      3,
+    );
+    assert.equal(samples.length, 3);
+    assert.equal(new Set(samples.map((sample) => `${sample.lat}:${sample.lng}`)).size, 3);
+    assert.deepEqual(routeCorridorSamples({ lat: 1, lng: 1 }, { lat: 1, lng: 1 }, [], 3), []);
   });
 
   it("expands bounded exploration with the time allowance", () => {

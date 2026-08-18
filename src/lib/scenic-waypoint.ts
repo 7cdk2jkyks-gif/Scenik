@@ -1,5 +1,34 @@
 export type LatLng = { lat: number; lng: number };
 
+export function isValidLatLng(value: unknown): value is LatLng {
+  if (!value || typeof value !== "object") return false;
+  const coordinate = value as { lat?: unknown; lng?: unknown };
+  return (
+    typeof coordinate.lat === "number" &&
+    Number.isFinite(coordinate.lat) &&
+    coordinate.lat >= -90 &&
+    coordinate.lat <= 90 &&
+    typeof coordinate.lng === "number" &&
+    Number.isFinite(coordinate.lng) &&
+    coordinate.lng >= -180 &&
+    coordinate.lng <= 180
+  );
+}
+
+function normalizeGeneratedLongitude(longitude: number): number {
+  // Use -180 as the single deterministic representation of the antimeridian.
+  const normalized = ((((longitude + 180) % 360) + 360) % 360) - 180;
+  return Object.is(normalized, -0) ? 0 : normalized;
+}
+
+function interpolateRouteCoordinate(from: LatLng, to: LatLng, fraction: number): LatLng {
+  const wrappedLongitudeDelta = ((((to.lng - from.lng + 540) % 360) + 360) % 360) - 180;
+  return {
+    lat: from.lat + (to.lat - from.lat) * fraction,
+    lng: normalizeGeneratedLongitude(from.lng + wrappedLongitudeDelta * fraction),
+  };
+}
+
 export type ScenicPlace = LatLng & {
   id: string;
   primaryType: string;
@@ -163,7 +192,7 @@ export function haversineDistanceMeters(a: LatLng, b: LatLng): number {
   const lat1 = radians(a.lat);
   const lat2 = radians(b.lat);
   const value = Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) ** 2;
-  return 6_371_000 * 2 * Math.asin(Math.sqrt(value));
+  return 6_371_000 * 2 * Math.asin(Math.sqrt(Math.min(1, Math.max(0, value))));
 }
 
 export function routeMidpoint(
@@ -181,23 +210,53 @@ export function routeMidpoint(
     travelled += step.distanceMeters;
     if (travelled >= total / 2) return { lat: step.endLat!, lng: step.endLng! };
   }
-  return { lat: (start.lat + end.lat) / 2, lng: (start.lng + end.lng) / 2 };
+  return interpolateRouteCoordinate(start, end, 0.5);
 }
 
-function routePoints(
+function routeSegments(
   start: LatLng,
   end: LatLng,
-  steps: Array<{ endLat?: number; endLng?: number }>,
-) {
-  return [
-    start,
-    ...steps.flatMap((step) =>
-      Number.isFinite(step.endLat) && Number.isFinite(step.endLng)
-        ? [{ lat: step.endLat!, lng: step.endLng! }]
-        : [],
-    ),
-    end,
-  ];
+  steps: Array<{
+    startLat?: number;
+    startLng?: number;
+    endLat?: number;
+    endLng?: number;
+  }>,
+): Array<{ from: LatLng; to: LatLng; length: number }> {
+  if (!isValidLatLng(start) || !isValidLatLng(end)) return [];
+  if (steps.length === 0) {
+    const length = haversineDistanceMeters(start, end);
+    return length > 0 ? [{ from: start, to: end, length }] : [];
+  }
+  const segments: Array<{ from: LatLng; to: LatLng; length: number }> = [];
+  let previous: LatLng | null = start;
+  for (const step of steps) {
+    const explicitStart = { lat: step.startLat, lng: step.startLng };
+    const explicitEnd = { lat: step.endLat, lng: step.endLng };
+    const hasExplicitStart = step.startLat !== undefined || step.startLng !== undefined;
+    if (hasExplicitStart) {
+      if (isValidLatLng(explicitStart) && isValidLatLng(explicitEnd)) {
+        const length = haversineDistanceMeters(explicitStart, explicitEnd);
+        if (length > 0) segments.push({ from: explicitStart, to: explicitEnd, length });
+        previous = explicitEnd;
+      } else {
+        previous = null;
+      }
+      continue;
+    }
+    if (previous && isValidLatLng(explicitEnd)) {
+      const length = haversineDistanceMeters(previous, explicitEnd);
+      if (length > 0) segments.push({ from: previous, to: explicitEnd, length });
+      previous = explicitEnd;
+    } else {
+      previous = null;
+    }
+  }
+  if (previous) {
+    const length = haversineDistanceMeters(previous, end);
+    if (length > 0) segments.push({ from: previous, to: end, length });
+  }
+  return segments;
 }
 
 export function corridorSampleCount(distanceMeters: number): 3 | 5 | 7 {
@@ -207,16 +266,16 @@ export function corridorSampleCount(distanceMeters: number): 3 | 5 | 7 {
 export function routeCorridorSamples(
   start: LatLng,
   end: LatLng,
-  steps: Array<{ endLat?: number; endLng?: number }>,
+  steps: Array<{
+    startLat?: number;
+    startLng?: number;
+    endLat?: number;
+    endLng?: number;
+  }>,
   count: number,
 ): LatLng[] {
-  const points = routePoints(start, end, steps);
-  if (points.length < 2) return [];
-  const segments = points.slice(1).map((point, index) => ({
-    from: points[index],
-    to: point,
-    length: haversineDistanceMeters(points[index], point),
-  }));
+  const segments = routeSegments(start, end, steps);
+  if (segments.length === 0) return [];
   const total = segments.reduce((sum, segment) => sum + segment.length, 0);
   if (total <= 0) return [];
   return Array.from({ length: Math.max(1, count) }, (_, index) => {
@@ -225,14 +284,11 @@ export function routeCorridorSamples(
     for (const segment of segments) {
       if (traversed + segment.length >= target) {
         const fraction = segment.length ? (target - traversed) / segment.length : 0;
-        return {
-          lat: segment.from.lat + (segment.to.lat - segment.from.lat) * fraction,
-          lng: segment.from.lng + (segment.to.lng - segment.from.lng) * fraction,
-        };
+        return interpolateRouteCoordinate(segment.from, segment.to, fraction);
       }
       traversed += segment.length;
     }
-    return points.at(-1)!;
+    return segments.at(-1)!.to;
   });
 }
 

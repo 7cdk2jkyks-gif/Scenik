@@ -3,6 +3,12 @@ import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
 import { z } from "zod";
 import { verifiedDiscoveryDescription } from "./journey-timeline";
 import type { RouteGenerationDiagnostic } from "./route-generation-diagnostics";
+import {
+  collectZeroAllowanceJourneyEvidence,
+  journeyGenerationPath,
+  journeyMode,
+  normalizeJourneyPreferences,
+} from "./journey-mode";
 
 const PlanInput = z.object({
   start_address: z.string().min(2),
@@ -81,8 +87,15 @@ export const planScenicRoute = createServerFn({ method: "POST" })
           ...data.stops.map((s) => geocodeAddress(s)),
         ]);
 
-        const moodIn = data.mood.trim();
-        const themeIn = data.theme.trim();
+        const normalizedPreferences = normalizeJourneyPreferences({
+          mood: data.mood,
+          theme: data.theme,
+          extraMinutes: data.extra_minutes,
+        });
+        const moodIn = normalizedPreferences.mood;
+        const themeIn = normalizedPreferences.theme;
+        const requestJourneyMode = journeyMode(normalizedPreferences);
+        const generationPath = journeyGenerationPath(normalizedPreferences);
         const waypoints = stops.map((stop) => ({
           name: stop.formatted,
           lat: stop.lat,
@@ -332,7 +345,43 @@ export const planScenicRoute = createServerFn({ method: "POST" })
           userRatingCount?: number;
           photoUrl?: string;
         }> = [];
-        if (data.extra_minutes > 0) {
+        if (generationPath === "zero-allowance-personalised") {
+          try {
+            const { corridorSampleCount, routeCorridorSamples, selectedPlaceTypes } =
+              await import("./scenic-waypoint");
+            const moods = moodIn
+              .split(",")
+              .map((value) => value.trim())
+              .filter(Boolean);
+            const themes = themeIn
+              .split(",")
+              .map((value) => value.trim())
+              .filter(Boolean);
+            const candidateCentres = routeCorridorSamples(
+              routeInput.origin,
+              routeInput.destination,
+              baseline.steps,
+              corridorSampleCount(baseline.distanceMeters),
+            );
+            const evidence = await collectZeroAllowanceJourneyEvidence({
+              preferences: normalizedPreferences,
+              candidateCentres,
+              radiusMeters: 1_000,
+              search: (center) =>
+                searchNearbyScenicPlaces({
+                  center,
+                  radiusMeters: 1_000,
+                  includedTypes: selectedPlaceTypes(moods, themes),
+                }),
+              evidenceCap: 70,
+            });
+            placesCallCount += evidence.callCount;
+            evidencePlaces = evidence.places;
+          } catch {
+            rejectionReasons.add("ZERO_ALLOWANCE_EVIDENCE_UNAVAILABLE");
+          }
+        }
+        if (generationPath === "scenic-exploration") {
           try {
             const {
               candidateFitsTimeBudget,
@@ -1461,7 +1510,7 @@ export const planScenicRoute = createServerFn({ method: "POST" })
           start: { address: start.formatted, lat: start.lat, lng: start.lng },
           end: { address: end.formatted, lat: end.lat, lng: end.lng },
           mood: moodIn || "Open",
-          theme: themeIn || "Direct route",
+          theme: themeIn || (requestJourneyMode === "fastest" ? "Direct route" : "Open"),
           extra_minutes: data.extra_minutes,
           fastestRouteDurationSeconds: selection.fastestDurationSeconds,
           selectedRouteDurationSeconds: directions.durationSeconds,

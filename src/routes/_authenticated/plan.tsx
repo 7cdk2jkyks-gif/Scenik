@@ -107,6 +107,16 @@ import { capture } from "@/lib/analytics/client";
 import { AnalyticsEvent } from "@/lib/analytics/events";
 import { useOnlineStatus } from "@/hooks/useOnlineStatus";
 import { saveLastPlan, loadLastPlan } from "@/lib/offline-cache";
+import {
+  journeyAllowancePresentation,
+  journeyCtaLabel,
+  journeyGenerationPath,
+  journeyMode,
+  journeyRequestIdentity,
+  JourneyRequestPublicationCoordinator,
+  normalizeJourneyPreferences,
+  type JourneyRequestToken,
+} from "@/lib/journey-mode";
 import { OfflineBanner } from "@/components/OfflineBanner";
 import { getFastLocation } from "@/lib/geolocation";
 import { getPlatform, isNativePlatform } from "@/lib/native";
@@ -661,7 +671,19 @@ function PlanPage() {
   const [moods, setMoods] = useState<string[]>([]);
   const [themes, setThemes] = useState<string[]>([]);
   const [extra, setExtra] = useState(30);
+  const [planPending, setPlanPending] = useState(false);
+  const requestCoordinatorRef = useRef<JourneyRequestPublicationCoordinator | null>(null);
+  if (!requestCoordinatorRef.current)
+    requestCoordinatorRef.current = new JourneyRequestPublicationCoordinator();
+  const currentJourneyMode = journeyMode({
+    mood: moods.join(", "),
+    theme: themes.join(", "),
+    extraMinutes: extra,
+  });
   const [result, setResult] = useState<PlanResult | null>(null);
+  const [resultGenerationPath, setResultGenerationPath] = useState<
+    ReturnType<typeof journeyGenerationPath> | undefined
+  >();
   const [journeyIntroOpen, setJourneyIntroOpen] = useState(false);
   const [revealStage, setRevealStage] = useState(JOURNEY_REVEAL_STAGE_COUNT - 1);
   const selectedRoute = useMemo(() => selectedRoutePresentation(result), [result]);
@@ -1232,18 +1254,27 @@ function PlanPage() {
   };
 
   const plan = useMutation({
-    mutationFn: async (vars?: { mood?: string; theme?: string }) => {
+    mutationFn: async (submission: {
+      token: JourneyRequestToken;
+      fingerprint: string;
+      start: string;
+      end: string;
+      stops: string[];
+      mood: string;
+      theme: string;
+      extraMinutes: number;
+    }) => {
       const request = planFn({
         data: {
-          start_address: start,
-          end_address: end,
-          mood: vars?.mood ?? moods.join(", "),
-          theme: vars?.theme ?? themes.join(", "),
-          extra_minutes: extra,
-          stops: stops.map((s) => s.trim()).filter((s) => s.length >= 2),
+          start_address: submission.start,
+          end_address: submission.end,
+          mood: submission.mood,
+          theme: submission.theme,
+          extra_minutes: submission.extraMinutes,
+          stops: submission.stops,
         },
       });
-      return Promise.race([
+      const result = await Promise.race([
         request,
         new Promise<never>((_, reject) =>
           setTimeout(
@@ -1252,100 +1283,171 @@ function PlanPage() {
           ),
         ),
       ]);
+      return result;
     },
-    onSuccess: (r, vars) => {
-      void playHaptic("success");
-      console.log("[Route] API response status: ok");
-      setPlanError(null);
-      setRouteSummary(
-        r.directions
-          ? {
-              distance: r.directions.distance,
-              duration: r.directions.duration,
-              steps: r.directions.steps,
-            }
-          : null,
-      );
-      setProgress(null);
-      setResult(r);
-      setJourneyIntroductionOpen(true);
-      setRouteCompleted(false);
-      spokenRef.current = new Set();
-      setWaypointFact(null);
-      capture(AnalyticsEvent.RouteGenerated, {
-        title: r.title,
-        scenic_score: r.scenic_score,
-        mood: r.mood,
-        theme: r.theme,
-        moods_selected: (vars?.mood ?? moods.join(", "))
-          .split(",")
-          .map((s) => s.trim())
-          .filter(Boolean),
-        themes_selected: (vars?.theme ?? themes.join(", "))
-          .split(",")
-          .map((s) => s.trim())
-          .filter(Boolean),
-        extra_minutes: r.extra_minutes,
-        waypoint_count: r.waypoints.length,
-        stops_count: stops.filter((s) => s.trim().length >= 2).length,
-        distance_meters: r.directions?.distanceMeters ?? null,
-        duration_seconds: r.directions?.durationSeconds ?? null,
-        distance_label: r.directions?.distance ?? null,
-        duration_label: r.directions?.duration ?? null,
-        route_type:
-          !vars?.mood && !vars?.theme && moods.length === 0 && themes.length === 0
-            ? "fastest"
-            : "scenic",
-      });
-      requestAnimationFrame(() => {
-        resultRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    onSuccess: (r, submission) => {
+      requestCoordinatorRef.current?.publishSuccess({
+        token: submission.token,
+        fingerprint: submission.fingerprint,
+        publications: {
+          publishSuccessState: () => {
+            void playHaptic("success");
+            console.log("[Route] API response status: ok");
+            setPlanError(null);
+            setProgress(null);
+            setRouteCompleted(false);
+            spokenRef.current = new Set();
+            setWaypointFact(null);
+          },
+          publishPresentation: () => {
+            setRouteSummary(
+              r.directions
+                ? {
+                    distance: r.directions.distance,
+                    duration: r.directions.duration,
+                    steps: r.directions.steps,
+                  }
+                : null,
+            );
+            setResultGenerationPath(
+              journeyGenerationPath({
+                mood: submission.mood,
+                theme: submission.theme,
+                extraMinutes: submission.extraMinutes,
+              }),
+            );
+          },
+          publishDiagnostics: () => setResult(r),
+          openIntroduction: () => setJourneyIntroductionOpen(true),
+          publishAnalytics: () =>
+            capture(AnalyticsEvent.RouteGenerated, {
+              title: r.title,
+              scenic_score: r.scenic_score,
+              mood: r.mood,
+              theme: r.theme,
+              moods_selected: submission.mood
+                .split(",")
+                .map((s) => s.trim())
+                .filter(Boolean),
+              themes_selected: submission.theme
+                .split(",")
+                .map((s) => s.trim())
+                .filter(Boolean),
+              extra_minutes: r.extra_minutes,
+              waypoint_count: r.waypoints.length,
+              stops_count: submission.stops.length,
+              distance_meters: r.directions?.distanceMeters ?? null,
+              duration_seconds: r.directions?.durationSeconds ?? null,
+              distance_label: r.directions?.distance ?? null,
+              duration_label: r.directions?.duration ?? null,
+              route_type: journeyMode({
+                mood: submission.mood,
+                theme: submission.theme,
+                extraMinutes: submission.extraMinutes,
+              }),
+            }),
+          scroll: () => resultRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }),
+        },
+        requestFrame:
+          typeof window.requestAnimationFrame === "function"
+            ? window.requestAnimationFrame.bind(window)
+            : undefined,
+        cancelFrame:
+          typeof window.cancelAnimationFrame === "function"
+            ? window.cancelAnimationFrame.bind(window)
+            : undefined,
       });
     },
 
-    onError: async (e: Error) => {
+    onError: async (e: Error, submission) => {
+      const ownsRequest = () =>
+        requestCoordinatorRef.current?.isCurrent(submission.token, submission.fingerprint) ?? false;
+      if (!ownsRequest()) return;
       console.log("[Route] API response status: error");
       console.log("[Route] exact safe error:", e.message);
+      const publishFailure = (publications: {
+        publishError: () => void;
+        publishToast: () => void;
+        publishAnalytics?: () => void;
+      }) =>
+        requestCoordinatorRef.current?.publishFailure({
+          token: submission.token,
+          fingerprint: submission.fingerprint,
+          publications,
+        });
       if (/FREE_LIMIT_REACHED/.test(e.message)) {
-        capture(AnalyticsEvent.FreeLimitReached, { source: "plan" });
-        setPlanError(
-          "You've used all 3 free routes this month. Upgrade to Premium for unlimited routes.",
-        );
-        toast.error("Monthly route limit reached.", {
-          action: { label: "Upgrade", onClick: () => navigate({ to: "/pricing" }) },
+        publishFailure({
+          publishAnalytics: () => capture(AnalyticsEvent.FreeLimitReached, { source: "plan" }),
+          publishError: () =>
+            setPlanError(
+              "You've used all 3 free routes this month. Upgrade to Premium for unlimited routes.",
+            ),
+          publishToast: () =>
+            toast.error("Monthly route limit reached.", {
+              action: { label: "Upgrade", onClick: () => navigate({ to: "/pricing" }) },
+            }),
         });
         return;
       }
       if (/PREMIUM_REQUIRED:multi_stop/.test(e.message)) {
-        capture(AnalyticsEvent.PremiumGateHit, { feature: "multi_stop" });
-        setPlanError("Multi-stop planning is a Premium feature.");
-        toast.error("Multi-stop requires Premium.", {
-          action: { label: "Upgrade", onClick: () => navigate({ to: "/pricing" }) },
+        publishFailure({
+          publishAnalytics: () => capture(AnalyticsEvent.PremiumGateHit, { feature: "multi_stop" }),
+          publishError: () => setPlanError("Multi-stop planning is a Premium feature."),
+          publishToast: () =>
+            toast.error("Multi-stop requires Premium.", {
+              action: { label: "Upgrade", onClick: () => navigate({ to: "/pricing" }) },
+            }),
         });
         return;
       }
       if (/Unauthorized|No authorization/i.test(e.message)) {
         const { data: refreshed } = await supabase.auth.refreshSession();
+        if (!ownsRequest()) return;
         if (refreshed.session) {
-          setPlanError("Connection hiccup — please tap the button again.");
-          toast.error("Connection hiccup — please try again.");
+          publishFailure({
+            publishError: () => setPlanError("Connection hiccup — please tap the button again."),
+            publishToast: () => toast.error("Connection hiccup — please try again."),
+          });
           return;
         }
-        setPlanError("Your session expired. Please sign in again.");
-        toast.error("Your session expired. Please sign in again.");
-        navigate({ to: "/auth", replace: true });
+        publishFailure({
+          publishError: () => setPlanError("Your session expired. Please sign in again."),
+          publishToast: () => {
+            toast.error("Your session expired. Please sign in again.");
+            navigate({ to: "/auth", replace: true });
+          },
+        });
         return;
       }
-      capture(AnalyticsEvent.RouteGenerationFailed, {
-        error_code: e.message.split(":")[0] || "UNKNOWN",
-        message: e.message,
+      publishFailure({
+        publishAnalytics: () =>
+          capture(AnalyticsEvent.RouteGenerationFailed, {
+            error_code: e.message.split(":")[0] || "UNKNOWN",
+            message: e.message,
+          }),
+        publishError: () => setPlanError(friendlyError(e.message)),
+        publishToast: () => toast.error("Route request failed."),
       });
-      setPlanError(friendlyError(e.message));
-      toast.error("Route request failed.");
+    },
+    onSettled: (_result, _error, submission) => {
+      requestCoordinatorRef.current?.publishSettled(
+        submission.token,
+        () => setPlanPending(false),
+        submission.fingerprint,
+      );
     },
   });
 
   useEffect(() => {
-    if (!plan.isPending) {
+    const coordinator = requestCoordinatorRef.current!;
+    coordinator.activate();
+    return () => {
+      coordinator.dispose();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!planPending) {
       setLoadingStage(0);
       return;
     }
@@ -1357,7 +1459,7 @@ function PlanPage() {
       1_400,
     );
     return () => window.clearInterval(timer);
-  }, [plan.isPending]);
+  }, [planPending]);
 
   useEffect(() => {
     if (!selectedRouteIdentity) return;
@@ -1885,7 +1987,7 @@ function PlanPage() {
     }
   }, [navOpen]);
 
-  async function runPlan(overrides?: { moods?: string[]; themes?: string[] }) {
+  async function runPlan(overrides?: { moods?: string[]; themes?: string[]; extra?: number }) {
     console.log("[Route] request started");
     console.log(
       "[Route] location present:",
@@ -1907,12 +2009,36 @@ function PlanPage() {
     applyNavigationTransition(navOpen ? "cleared" : "continue", () => {
       setNavOpen(false);
       setResult(null);
+      setResultGenerationPath(undefined);
       setRouteSummary(null);
       setProgress(null);
     });
     const m = overrides?.moods ?? moods;
     const t = overrides?.themes ?? themes;
-    plan.mutate({ mood: m.join(", "), theme: t.join(", ") });
+    const submittedPreferences = normalizeJourneyPreferences({
+      mood: m.join(", "),
+      theme: t.join(", "),
+      extraMinutes: overrides?.extra ?? extra,
+    });
+    const submittedStops = stops.map((s) => s.trim()).filter((s) => s.length >= 2);
+    const fingerprint = journeyRequestIdentity({
+      origin: start,
+      destination: end,
+      stops: submittedStops,
+      ...submittedPreferences,
+    });
+    const token = requestCoordinatorRef.current!.begin(fingerprint);
+    setPlanPending(true);
+    plan.mutate({
+      token,
+      fingerprint,
+      start: start.trim(),
+      end: end.trim(),
+      stops: submittedStops,
+      mood: submittedPreferences.mood,
+      theme: submittedPreferences.theme,
+      extraMinutes: submittedPreferences.extraMinutes,
+    });
   }
 
   async function onSubmit(e: React.FormEvent) {
@@ -1927,10 +2053,11 @@ function PlanPage() {
     const t = [themePool[Math.floor(Math.random() * themePool.length)]];
     setMoods(m);
     setThemes(t);
-    setExtra((prev) => (prev === 0 ? 30 : prev));
+    const surpriseExtra = extra === 0 ? 30 : extra;
+    setExtra(surpriseExtra);
     const label = [m[0], t[0]].filter(Boolean).join(" · ");
     toast.success(`Surprise: ${label}`);
-    runPlan({ moods: m, themes: t });
+    runPlan({ moods: m, themes: t, extra: surpriseExtra });
   }
 
   const points = result
@@ -2270,22 +2397,29 @@ function PlanPage() {
               />
             </div>
 
-            <Button type="submit" className="w-full shadow-stamp" disabled={plan.isPending}>
-              {plan.isPending ? (
+            <Button type="submit" className="w-full shadow-stamp" disabled={planPending}>
+              {planPending ? (
                 <>
                   <Loader2 className="mr-2 h-4 w-4 animate-spin motion-reduce:animate-none" />
                   {LOADING_STAGES[loadingStage]}
                 </>
-              ) : moods.length === 0 && themes.length === 0 ? (
+              ) : currentJourneyMode === "fastest" ? (
                 <>
-                  <Navigation className="mr-2 h-4 w-4" /> Get fastest route
+                  <Navigation className="mr-2 h-4 w-4" />
+                  {journeyCtaLabel({ mood: "", theme: "", extraMinutes: 0 })}
                 </>
               ) : (
-                <>Plan my drive</>
+                <>
+                  {journeyCtaLabel({
+                    mood: moods.join(", "),
+                    theme: themes.join(", "),
+                    extraMinutes: extra,
+                  })}
+                </>
               )}
             </Button>
 
-            {planError && !plan.isError && (
+            {planError && (
               <p
                 role="alert"
                 className="rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm leading-snug text-destructive"
@@ -2297,7 +2431,7 @@ function PlanPage() {
               type="button"
               variant="outline"
               className="w-full"
-              disabled={plan.isPending}
+              disabled={planPending}
               onClick={surpriseMe}
             >
               Surprise me
@@ -2314,7 +2448,8 @@ function PlanPage() {
               {saveSearchMut.isPending ? "Saving search…" : "Save this search"}
             </Button>
             <p className="text-center text-[11px] text-muted-foreground">
-              Mood and theme are both optional — pick one, both, or skip them for the fastest route.
+              Mood, theme and extra time are optional — leave all three neutral for the fastest
+              route.
             </p>
           </form>
 
@@ -2390,8 +2525,15 @@ function PlanPage() {
                         {s.start_address} → {s.end_address}
                       </div>
                       <div className="mt-0.5 truncate text-[10px] text-muted-foreground">
-                        {[s.mood, s.theme].filter(Boolean).join(" · ") || "Fastest"} · +
-                        {s.extra_minutes}m
+                        {[s.mood, s.theme].filter(Boolean).join(" · ") ||
+                          (journeyMode({
+                            mood: s.mood,
+                            theme: s.theme,
+                            extraMinutes: s.extra_minutes,
+                          }) === "fastest"
+                            ? "Fastest"
+                            : "Scenic")}{" "}
+                        · +{s.extra_minutes}m
                       </div>
                     </button>
                     <button
@@ -2606,18 +2748,16 @@ function PlanPage() {
                 : "aspect-[5/4] sm:aspect-[16/10]"
             } ${revealClass(!result || revealStage >= 4)}`}
           >
-            {plan.isPending ? (
+            {planPending ? (
               <JourneyLoadingExperience stage={loadingStage} />
-            ) : plan.isError ? (
+            ) : planError ? (
               <div className="flex h-full flex-col items-center justify-center gap-3 px-6 text-center text-muted-foreground">
                 <AlertTriangle
                   className="h-10 w-10 text-destructive opacity-80"
                   strokeWidth={1.5}
                 />
-                <p className="max-w-sm text-sm text-ink">
-                  {friendlyError((plan.error as Error)?.message ?? "")}
-                </p>
-                <Button size="sm" variant="outline" onClick={() => plan.mutate(undefined)}>
+                <p className="max-w-sm text-sm text-ink">{planError}</p>
+                <Button size="sm" variant="outline" onClick={() => void runPlan()}>
                   <RefreshCw className="mr-2 h-3.5 w-3.5" /> Try again
                 </Button>
               </div>
@@ -2826,9 +2966,15 @@ function PlanPage() {
                   >
                     <p className="text-sm font-medium leading-relaxed text-ink">{evidenceLine}</p>
                     <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
-                      We used {budgetExplanation.usedMinutes} of your{" "}
-                      {budgetExplanation.allowanceMinutes} extra minutes.{" "}
-                      {budgetExplanation.explanation}
+                      {journeyAllowancePresentation(
+                        {
+                          mood: result.mood,
+                          theme: result.theme,
+                          extraMinutes: result.extra_minutes,
+                          generationPath: resultGenerationPath,
+                        },
+                        budgetExplanation,
+                      )}
                     </p>
                   </div>
                   {topDiscoveries.length > 0 && (
@@ -3409,7 +3555,11 @@ function PlanPage() {
                     variant="outline"
                     onClick={() => {
                       if (navOpen) setActiveNavigationOpen(false);
+                      requestCoordinatorRef.current?.reset();
+                      setPlanPending(false);
+                      setPlanError(null);
                       setResult(null);
+                      setResultGenerationPath(undefined);
                     }}
                     disabled={save.isPending}
                     className="w-full sm:w-auto"
