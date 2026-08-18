@@ -63,6 +63,8 @@ export type RouteShapeRejectionReason =
   | "MALFORMED_GEOMETRY"
   | "GEOMETRY_LIMIT_EXCEEDED"
   | "ANALYSIS_WORK_LIMIT"
+  | "ANCHOR_ORDER_INVALID"
+  | "DESTINATION_TERMINATION_INVALID"
   | null;
 
 export type WaypointAssociationStatus =
@@ -83,6 +85,12 @@ export type RouteCoherenceResult = {
   routeShapeAnalysisStatus: RouteShapeAnalysisStatus;
   sampledPointCount: number;
   spatialBucketComparisons: number;
+};
+
+export type RouteAnchorValidationResult = {
+  eligible: boolean;
+  rejectionReason: "ANCHOR_ORDER_INVALID" | "DESTINATION_TERMINATION_INVALID" | null;
+  matchedAnchorCount: number;
 };
 
 type Segment = { from: LatLng; to: LatLng; length: number; bearing: number; progress: number };
@@ -778,5 +786,133 @@ export function safeEvaluateRouteCoherence(
   } catch {
     const legacy = options.legacy === true;
     return unavailableResult(legacy ? "LEGACY_UNAVAILABLE" : "MALFORMED_GEOMETRY", legacy);
+  }
+}
+
+const ROUTE_ANCHOR_TOLERANCE_METERS = 1_000;
+const DESTINATION_ENDPOINT_TOLERANCE_METERS = 1_000;
+const PREMATURE_DESTINATION_RADIUS_METERS = 250;
+const MATERIAL_REMAINING_AFTER_DESTINATION_METERS = 5_000;
+const MATERIAL_DEPARTURE_FROM_DESTINATION_METERS = 1_500;
+const MIN_DISTINCT_ANCHOR_PROGRESS_METERS = 100;
+
+/** Validates the exact submitted request order against returned travelled geometry. */
+export function validateRouteAnchorSequence(
+  encodedPolyline: string | null | undefined,
+  expectedAnchors: LatLng[],
+): RouteAnchorValidationResult {
+  if (!encodedPolyline || expectedAnchors.length < 2)
+    return { eligible: false, rejectionReason: "ANCHOR_ORDER_INVALID", matchedAnchorCount: 0 };
+  let decoded: LatLng[];
+  try {
+    decoded = decodeBoundedPolyline(encodedPolyline);
+  } catch {
+    return { eligible: false, rejectionReason: "ANCHOR_ORDER_INVALID", matchedAnchorCount: 0 };
+  }
+  if (
+    decoded.length < 2 ||
+    expectedAnchors.some(
+      (point) =>
+        !Number.isFinite(point.lat) ||
+        !Number.isFinite(point.lng) ||
+        Math.abs(point.lat) > 90 ||
+        Math.abs(point.lng) > 180,
+    )
+  )
+    return { eligible: false, rejectionReason: "ANCHOR_ORDER_INVALID", matchedAnchorCount: 0 };
+  const sampled = resample(decoded).points;
+  const progress = [0];
+  for (let index = 1; index < sampled.length; index += 1)
+    progress.push(
+      progress[index - 1] + haversineDistanceMeters(sampled[index - 1], sampled[index]),
+    );
+  const matches = expectedAnchors.map((anchor) => {
+    let bestIndex = 0;
+    let bestDistance = Number.POSITIVE_INFINITY;
+    sampled.forEach((point, index) => {
+      const distance = haversineDistanceMeters(point, anchor);
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        bestIndex = index;
+      }
+    });
+    return { index: bestIndex, distance: bestDistance, progress: progress[bestIndex] };
+  });
+  for (let index = 0; index < matches.length; index += 1) {
+    if (matches[index].distance > ROUTE_ANCHOR_TOLERANCE_METERS)
+      return {
+        eligible: false,
+        rejectionReason:
+          index === matches.length - 1 ? "DESTINATION_TERMINATION_INVALID" : "ANCHOR_ORDER_INVALID",
+        matchedAnchorCount: index,
+      };
+    if (index > 0) {
+      const distinct =
+        haversineDistanceMeters(expectedAnchors[index - 1], expectedAnchors[index]) >
+        ROUTE_ANCHOR_TOLERANCE_METERS;
+      if (
+        matches[index].progress < matches[index - 1].progress ||
+        (distinct &&
+          matches[index].progress - matches[index - 1].progress <
+            MIN_DISTINCT_ANCHOR_PROGRESS_METERS)
+      )
+        return {
+          eligible: false,
+          rejectionReason: "ANCHOR_ORDER_INVALID",
+          matchedAnchorCount: index,
+        };
+    }
+  }
+  const destination = expectedAnchors.at(-1)!;
+  if (haversineDistanceMeters(sampled.at(-1)!, destination) > DESTINATION_ENDPOINT_TOLERANCE_METERS)
+    return {
+      eligible: false,
+      rejectionReason: "DESTINATION_TERMINATION_INVALID",
+      matchedAnchorCount: matches.length - 1,
+    };
+  const totalDistance = progress.at(-1)!;
+  for (let index = 0; index < sampled.length; index += 1) {
+    if (
+      haversineDistanceMeters(sampled[index], destination) <= PREMATURE_DESTINATION_RADIUS_METERS &&
+      totalDistance - progress[index] >= MATERIAL_REMAINING_AFTER_DESTINATION_METERS &&
+      sampled
+        .slice(index + 1)
+        .some(
+          (point) =>
+            haversineDistanceMeters(point, destination) >=
+            MATERIAL_DEPARTURE_FROM_DESTINATION_METERS,
+        )
+    )
+      return {
+        eligible: false,
+        rejectionReason: "DESTINATION_TERMINATION_INVALID",
+        matchedAnchorCount: matches.length,
+      };
+  }
+  return { eligible: true, rejectionReason: null, matchedAnchorCount: matches.length };
+}
+
+export function safeEvaluateRouteCoherenceWithAnchors(
+  encodedPolyline: string | null | undefined,
+  shapingWaypoints: LatLng[],
+  expectedAnchors: LatLng[],
+): RouteCoherenceResult {
+  const coherence = safeEvaluateRouteCoherence(encodedPolyline, shapingWaypoints);
+  if (!coherence.routeShapeEligible) return coherence;
+  try {
+    const anchors = validateRouteAnchorSequence(encodedPolyline, expectedAnchors);
+    return anchors.eligible
+      ? coherence
+      : {
+          ...coherence,
+          routeShapeEligible: false,
+          routeShapeRejectionReason: anchors.rejectionReason,
+        };
+  } catch {
+    return {
+      ...coherence,
+      routeShapeEligible: false,
+      routeShapeRejectionReason: "ANCHOR_ORDER_INVALID",
+    };
   }
 }

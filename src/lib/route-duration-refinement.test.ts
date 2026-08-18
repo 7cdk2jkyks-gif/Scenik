@@ -77,7 +77,7 @@ function observation(
   return {
     candidateId,
     relatedPlanKey: "forest:1",
-    actualAddedMinutes,
+    actualAddedSeconds: actualAddedMinutes * 60,
     constructionValue,
     withinBudget: actualAddedMinutes <= 30,
     routeShapeEligible: true,
@@ -392,7 +392,7 @@ describe("bounded duration refinement", () => {
         result.status === "fulfilled" ? observation("refined", 26.2, 1_600) : null,
     });
     assert.equal(requested.providerRequested, true);
-    assert.equal(requested.observation?.actualAddedMinutes, 26.2);
+    assert.equal(requested.observation?.actualAddedSeconds, 26.2 * 60);
     assert.equal(providerCalls, 1);
 
     const responseRejected = await executeDerivedRouteRequest({
@@ -586,6 +586,7 @@ describe("bounded duration refinement", () => {
       explorationStage: 2,
       request: (plan) => ({
         candidateId: "duration-refinement-2",
+        expectedAnchors: [start, ...plan.waypoints, end],
         response: (async () => {
           providerCalls += 1;
           assert.equal(providerCalls, 5);
@@ -798,6 +799,49 @@ describe("bounded duration refinement", () => {
     const duplicate = recordConnectedNegative(fixture.baseline);
     assert.equal(duplicate.recorded.evaluation.meaningfullyDifferent, false);
     assert.equal(duplicate.candidates.length, 1);
+  });
+
+  it("rejects returned geometry that violates the submitted anchor order", () => {
+    const start = { lat: 0, lng: 0, formatted: "Start" };
+    const required = { lat: 0, lng: 0.3 };
+    const end = { lat: 0, lng: 1, formatted: "End" };
+    const candidates: RouteCandidateForFinalScoring[] = [
+      {
+        candidateId: "baseline",
+        explorationStage: null,
+        directions: computed([start, required, end], 3_600, 111_000),
+        source: "fastest",
+        selectedWaypointReason: null,
+        intendedAddedMinutes: null,
+        constructionTargetMinutes: null,
+        durationTargetClassification: null,
+        scenicWaypoints: [],
+        routeShapeEligible: true,
+      },
+    ];
+    const reversed = recordRefinedProviderCandidate({
+      candidates,
+      candidateId: "invalid-order",
+      parentCandidateId: "parent",
+      familyId: "family",
+      attemptNumber: 1,
+      explorationStage: 1,
+      directions: computed([start, required, sourcePlan.waypoints[0], end], 4_800, 120_000),
+      shapingPlan: sourcePlan,
+      evidencePlaces: [],
+      start,
+      end,
+      mood: "",
+      theme: "",
+      requestedExtraMinutes: 30,
+      requiredStopCount: 1,
+      expectedAnchors: [start, sourcePlan.waypoints[0], required, end],
+      intendedAddedMinutes: 27,
+      constructionTargetMinutes: 27,
+    });
+    assert.equal(reversed.inserted, false);
+    assert.equal(reversed.evaluation.routeShape.routeShapeRejectionReason, "ANCHOR_ORDER_INVALID");
+    assert.equal(candidates.length, 1);
   });
 
   it("rejects a reversed-equivalent parent route through the Production recorder", () => {
@@ -1054,6 +1098,29 @@ describe("bounded duration refinement", () => {
     }
   });
 
+  it("orders sub-six-second observations without display rounding", async () => {
+    const lower = observation("lower", 0, 20_000);
+    lower.actualAddedSeconds = 1_348;
+    const nearer = observation("nearer", 0, 21_000);
+    nearer.actualAddedSeconds = 1_349;
+    const parents: string[] = [];
+    const result = await runBoundedDurationRefinement({
+      requestedExtraMinutes: 30,
+      baselineDurationMinutes: 20,
+      attemptsAlreadyUsed: 4,
+      observations: [lower, nearer],
+      maximumConstructionValue: 30_000,
+      construct: async (input) => {
+        parents.push(input.parentCandidateId);
+        const target = observation("target", 0, input.constructionValue);
+        target.actualAddedSeconds = 1_350;
+        return evaluated(target);
+      },
+    });
+    assert.deepEqual(parents, ["nearer"]);
+    assert.equal(result.reachedTargetBand, true);
+  });
+
   it("does not invalidate an existing target route for a disproportionate allowance", async () => {
     let calls = 0;
     const result = await runBoundedDurationRefinement({
@@ -1213,7 +1280,7 @@ describe("bounded duration refinement", () => {
     }
   });
 
-  it("never makes a seventh request and classifies disproportionate short routes", async () => {
+  it("never makes a seventh request and permits bounded disproportionate short-route refinement", async () => {
     let calls = 0;
     const exhausted = await runBoundedDurationRefinement({
       requestedExtraMinutes: 30,
@@ -1238,8 +1305,8 @@ describe("bounded duration refinement", () => {
         return { status: "NO_SAFE_CONSTRUCTION" as const };
       },
     });
-    assert.equal(disproportionate.stopReason, "DISPROPORTIONATE_TO_BASELINE");
-    assert.equal(calls, 0);
+    assert.notEqual(disproportionate.stopReason, "ATTEMPT_CAPACITY_EXHAUSTED");
+    assert.equal(calls, 1);
   });
 
   it("fails closed for invalid construction bounds", async () => {

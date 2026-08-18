@@ -1,4 +1,4 @@
-export type LongAttemptStatus = "COMPLETED" | "FAILED" | "NO_PLAN";
+export type LongAttemptStatus = "COMPLETED" | "FAILED" | "EFFECTIVE_COLLISION" | "NO_PLAN";
 
 export function candidateByRequestLocalId<T extends { candidateId: string | null }>(
   candidates: T[],
@@ -150,7 +150,6 @@ const SAFE_REFINEMENT_STOP_REASONS = new Set([
   "REFINED_CANDIDATES_OVER_BUDGET",
   "REFINED_CANDIDATES_INCOHERENT",
   "ATTEMPT_CAPACITY_EXHAUSTED",
-  "DISPROPORTIONATE_TO_BASELINE",
 ]);
 
 function safeCandidateId(value: unknown): string | null {
@@ -189,6 +188,26 @@ export function buildRouteGenerationDiagnostic(input: {
     providerResponsesEvaluated: number;
     stopReason: string;
   } | null;
+  preferencePresence?: { mood: boolean; theme: boolean };
+  attemptRoles?: Array<{
+    target: number;
+    side: "left" | "right" | "alternating-arc";
+    progress: "early" | "middle" | "late" | "distributed";
+    waypointForm: "one-waypoint" | "two-waypoint-arc";
+    evidencePreference: "preference-match" | "overall-scenic" | "alternate-cluster";
+  }>;
+  attemptsStarted?: number;
+  placesSummary?: { succeeded: number; failed: number; returned: number; accepted: number };
+  evidenceSummary?: { accepted: number; distinctSets: number };
+  constructionSummary?: {
+    scheduled: number;
+    processed: number;
+    distinct: number;
+    collisions: number;
+    noPlan: number;
+  };
+  providerRouteSummary?: { succeeded: number; failed: number };
+  candidateSummary?: { returned: number; recorded: number; refined: number };
 }) {
   return {
     correlationId: input.correlationId,
@@ -346,5 +365,89 @@ export async function copyRouteDiagnostics(
 export function serializeRouteGenerationDiagnostic(
   input: Parameters<typeof buildRouteGenerationDiagnostic>[0],
 ): string {
-  return `scenik-route-engine-v2 ${JSON.stringify(buildRouteGenerationDiagnostic(input))}`;
+  const diagnostic = buildRouteGenerationDiagnostic(input);
+  const constructionSummary = (() => {
+    const summary = input.constructionSummary;
+    if (!summary) return null;
+    const counts = [
+      summary.scheduled,
+      summary.processed,
+      summary.distinct,
+      summary.collisions,
+      summary.noPlan,
+    ];
+    if (
+      counts.some((count) => !Number.isSafeInteger(count) || count < 0 || count > 5) ||
+      summary.processed > summary.scheduled ||
+      summary.distinct + summary.collisions + summary.noPlan !== summary.processed
+    )
+      return null;
+    return { ...summary };
+  })();
+  const candidates = diagnostic.candidateEligibility;
+  const rejectionHistogram = candidates.reduce<Record<string, number>>((counts, candidate) => {
+    const reason = candidate.rejectionReason ?? candidate.outcomeClassification;
+    counts[reason] = (counts[reason] ?? 0) + 1;
+    return counts;
+  }, {});
+  const bestInBand = (minimum: number, maximum: number) => {
+    const best = candidates
+      .filter(
+        (candidate) =>
+          candidate.candidateSource === "scenik" &&
+          candidate.scenicScore != null &&
+          candidate.actualAddedMinutes != null &&
+          candidate.allowanceUtilisation != null &&
+          candidate.allowanceUtilisation >= minimum &&
+          candidate.allowanceUtilisation < maximum,
+      )
+      .sort(
+        (a, b) =>
+          (b.scenicScore ?? 0) - (a.scenicScore ?? 0) ||
+          (b.actualAddedMinutes ?? 0) - (a.actualAddedMinutes ?? 0),
+      )[0];
+    return best
+      ? { addedSeconds: Math.round((best.actualAddedMinutes ?? 0) * 60), score: best.scenicScore }
+      : null;
+  };
+  const selected = candidates.find((candidate) => candidate.selected);
+  return `scenik-route-summary-v3 ${JSON.stringify({
+    correlationId: diagnostic.correlationId,
+    requestedExtraMinutes: diagnostic.requestedExtraMinutes,
+    baselineDurationSeconds: diagnostic.baselineDurationSeconds,
+    preferencePresence: input.preferencePresence ?? { mood: null, theme: null },
+    plannedTargets: diagnostic.plannedExplorationStages.flatMap(
+      (stage) => stage.targetExtraMinutes,
+    ),
+    attemptRoles: input.attemptRoles ?? [],
+    attemptsStarted: input.attemptsStarted ?? diagnostic.attemptsCompleted,
+    attemptsCompleted: diagnostic.attemptsCompleted,
+    places: input.placesSummary ?? null,
+    evidence: input.evidenceSummary ?? null,
+    constructions: constructionSummary,
+    providerRoutes: input.providerRouteSummary ?? null,
+    candidates: input.candidateSummary ?? null,
+    rejectionHistogram,
+    bestByBand: {
+      target: bestInBand(0.75, Number.POSITIVE_INFINITY),
+      meaningful: bestInBand(0.35, 0.75),
+      weak: bestInBand(0, 0.35),
+    },
+    refinement: diagnostic.durationRefinement ?? null,
+    selected: selected
+      ? {
+          band:
+            (selected.allowanceUtilisation ?? 0) >= 0.75
+              ? "target"
+              : (selected.allowanceUtilisation ?? 0) >= 0.35
+                ? "meaningful"
+                : (selected.allowanceUtilisation ?? 0) > 0
+                  ? "weak"
+                  : "baseline",
+          addedSeconds: Math.round((selected.actualAddedMinutes ?? 0) * 60),
+          score: selected.scenicScore,
+        }
+      : null,
+    outcomeClassification: diagnostic.outcomeClassification,
+  })}`;
 }

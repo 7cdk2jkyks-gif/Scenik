@@ -23,9 +23,11 @@ import {
   ROUTE_COHERENCE_MAX_ENCODED_CHARACTERS,
   ROUTE_COHERENCE_SAMPLE_METERS,
   safeEvaluateRouteCoherence,
+  safeEvaluateRouteCoherenceWithAnchors,
   SHORT_ACCESS_ROAD_EXEMPTION_METERS,
   SPATIAL_BUCKET_SIZE_METERS,
   WAYPOINT_RETRACE_WINDOW_METERS,
+  validateRouteAnchorSequence,
 } from "./route-coherence";
 import type { LatLng } from "./scenic-waypoint";
 
@@ -612,6 +614,79 @@ describe("route coherence", () => {
     });
     assert.equal(shape.routeShapeEligible, false);
     assert.equal(shape.routeShapeAnalysisStatus, "MALFORMED_GEOMETRY");
+  });
+
+  it("validates complete ordered anchors and destination termination", () => {
+    const origin = { lat: 51, lng: -1 };
+    const shapingA = { lat: 51.02, lng: -0.8 };
+    const requiredA = { lat: 51.04, lng: -0.6 };
+    const shapingB = { lat: 51.06, lng: -0.4 };
+    const requiredB = { lat: 51.08, lng: -0.2 };
+    const destination = { lat: 51.1, lng: 0 };
+    const anchors = [origin, shapingA, requiredA, shapingB, requiredB, destination];
+    const encoded = encode(anchors);
+    assert.deepEqual(validateRouteAnchorSequence(encoded, anchors), {
+      eligible: true,
+      rejectionReason: null,
+      matchedAnchorCount: anchors.length,
+    });
+    assert.equal(
+      validateRouteAnchorSequence(encoded, [origin, shapingB, requiredA, shapingA, destination])
+        .rejectionReason,
+      "ANCHOR_ORDER_INVALID",
+    );
+    assert.equal(
+      validateRouteAnchorSequence(encoded, [origin, shapingA, requiredB, requiredA, destination])
+        .rejectionReason,
+      "ANCHOR_ORDER_INVALID",
+    );
+    assert.equal(
+      validateRouteAnchorSequence(encoded, [origin, { lat: 52, lng: 1 }, destination])
+        .rejectionReason,
+      "ANCHOR_ORDER_INVALID",
+    );
+    assert.equal(
+      validateRouteAnchorSequence(encode(anchors.slice(0, -1)), anchors).rejectionReason,
+      "DESTINATION_TERMINATION_INVALID",
+    );
+  });
+
+  it("rejects an early destination return but permits a harmless near approach", () => {
+    const origin = { lat: 51, lng: -1 };
+    const destination = { lat: 51, lng: 0 };
+    const earlyReturn = encode([
+      origin,
+      destination,
+      { lat: 51.1, lng: 0.1 },
+      { lat: 51.15, lng: 0.2 },
+      destination,
+    ]);
+    assert.equal(
+      validateRouteAnchorSequence(earlyReturn, [origin, destination]).rejectionReason,
+      "DESTINATION_TERMINATION_INVALID",
+    );
+    const harmless = encode([
+      origin,
+      { lat: 51, lng: -0.004 },
+      { lat: 51.001, lng: -0.003 },
+      destination,
+    ]);
+    assert.equal(validateRouteAnchorSequence(harmless, [origin, destination]).eligible, true);
+  });
+
+  it("validates chronological anchors across the antimeridian", () => {
+    const anchors = [
+      { lat: 10, lng: 179.7 },
+      { lat: 10, lng: 179.9 },
+      { lat: 10, lng: -179.9 },
+      { lat: 10, lng: -179.7 },
+    ];
+    assert.equal(validateRouteAnchorSequence(encode(anchors), anchors).eligible, true);
+    assert.equal(
+      safeEvaluateRouteCoherenceWithAnchors(encode(anchors), anchors.slice(1, -1), anchors)
+        .routeShapeEligible,
+      true,
+    );
   });
 
   it("enforces the 4,000-sample ceiling", () => {

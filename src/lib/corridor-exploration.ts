@@ -1,5 +1,6 @@
 import {
   haversineDistanceMeters,
+  isValidLatLng,
   planScenicWaypointsWithDiagnostics,
   type LatLng,
   type ScenicPlace,
@@ -32,6 +33,15 @@ export type ExplorationStage = {
   cumulativeRouteCap: number;
   planningBudgetMinutes: number;
   targetExtraMinutes: number[];
+  attemptRoles: PositiveAllowanceAttemptRole[];
+};
+
+export type PositiveAllowanceAttemptRole = {
+  targetExtraMinutes: number;
+  side: "left" | "right" | "alternating-arc";
+  progress: "early" | "middle" | "late" | "distributed";
+  waypointForm: "one-waypoint" | "two-waypoint-arc";
+  evidencePreference: "preference-match" | "overall-scenic" | "alternate-cluster";
 };
 
 export type DurationTargetClassification =
@@ -46,6 +56,51 @@ export type DurationAwareCorridorSample = {
   lateralDisplacementMeters: number;
   journeyProgress: number;
 };
+
+export type OrdinaryPlanningOutcome = "PLANNED" | "EFFECTIVE_COLLISION" | "NO_PLAN";
+
+export type OrdinaryPlanningCounts = {
+  scheduled: number;
+  processed: number;
+  distinct: number;
+  collisions: number;
+  noPlan: number;
+};
+
+export function createOrdinaryPlanningCounter(scheduledTargets: number) {
+  const scheduled = Math.max(0, Math.floor(scheduledTargets));
+  const counts: OrdinaryPlanningCounts = {
+    scheduled,
+    processed: 0,
+    distinct: 0,
+    collisions: 0,
+    noPlan: 0,
+  };
+  return {
+    record(outcome: OrdinaryPlanningOutcome): void {
+      if (counts.processed >= counts.scheduled) return;
+      counts.processed += 1;
+      if (outcome === "PLANNED") counts.distinct += 1;
+      else if (outcome === "EFFECTIVE_COLLISION") counts.collisions += 1;
+      else counts.noPlan += 1;
+    },
+    snapshot(): OrdinaryPlanningCounts {
+      return { ...counts };
+    },
+  };
+}
+
+export function effectivePlanningOutcome(input: {
+  plans: ScenicCorridorPlan[];
+  rejectedEffectiveCollision: number;
+}): { outcome: OrdinaryPlanningOutcome; plan: ScenicCorridorPlan | null } {
+  const plan = input.plans[0] ?? null;
+  if (plan) return { outcome: "PLANNED", plan };
+  return {
+    outcome: input.rejectedEffectiveCollision > 0 ? "EFFECTIVE_COLLISION" : "NO_PLAN",
+    plan: null,
+  };
+}
 
 export const EXPLORATION_SCORE_IMPROVEMENT_THRESHOLD = 3;
 
@@ -100,21 +155,57 @@ export function positiveAllowanceTargetLadder(extraMinutes: number): number[] {
       maximum,
     );
   }
-  if (maximum < 90) {
+  if (maximum < 60) {
     return uniqueIncreasingTargets(
-      [
-        30,
-        roundToFive(maximum * 0.5625),
-        roundToFive(maximum * 0.8125),
-        roundToFive(maximum * 0.9),
-      ],
+      [30, roundToFive(maximum * 0.75), roundToFive(maximum * 0.9)],
       maximum,
     );
   }
+  if (maximum < 90)
+    return uniqueIncreasingTargets([30, 45, 60, 70, roundToFive(maximum * 0.9)], maximum);
   return uniqueIncreasingTargets(
-    [30, 60, roundToFive(maximum * 0.5), roundToFive(maximum * 0.75), roundToFive(maximum * 0.9)],
+    [30, 60, 70, roundToFive(maximum * 0.75), roundToFive(maximum * 0.9)],
     maximum,
   );
+}
+
+export function positiveAllowanceAttemptRoles(targets: number[]): PositiveAllowanceAttemptRole[] {
+  const templates: Omit<PositiveAllowanceAttemptRole, "targetExtraMinutes">[] = [
+    {
+      side: "left",
+      progress: "middle",
+      waypointForm: "one-waypoint",
+      evidencePreference: "preference-match",
+    },
+    {
+      side: "right",
+      progress: "middle",
+      waypointForm: "one-waypoint",
+      evidencePreference: "alternate-cluster",
+    },
+    {
+      side: "alternating-arc",
+      progress: "distributed",
+      waypointForm: "two-waypoint-arc",
+      evidencePreference: "overall-scenic",
+    },
+    {
+      side: "left",
+      progress: "distributed",
+      waypointForm: "two-waypoint-arc",
+      evidencePreference: "preference-match",
+    },
+    {
+      side: "right",
+      progress: "distributed",
+      waypointForm: "two-waypoint-arc",
+      evidencePreference: "alternate-cluster",
+    },
+  ];
+  return targets.map((targetExtraMinutes, index) => ({
+    targetExtraMinutes,
+    ...templates[Math.min(index, templates.length - 1)],
+  }));
 }
 
 export function explorationStages(extraMinutes: number): ExplorationStage[] {
@@ -129,6 +220,7 @@ export function explorationStages(extraMinutes: number): ExplorationStage[] {
         cumulativeRouteCap: 1,
         planningBudgetMinutes: extraMinutes,
         targetExtraMinutes: targets.slice(0, 1),
+        attemptRoles: positiveAllowanceAttemptRoles(targets).slice(0, 1),
       },
       {
         radiusMeters: 1_500,
@@ -137,6 +229,7 @@ export function explorationStages(extraMinutes: number): ExplorationStage[] {
         cumulativeRouteCap: targets.length,
         planningBudgetMinutes: extraMinutes,
         targetExtraMinutes: targets.slice(1, 2),
+        attemptRoles: positiveAllowanceAttemptRoles(targets).slice(1, 2),
       },
     ].filter((stage) => stage.targetExtraMinutes.length > 0);
   }
@@ -149,6 +242,7 @@ export function explorationStages(extraMinutes: number): ExplorationStage[] {
         cumulativeRouteCap: 1,
         planningBudgetMinutes: extraMinutes,
         targetExtraMinutes: targets.slice(0, 1),
+        attemptRoles: positiveAllowanceAttemptRoles(targets).slice(0, 1),
       },
       {
         radiusMeters: 2_300,
@@ -157,6 +251,7 @@ export function explorationStages(extraMinutes: number): ExplorationStage[] {
         cumulativeRouteCap: 2,
         planningBudgetMinutes: extraMinutes,
         targetExtraMinutes: targets.slice(1, 2),
+        attemptRoles: positiveAllowanceAttemptRoles(targets).slice(1, 2),
       },
       {
         radiusMeters: 3_500,
@@ -165,6 +260,7 @@ export function explorationStages(extraMinutes: number): ExplorationStage[] {
         cumulativeRouteCap: targets.length,
         planningBudgetMinutes: extraMinutes,
         targetExtraMinutes: targets.slice(2, 3),
+        attemptRoles: positiveAllowanceAttemptRoles(targets).slice(2, 3),
       },
     ].filter((stage) => stage.targetExtraMinutes.length > 0);
   }
@@ -203,6 +299,9 @@ export function explorationStages(extraMinutes: number): ExplorationStage[] {
       cumulativeRouteCap: isFinal ? targets.length : index + 1,
       planningBudgetMinutes: extraMinutes,
       targetExtraMinutes,
+      attemptRoles: positiveAllowanceAttemptRoles(targets).filter((role) =>
+        targetExtraMinutes.includes(role.targetExtraMinutes),
+      ),
     };
   });
 }
@@ -248,11 +347,70 @@ export function targetLateralDisplacementMeters(input: {
   baselineDurationSeconds: number;
   targetExtraMinutes: number;
 }): number {
+  const measuredSpeed = input.baselineDistanceMeters / Math.max(1, input.baselineDurationSeconds);
   const averageMetersPerSecond =
-    input.baselineDistanceMeters / Math.max(1, input.baselineDurationSeconds);
+    Number.isFinite(measuredSpeed) && measuredSpeed >= 3 && measuredSpeed <= 45
+      ? measuredSpeed
+      : 16;
   const targetAdditionalDistance = averageMetersPerSecond * input.targetExtraMinutes * 60;
-  const routeLengthCap = Math.max(6_000, Math.min(70_000, input.baselineDistanceMeters * 0.15));
-  return Math.round(Math.max(6_000, Math.min(routeLengthCap, targetAdditionalDistance * 0.5)));
+  return Math.round(Math.max(6_000, Math.min(70_000, targetAdditionalDistance * 0.5)));
+}
+
+const EARTH_RADIUS_METERS = 6_371_008.8;
+
+function normaliseGeneratedLongitude(longitude: number): number {
+  const normalised = ((((longitude + 180) % 360) + 360) % 360) - 180;
+  return Object.is(normalised, -0) ? 0 : normalised;
+}
+
+/** A bounded spherical reach estimate. It is not an estimate of road distance. */
+export function geographicDestinationPoint(
+  point: LatLng,
+  distanceMeters: number,
+  bearingDegrees: number,
+): LatLng | null {
+  if (
+    !isValidLatLng(point) ||
+    !Number.isFinite(distanceMeters) ||
+    distanceMeters < 0 ||
+    distanceMeters > 70_000 ||
+    !Number.isFinite(bearingDegrees)
+  )
+    return null;
+  const normalisedPoint = { lat: point.lat, lng: normaliseGeneratedLongitude(point.lng) };
+  if (distanceMeters === 0) return normalisedPoint;
+  const angularDistance = distanceMeters / EARTH_RADIUS_METERS;
+  const bearing = ((((bearingDegrees % 360) + 360) % 360) * Math.PI) / 180;
+  const latitude = (point.lat * Math.PI) / 180;
+  const longitude = (point.lng * Math.PI) / 180;
+  const destinationLatitude = Math.asin(
+    Math.sin(latitude) * Math.cos(angularDistance) +
+      Math.cos(latitude) * Math.sin(angularDistance) * Math.cos(bearing),
+  );
+  const destinationLongitude =
+    longitude +
+    Math.atan2(
+      Math.sin(bearing) * Math.sin(angularDistance) * Math.cos(latitude),
+      Math.cos(angularDistance) - Math.sin(latitude) * Math.sin(destinationLatitude),
+    );
+  const result = {
+    lat: (destinationLatitude * 180) / Math.PI,
+    lng: normaliseGeneratedLongitude((destinationLongitude * 180) / Math.PI),
+  };
+  return isValidLatLng(result) ? result : null;
+}
+
+function initialBearingDegrees(from: LatLng, to: LatLng): number | null {
+  if (!isValidLatLng(from) || !isValidLatLng(to)) return null;
+  const fromLatitude = (from.lat * Math.PI) / 180;
+  const toLatitude = (to.lat * Math.PI) / 180;
+  const longitudeDelta = (normaliseGeneratedLongitude(to.lng - from.lng) * Math.PI) / 180;
+  const y = Math.sin(longitudeDelta) * Math.cos(toLatitude);
+  const x =
+    Math.cos(fromLatitude) * Math.sin(toLatitude) -
+    Math.sin(fromLatitude) * Math.cos(toLatitude) * Math.cos(longitudeDelta);
+  if (Math.abs(x) < Number.EPSILON && Math.abs(y) < Number.EPSILON) return null;
+  return (Math.atan2(y, x) * 180) / Math.PI;
 }
 
 function offsetPerpendicular(
@@ -260,19 +418,53 @@ function offsetPerpendicular(
   previous: LatLng,
   next: LatLng,
   meters: number,
-): LatLng {
-  const latitudeMeters = 111_320;
-  const longitudeMeters = Math.max(1, latitudeMeters * Math.cos((point.lat * Math.PI) / 180));
-  const north = (next.lat - previous.lat) * latitudeMeters;
-  const east = (next.lng - previous.lng) * longitudeMeters;
-  const length = Math.hypot(north, east);
-  if (length <= 0) return point;
-  const offsetNorth = (-east / length) * meters;
-  const offsetEast = (north / length) * meters;
-  return {
-    lat: point.lat + offsetNorth / latitudeMeters,
-    lng: point.lng + offsetEast / longitudeMeters,
-  };
+): LatLng | null {
+  const direction = initialBearingDegrees(previous, next);
+  if (direction == null) return null;
+  return geographicDestinationPoint(point, Math.abs(meters), direction + (meters < 0 ? 90 : -90));
+}
+
+function validRating(value: number | undefined): number | null {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 5
+    ? value
+    : null;
+}
+
+function validReviewCount(value: number | undefined): number | null {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0
+    ? Math.floor(value)
+    : null;
+}
+
+export function deterministicallyRankCorridorEvidence(
+  places: ScenicPlace[],
+  preferredTypes: ReadonlySet<string> = new Set(),
+  evidencePreference: PositiveAllowanceAttemptRole["evidencePreference"] = "preference-match",
+): ScenicPlace[] {
+  return [...places].sort((a, b) => {
+    const relevance = (place: ScenicPlace) =>
+      Number(
+        preferredTypes.has(place.primaryType) ||
+          place.types.some((type) => preferredTypes.has(type)),
+      );
+    const ratingDifference = (validRating(b.rating) ?? -1) - (validRating(a.rating) ?? -1);
+    const reviewDifference =
+      (validReviewCount(b.userRatingCount) ?? -1) - (validReviewCount(a.userRatingCount) ?? -1);
+    const preferenceDifference = relevance(b) - relevance(a);
+    const roleDifference =
+      evidencePreference === "overall-scenic"
+        ? ratingDifference || reviewDifference || preferenceDifference
+        : evidencePreference === "alternate-cluster"
+          ? relevance(a) - relevance(b) || a.primaryType.localeCompare(b.primaryType)
+          : preferenceDifference || ratingDifference || reviewDifference;
+    return (
+      roleDifference ||
+      ratingDifference ||
+      reviewDifference ||
+      a.primaryType.localeCompare(b.primaryType) ||
+      a.id.localeCompare(b.id)
+    );
+  });
 }
 
 export function durationAwareCorridorSamples(input: {
@@ -280,31 +472,62 @@ export function durationAwareCorridorSamples(input: {
   baselineDistanceMeters: number;
   baselineDurationSeconds: number;
   targetExtraMinutes: number[];
+  attemptRoles?: PositiveAllowanceAttemptRole[];
 }): DurationAwareCorridorSample[] {
   if (input.samples.length === 0 || input.targetExtraMinutes.length === 0) return [];
-  return input.samples.map((sample, index) => {
+  return input.samples.flatMap((sample, index) => {
     const targetIndex = Math.min(
       input.targetExtraMinutes.length - 1,
       Math.floor(((index + 1) * input.targetExtraMinutes.length) / input.samples.length),
     );
     const targetExtraMinutes = input.targetExtraMinutes[targetIndex];
+    const role = input.attemptRoles?.find(
+      (candidate) => candidate.targetExtraMinutes === targetExtraMinutes,
+    );
     const lateralDisplacementMeters = targetLateralDisplacementMeters({
       baselineDistanceMeters: input.baselineDistanceMeters,
       baselineDurationSeconds: input.baselineDurationSeconds,
       targetExtraMinutes,
     });
-    return {
-      center: offsetPerpendicular(
-        sample,
-        input.samples[Math.max(0, index - 1)],
-        input.samples[Math.min(input.samples.length - 1, index + 1)],
+    const center = offsetPerpendicular(
+      sample,
+      input.samples[Math.max(0, index - 1)],
+      input.samples[Math.min(input.samples.length - 1, index + 1)],
+      lateralDisplacementMeters *
+        (role?.side === "right" || (role?.side === "alternating-arc" && index % 2 === 1) ? -1 : 1),
+    );
+    if (!center) return [];
+    return [
+      {
+        center,
+        targetExtraMinutes,
         lateralDisplacementMeters,
-      ),
-      targetExtraMinutes,
-      lateralDisplacementMeters,
-      journeyProgress: (index + 1) / (input.samples.length + 1),
-    };
+        journeyProgress: (index + 1) / (input.samples.length + 1),
+      },
+    ];
   });
+}
+
+function coordinateKey(point: LatLng): string {
+  return `${normaliseGeneratedLongitude(point.lng).toFixed(6)},${point.lat.toFixed(6)}`;
+}
+
+export function effectiveRoutePlanSignature(
+  plan: ScenicCorridorPlan,
+  anchors: LatLng[] = [],
+): string {
+  const ordered = [...plan.waypoints].sort(
+    (a, b) =>
+      a.insertionIndex - b.insertionIndex ||
+      (anchors[a.insertionIndex]
+        ? haversineDistanceMeters(anchors[a.insertionIndex], a) -
+            haversineDistanceMeters(anchors[b.insertionIndex], b) ||
+          coordinateKey(a).localeCompare(coordinateKey(b))
+        : coordinateKey(a).localeCompare(coordinateKey(b))),
+  );
+  return `${ordered.length}|${ordered
+    .map((waypoint) => `${waypoint.insertionIndex}:${coordinateKey(waypoint)}`)
+    .join("|")}`;
 }
 
 /** Ephemeral, coordinate-free equivalence check for a single stage. Equal
@@ -315,6 +538,7 @@ export function distinctDurationTargetsBySearchGeometry(input: {
   baselineDistanceMeters: number;
   baselineDurationSeconds: number;
   targetExtraMinutes: number[];
+  attemptRoles?: PositiveAllowanceAttemptRole[];
 }): { targets: number[]; distinctGeometryCount: number; collisionCount: number } {
   const signatures = new Set<string>();
   const targets: number[] = [];
@@ -324,8 +548,14 @@ export function distinctDurationTargetsBySearchGeometry(input: {
       baselineDistanceMeters: input.baselineDistanceMeters,
       baselineDurationSeconds: input.baselineDurationSeconds,
       targetExtraMinutes: [targetExtraMinutes],
+      attemptRoles: input.attemptRoles?.filter(
+        (role) => role.targetExtraMinutes === targetExtraMinutes,
+      ),
     });
-    const signature = `${planned.length}:${planned
+    const role = input.attemptRoles?.find(
+      (candidate) => candidate.targetExtraMinutes === targetExtraMinutes,
+    );
+    const signature = `${role?.side ?? "left"}:${role?.progress ?? "distributed"}:${role?.waypointForm ?? "one-waypoint"}:${planned.length}:${planned
       .map((sample) => Math.round(sample.lateralDisplacementMeters / 100) * 100)
       .join(":")}`;
     if (signatures.has(signature)) continue;
@@ -357,6 +587,7 @@ export function createPositiveAllowanceProductionCoordinator<TCandidate>(input: 
       baselineDistanceMeters: number;
       baselineDurationSeconds: number;
       targetExtraMinutes: number[];
+      attemptRoles?: PositiveAllowanceAttemptRole[];
     }) {
       const collision = distinctDurationTargetsBySearchGeometry(stage);
       return {
@@ -364,8 +595,16 @@ export function createPositiveAllowanceProductionCoordinator<TCandidate>(input: 
         samples: durationAwareCorridorSamples({
           ...stage,
           targetExtraMinutes: collision.targets,
+          attemptRoles: stage.attemptRoles?.filter((role) =>
+            collision.targets.includes(role.targetExtraMinutes),
+          ),
         }),
       };
+    },
+    prepareRoutePlan(
+      planning: Parameters<typeof prepareRoleSpecificCorridorPlan>[0],
+    ): ReturnType<typeof prepareRoleSpecificCorridorPlan> {
+      return prepareRoleSpecificCorridorPlan(planning);
     },
     async collectPlaces<TPlace>(
       centres: LatLng[],
@@ -445,11 +684,13 @@ export function buildCorridorPlans(input: {
   attemptedSignatures?: ReadonlySet<string>;
   attemptedKinds?: ReadonlySet<ScenicCorridorKind>;
   targetDetourMeters?: number[];
+  attemptRole?: PositiveAllowanceAttemptRole;
 }): {
   plans: ScenicCorridorPlan[];
   considered: number;
   rejectedDuplicate: number;
   rejectedBacktracking: number;
+  rejectedEffectiveCollision: number;
 } {
   const planning = planScenicWaypointsWithDiagnostics(
     input.places,
@@ -475,11 +716,7 @@ export function buildCorridorPlans(input: {
       pair[0].estimatedDetourMeters + pair[1].estimatedDetourMeters <=
         input.maximumEstimatedDetourMeters
     ) {
-      const signature = pair
-        .map((waypoint) => waypoint.id)
-        .sort()
-        .join(":");
-      proposals.push({
+      const proposal = {
         kind,
         reason: CORRIDOR_REASON[kind],
         waypoints: pair,
@@ -487,17 +724,21 @@ export function buildCorridorPlans(input: {
           (sum, waypoint) => sum + waypoint.estimatedDetourMeters,
           0,
         ),
-        signature,
-      });
+        signature: "",
+      };
+      proposal.signature = effectiveRoutePlanSignature(proposal, input.anchors);
+      proposals.push(proposal);
     } else {
       const waypoint = waypoints[0];
-      proposals.push({
+      const proposal = {
         kind,
         reason: CORRIDOR_REASON[kind],
         waypoints: [waypoint],
         estimatedDetourMeters: waypoint.estimatedDetourMeters,
-        signature: waypoint.id,
-      });
+        signature: "",
+      };
+      proposal.signature = effectiveRoutePlanSignature(proposal, input.anchors);
+      proposals.push(proposal);
     }
   }
   for (const kind of CORRIDOR_ORDER) {
@@ -506,14 +747,16 @@ export function buildCorridorPlans(input: {
       0,
       input.targetDetourMeters?.length ? waypoints.length : 2,
     )) {
-      if (proposals.some((plan) => plan.signature === waypoint.id)) continue;
-      proposals.push({
+      const proposal = {
         kind,
         reason: CORRIDOR_REASON[kind],
         waypoints: [waypoint],
         estimatedDetourMeters: waypoint.estimatedDetourMeters,
-        signature: waypoint.id,
-      });
+        signature: "",
+      };
+      proposal.signature = effectiveRoutePlanSignature(proposal, input.anchors);
+      if (proposals.some((plan) => plan.signature === proposal.signature)) continue;
+      proposals.push(proposal);
     }
     if (input.targetDetourMeters?.length) {
       for (let first = 0; first < waypoints.length; first += 1) {
@@ -529,18 +772,16 @@ export function buildCorridorPlans(input: {
             estimatedDetourMeters > input.maximumEstimatedDetourMeters
           )
             continue;
-          const signature = pair
-            .map((waypoint) => waypoint.id)
-            .sort()
-            .join(":");
-          if (proposals.some((plan) => plan.signature === signature)) continue;
-          proposals.push({
+          const proposal = {
             kind,
             reason: CORRIDOR_REASON[kind],
             waypoints: pair,
             estimatedDetourMeters,
-            signature,
-          });
+            signature: "",
+          };
+          proposal.signature = effectiveRoutePlanSignature(proposal, input.anchors);
+          if (proposals.some((plan) => plan.signature === proposal.signature)) continue;
+          proposals.push(proposal);
         }
       }
     }
@@ -548,16 +789,77 @@ export function buildCorridorPlans(input: {
 
   const attempted = input.attemptedSignatures ?? new Set<string>();
   const attemptedKinds = input.attemptedKinds ?? new Set<ScenicCorridorKind>();
-  const availablePlans = proposals
+  const requestedFormPlans = input.attemptRole
+    ? proposals.filter((plan) =>
+        input.attemptRole?.waypointForm === "two-waypoint-arc"
+          ? plan.waypoints.length === 2 &&
+            plan.waypoints[0].insertionIndex !== plan.waypoints[1].insertionIndex
+          : plan.waypoints.length === 1,
+      )
+    : proposals;
+  const formPlans =
+    requestedFormPlans.length > 0 || input.attemptRole?.waypointForm !== "two-waypoint-arc"
+      ? requestedFormPlans
+      : proposals.filter((plan) => plan.waypoints.length === 1);
+  const progressPlans = input.attemptRole
+    ? formPlans.filter((plan) => {
+        const progress = plan.waypoints.map(
+          (waypoint) => (waypoint.insertionIndex + 0.5) / Math.max(1, input.anchors.length - 1),
+        );
+        if (input.attemptRole?.progress === "early") return progress.every((value) => value <= 0.5);
+        if (input.attemptRole?.progress === "late") return progress.every((value) => value >= 0.5);
+        if (input.attemptRole?.progress === "middle")
+          return progress.every((value) => value >= 0.25 && value <= 0.75);
+        return Math.min(...progress) < 0.5 && Math.max(...progress) > 0.5;
+      })
+    : formPlans;
+  // A missing role-specific cluster safely falls back to the requested waypoint
+  // form; it never invents an arbitrary coordinate or reorders required stops.
+  const rolePlans = progressPlans.length > 0 ? progressPlans : formPlans;
+  const availablePlans = rolePlans
     .filter((plan) => !attempted.has(plan.signature))
     .sort((a, b) => Number(attemptedKinds.has(a.kind)) - Number(attemptedKinds.has(b.kind)));
+  const rejectedEffectiveCollision =
+    rolePlans.length > 0 &&
+    availablePlans.length === 0 &&
+    rolePlans.some((plan) => attempted.has(plan.signature))
+      ? 1
+      : 0;
   return {
     ...planning,
+    rejectedEffectiveCollision,
     plans:
       input.targetDetourMeters?.length && input.maximumPlans > 0
         ? selectPlansForDetourTargets(availablePlans, input.targetDetourMeters, input.maximumPlans)
         : availablePlans.slice(0, input.maximumPlans),
   };
+}
+
+/** Production preparation boundary between returned Places evidence and a Routes request. */
+export function prepareRoleSpecificCorridorPlan(input: {
+  places: ScenicPlace[];
+  preferredTypes: ReadonlySet<string>;
+  anchors: LatLng[];
+  maximumEstimatedDetourMeters: number;
+  attemptedSignatures: ReadonlySet<string>;
+  attemptedKinds: ReadonlySet<ScenicCorridorKind>;
+  targetDetourMeters: number[];
+  attemptRole: PositiveAllowanceAttemptRole;
+}): ReturnType<typeof buildCorridorPlans> {
+  return buildCorridorPlans({
+    places: deterministicallyRankCorridorEvidence(
+      input.places,
+      input.preferredTypes,
+      input.attemptRole.evidencePreference,
+    ),
+    anchors: input.anchors,
+    maximumEstimatedDetourMeters: input.maximumEstimatedDetourMeters,
+    maximumPlans: 1,
+    attemptedSignatures: input.attemptedSignatures,
+    attemptedKinds: input.attemptedKinds,
+    targetDetourMeters: input.targetDetourMeters,
+    attemptRole: input.attemptRole,
+  });
 }
 
 export function corridorWaypointsWithRequiredStops(
@@ -570,7 +872,7 @@ export function corridorWaypointsWithRequiredStops(
       a.insertionIndex - b.insertionIndex ||
       haversineDistanceMeters(anchors[a.insertionIndex], a) -
         haversineDistanceMeters(anchors[b.insertionIndex], b) ||
-      a.id.localeCompare(b.id),
+      coordinateKey(a).localeCompare(coordinateKey(b)),
   );
   const result = [...requiredStops];
   inserted.forEach((waypoint, offset) => {

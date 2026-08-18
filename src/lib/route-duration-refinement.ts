@@ -6,7 +6,10 @@ import {
 import { classifyDurationTargetResult, type ScenicCorridorPlan } from "./corridor-exploration";
 import type { ComputedDirections, GeocodedLocation } from "./google-maps.server";
 import { safeAssociateEvidenceWithRoute } from "./route-evidence-association";
-import { safeEvaluateRouteCoherence } from "./route-coherence";
+import {
+  safeEvaluateRouteCoherence,
+  safeEvaluateRouteCoherenceWithAnchors,
+} from "./route-coherence";
 import { scoreScenicRoute } from "./scenic-score";
 import {
   candidateFitsTimeBudget,
@@ -20,7 +23,6 @@ export const MAX_SCENIC_ROUTE_ATTEMPTS = 6;
 export const MAX_DURATION_REFINEMENT_ATTEMPTS = 2;
 export const REFINEMENT_TARGET_UTILISATION = 0.9;
 export const MAX_UNBRACKETED_EXPANSION_RATIO = 1.6;
-export const DISPROPORTIONATE_ALLOWANCE_BASELINE_RATIO = 3;
 /** Maximum outward movement from a verified source point. This is deliberately
  * below the existing 3.5 km ordinary-search radius; it shapes the route but
  * cannot turn refinement into a new evidence search. */
@@ -42,13 +44,12 @@ export type DurationRefinementStopReason =
   | "PROVIDER_EVALUATION_FAILED"
   | "REFINED_CANDIDATES_OVER_BUDGET"
   | "REFINED_CANDIDATES_INCOHERENT"
-  | "ATTEMPT_CAPACITY_EXHAUSTED"
-  | "DISPROPORTIONATE_TO_BASELINE";
+  | "ATTEMPT_CAPACITY_EXHAUSTED";
 
 export type DurationConstructionObservation = {
   candidateId: string;
   relatedPlanKey: string;
-  actualAddedMinutes: number;
+  actualAddedSeconds: number;
   constructionValue: number;
   withinBudget: boolean;
   routeShapeEligible: boolean;
@@ -367,6 +368,7 @@ export function recordRefinedProviderCandidate(input: {
   theme: string;
   requestedExtraMinutes: number;
   requiredStopCount: number;
+  expectedAnchors?: LatLng[];
   intendedAddedMinutes: number;
   constructionTargetMinutes: number;
 }) {
@@ -384,6 +386,7 @@ export function recordRefinedProviderCandidate(input: {
     theme: input.theme,
     requestedExtraMinutes: input.requestedExtraMinutes,
     requiredStopCount: input.requiredStopCount,
+    expectedAnchors: input.expectedAnchors,
   });
   const actualAddedSeconds = Math.max(
     0,
@@ -428,7 +431,7 @@ export function recordRefinedProviderCandidate(input: {
   const observation: DurationConstructionObservation = {
     candidateId: input.candidateId,
     relatedPlanKey: input.familyId,
-    actualAddedMinutes,
+    actualAddedSeconds,
     constructionValue: input.shapingPlan.estimatedDetourMeters,
     withinBudget: evaluation.withinBudget,
     routeShapeEligible: evaluation.routeShape.routeShapeEligible,
@@ -449,6 +452,7 @@ export function scoreAndSelectRouteCandidateCollection(input: {
   theme: string;
   requestedExtraMinutes: number;
   requiredStopCount: number;
+  expectedAnchors?: LatLng[];
 }) {
   const baseline = input.candidates[0]?.directions;
   if (!baseline) throw new Error("BASELINE_ROUTE_UNAVAILABLE");
@@ -511,6 +515,7 @@ export function evaluateRefinedProviderCandidate(input: {
   theme: string;
   requestedExtraMinutes: number;
   requiredStopCount: number;
+  expectedAnchors?: LatLng[];
 }) {
   const withinBudget = candidateFitsTimeBudget(
     input.baseline.durationSeconds,
@@ -520,10 +525,13 @@ export function evaluateRefinedProviderCandidate(input: {
   const meaningfullyDifferent = input.priorDirections.every((prior) =>
     routesAreMeaningfullyDifferent(prior, input.directions),
   );
-  const routeShape = safeEvaluateRouteCoherence(
-    input.directions.encodedPolyline,
-    input.shapingPlan.waypoints,
-  );
+  const routeShape = input.expectedAnchors
+    ? safeEvaluateRouteCoherenceWithAnchors(
+        input.directions.encodedPolyline,
+        input.shapingPlan.waypoints,
+        input.expectedAnchors,
+      )
+    : safeEvaluateRouteCoherence(input.directions.encodedPolyline, input.shapingPlan.waypoints);
   const evidenceAssociation = safeAssociateEvidenceWithRoute({
     encodedPolyline: input.directions.encodedPolyline,
     places: input.evidencePlaces,
@@ -593,9 +601,9 @@ function observationFromRelatedCandidate(input: {
   return {
     candidateId: candidate.candidateId,
     relatedPlanKey: input.related.family.familyId,
-    actualAddedMinutes: Math.max(
+    actualAddedSeconds: Math.max(
       0,
-      (candidate.directions.durationSeconds - baseline.durationSeconds) / 60,
+      candidate.directions.durationSeconds - baseline.durationSeconds,
     ),
     constructionValue: input.related.family.currentDisplacementMeters,
     withinBudget: evaluation.withinBudget,
@@ -626,6 +634,7 @@ export async function orchestrateDurationRefinement(input: {
   ): {
     candidateId: string;
     response: Promise<ComputedDirections>;
+    expectedAnchors?: LatLng[];
   };
   onRecorded?(input: {
     plan: ScenicCorridorPlan;
@@ -682,12 +691,14 @@ export async function orchestrateDurationRefinement(input: {
       );
       if (!related) return { status: "NO_SAFE_CONSTRUCTION" as const };
       let requestedCandidateId: string | null = null;
+      let requestedExpectedAnchors: LatLng[] | undefined;
       const execution = await executeDerivedRouteRequest({
         family: related.family,
         targetDisplacementMeters: refinement.constructionValue,
         request: (plan) => {
           const requested = input.request(plan, related.family);
           requestedCandidateId = requested.candidateId;
+          requestedExpectedAnchors = requested.expectedAnchors;
           return requested.response.catch((error: unknown) => {
             input.onProviderRejected?.({
               plan,
@@ -722,6 +733,7 @@ export async function orchestrateDurationRefinement(input: {
             theme: input.theme,
             requestedExtraMinutes: input.requestedExtraMinutes,
             requiredStopCount: input.requiredStopCount,
+            expectedAnchors: requestedExpectedAnchors,
             intendedAddedMinutes: refinement.intendedTargetMinutes,
             constructionTargetMinutes: refinement.adaptiveTargetMinutes,
           });
@@ -837,15 +849,15 @@ export function isSafeRefinementCorridorPlan(plan: ScenicCorridorPlan): boolean 
 
 function isEligibleUnderTarget(
   observation: DurationConstructionObservation,
-  targetMinimum: number,
+  targetMinimumSeconds: number,
 ) {
   return (
     observation.withinBudget &&
     observation.routeShapeEligible &&
     !observation.duplicate &&
     observation.qualityEligible &&
-    observation.actualAddedMinutes > 0 &&
-    observation.actualAddedMinutes < targetMinimum &&
+    observation.actualAddedSeconds > 0 &&
+    observation.actualAddedSeconds < targetMinimumSeconds &&
     finitePositive(observation.constructionValue)
   );
 }
@@ -853,11 +865,11 @@ function isEligibleUnderTarget(
 function isSafeUpper(
   observation: DurationConstructionObservation,
   lower: DurationConstructionObservation,
-  requestedExtraMinutes: number,
+  requestedExtraSeconds: number,
 ) {
   return (
     observation.relatedPlanKey === lower.relatedPlanKey &&
-    observation.actualAddedMinutes > requestedExtraMinutes &&
+    observation.actualAddedSeconds > requestedExtraSeconds &&
     observation.routeShapeEligible &&
     !observation.duplicate &&
     finitePositive(observation.constructionValue) &&
@@ -868,12 +880,12 @@ function isSafeUpper(
 function bracketConstructionValue(input: {
   lower: DurationConstructionObservation;
   upper: DurationConstructionObservation;
-  desiredMinutes: number;
+  desiredSeconds: number;
 }): number | null {
-  const durationSpan = input.upper.actualAddedMinutes - input.lower.actualAddedMinutes;
+  const durationSpan = input.upper.actualAddedSeconds - input.lower.actualAddedSeconds;
   const constructionSpan = input.upper.constructionValue - input.lower.constructionValue;
   if (!finitePositive(durationSpan) || !finitePositive(constructionSpan)) return null;
-  const fraction = (input.desiredMinutes - input.lower.actualAddedMinutes) / durationSpan;
+  const fraction = (input.desiredSeconds - input.lower.actualAddedSeconds) / durationSpan;
   if (!Number.isFinite(fraction) || fraction <= 0 || fraction >= 1) return null;
   const value = input.lower.constructionValue + constructionSpan * fraction;
   return finitePositive(value) &&
@@ -902,8 +914,9 @@ export async function runBoundedDurationRefinement(input: {
     relatedPlanKey: string;
   }): Promise<DurationRefinementConstructionResult>;
 }): Promise<DurationRefinementResult> {
-  const targetMinimum = input.requestedExtraMinutes * MIN_TARGET_UTILISATION;
-  const desiredMinutes = input.requestedExtraMinutes * REFINEMENT_TARGET_UTILISATION;
+  const requestedExtraSeconds = input.requestedExtraMinutes * 60;
+  const targetMinimumSeconds = requestedExtraSeconds * MIN_TARGET_UTILISATION;
+  const desiredSeconds = requestedExtraSeconds * REFINEMENT_TARGET_UTILISATION;
   if (
     input.observations.some(
       (observation) =>
@@ -911,7 +924,7 @@ export async function runBoundedDurationRefinement(input: {
         observation.routeShapeEligible &&
         !observation.duplicate &&
         observation.qualityEligible &&
-        observation.actualAddedMinutes >= targetMinimum,
+        observation.actualAddedSeconds >= targetMinimumSeconds,
     )
   ) {
     return {
@@ -945,19 +958,6 @@ export async function runBoundedDurationRefinement(input: {
       stateCounts: refinementStateCounts([]),
     };
   }
-  if (
-    input.requestedExtraMinutes > 30 &&
-    input.requestedExtraMinutes >
-      input.baselineDurationMinutes * DISPROPORTIONATE_ALLOWANCE_BASELINE_RATIO
-  ) {
-    return {
-      attempted: false,
-      reachedTargetBand: false,
-      stopReason: "DISPROPORTIONATE_TO_BASELINE",
-      executions: [],
-      stateCounts: refinementStateCounts([]),
-    };
-  }
   if (maximumAttempts === 0) {
     return {
       attempted: false,
@@ -968,10 +968,10 @@ export async function runBoundedDurationRefinement(input: {
     };
   }
   let lower = input.observations
-    .filter((observation) => isEligibleUnderTarget(observation, targetMinimum))
+    .filter((observation) => isEligibleUnderTarget(observation, targetMinimumSeconds))
     .sort(
       (a, b) =>
-        b.actualAddedMinutes - a.actualAddedMinutes || a.candidateId.localeCompare(b.candidateId),
+        b.actualAddedSeconds - a.actualAddedSeconds || a.candidateId.localeCompare(b.candidateId),
     )[0];
   if (!lower) {
     return {
@@ -983,10 +983,10 @@ export async function runBoundedDurationRefinement(input: {
     };
   }
   let upper = input.observations
-    .filter((observation) => isSafeUpper(observation, lower, input.requestedExtraMinutes))
+    .filter((observation) => isSafeUpper(observation, lower, requestedExtraSeconds))
     .sort(
       (a, b) =>
-        a.actualAddedMinutes - b.actualAddedMinutes || a.candidateId.localeCompare(b.candidateId),
+        a.actualAddedSeconds - b.actualAddedSeconds || a.candidateId.localeCompare(b.candidateId),
     )[0];
   const executions: DurationRefinementExecution[] = [];
   let sawOverBudget = false;
@@ -994,13 +994,13 @@ export async function runBoundedDurationRefinement(input: {
   let sawUnderTarget = false;
 
   for (let index = 0; index < maximumAttempts; index += 1) {
-    const bracketValue = upper ? bracketConstructionValue({ lower, upper, desiredMinutes }) : null;
+    const bracketValue = upper ? bracketConstructionValue({ lower, upper, desiredSeconds }) : null;
     const strategy: DurationRefinementStrategy = bracketValue
       ? "RELATED_BRACKET"
       : "BOUNDED_EXPANSION";
     const expansionRatio = Math.min(
       MAX_UNBRACKETED_EXPANSION_RATIO,
-      Math.max(1.1, desiredMinutes / Math.max(1, lower.actualAddedMinutes)),
+      Math.max(1.1, desiredSeconds / Math.max(1, lower.actualAddedSeconds)),
     );
     const constructionValue = Math.min(
       input.maximumConstructionValue,
@@ -1020,10 +1020,10 @@ export async function runBoundedDurationRefinement(input: {
       attemptNumber: index + 1,
       parentCandidateId: lower.candidateId,
       upperCandidateId: upper?.candidateId ?? null,
-      intendedTargetMinutes: desiredMinutes,
-      adaptiveTargetMinutes: desiredMinutes,
-      bracketLowerMinutes: lower.actualAddedMinutes,
-      bracketUpperMinutes: upper?.actualAddedMinutes ?? null,
+      intendedTargetMinutes: desiredSeconds / 60,
+      adaptiveTargetMinutes: desiredSeconds / 60,
+      bracketLowerMinutes: lower.actualAddedSeconds / 60,
+      bracketUpperMinutes: upper ? upper.actualAddedSeconds / 60 : null,
       constructionValue,
       relatedPlanKey: lower.relatedPlanKey,
     };
@@ -1091,13 +1091,13 @@ export async function runBoundedDurationRefinement(input: {
     }
     if (!observation.withinBudget) {
       sawOverBudget = true;
-      if (isSafeUpper(observation, lower, input.requestedExtraMinutes)) upper = observation;
+      if (isSafeUpper(observation, lower, requestedExtraSeconds)) upper = observation;
       continue;
     }
     if (
       !observation.duplicate &&
       observation.qualityEligible &&
-      observation.actualAddedMinutes >= targetMinimum
+      observation.actualAddedSeconds >= targetMinimumSeconds
     ) {
       return {
         attempted: true,
@@ -1107,7 +1107,7 @@ export async function runBoundedDurationRefinement(input: {
         stateCounts: refinementStateCounts(executions),
       };
     }
-    if (isEligibleUnderTarget(observation, targetMinimum)) {
+    if (isEligibleUnderTarget(observation, targetMinimumSeconds)) {
       sawUnderTarget = true;
       lower = observation;
     }

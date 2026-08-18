@@ -258,9 +258,9 @@ describe("route-generation diagnostic log", () => {
       secret: "secret-1",
     } as Parameters<typeof serializeRouteGenerationDiagnostic>[0] & Record<string, unknown>);
 
-    assert.equal(line.startsWith("scenik-route-engine-v2 {"), true);
+    assert.equal(line.startsWith("scenik-route-summary-v3 {"), true);
     assert.equal(line.includes('"requestedExtraMinutes":85'), true);
-    assert.equal(line.includes('"totalServerProcessingDurationMs":2100'), true);
+    assert.equal(line.includes("totalServerProcessingDurationMs"), false);
     for (const forbidden of [
       "coordinates",
       "Oxford",
@@ -684,8 +684,8 @@ describe("route-generation diagnostic log", () => {
       ],
     );
     const log = serializeRouteGenerationDiagnostic(diagnostic);
-    assert.ok(log.startsWith("scenik-route-engine-v2 "));
-    assert.doesNotThrow(() => JSON.parse(log.slice("scenik-route-engine-v2 ".length)));
+    assert.ok(log.startsWith("scenik-route-summary-v3 "));
+    assert.doesNotThrow(() => JSON.parse(log.slice("scenik-route-summary-v3 ".length)));
     assert.doesNotThrow(() => JSON.parse(formatRouteGenerationDiagnosticForClipboard(diagnostic)));
     assert.deepEqual(internalRouteDiagnosticResponse(true, diagnostic), {
       routeGenerationDiagnostics: diagnostic,

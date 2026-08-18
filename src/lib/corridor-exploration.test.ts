@@ -6,20 +6,26 @@ import {
   buildCorridorPlans,
   classifyDurationTargetResult,
   corridorWaypointsWithRequiredStops,
+  createOrdinaryPlanningCounter,
   createPositiveAllowanceProductionCoordinator,
   didCompleteFullAllowanceSearch,
   distinctDurationTargetsBySearchGeometry,
   durationAwareCorridorSamples,
+  effectivePlanningOutcome,
+  effectiveRoutePlanSignature,
   explorationShouldStop,
   explorationStages,
+  geographicDestinationPoint,
   isTargetBudgetCandidate,
   positiveAllowanceTargetLadder,
+  positiveAllowanceAttemptRoles,
+  deterministicallyRankCorridorEvidence,
   selectPlansForDetourTargets,
   targetLateralDisplacementMeters,
 } from "./corridor-exploration";
 import { timeBudgetExplanation } from "./route-presentation";
 import { selectRouteCandidate, type ScoredRouteCandidate } from "./route-selection";
-import type { ScenicPlace } from "./scenic-waypoint";
+import { isValidLatLng, type ScenicPlace } from "./scenic-waypoint";
 
 const anchors = [
   { lat: 0, lng: 0 },
@@ -32,6 +38,65 @@ function place(id: string, lat: number, lng: number, primaryType: string): Sceni
 }
 
 describe("budget-driven corridor exploration", () => {
+  it("accounts for each processed ordinary target exactly once", () => {
+    const counter = createOrdinaryPlanningCounter(8);
+    counter.record("PLANNED");
+    counter.record("EFFECTIVE_COLLISION");
+    counter.record("NO_PLAN");
+    counter.record("PLANNED"); // A later provider failure does not change planning.
+    counter.record("EFFECTIVE_COLLISION"); // Pre-search geometry collision.
+    counter.record("EFFECTIVE_COLLISION"); // Post-evidence effective collision.
+    counter.record("PLANNED");
+    counter.record("NO_PLAN");
+    assert.deepEqual(counter.snapshot(), {
+      scheduled: 8,
+      processed: 8,
+      distinct: 3,
+      collisions: 3,
+      noPlan: 2,
+    });
+  });
+
+  it("reports early stops without assigning outcomes to unprocessed targets", () => {
+    const counter = createOrdinaryPlanningCounter(5);
+    counter.record("PLANNED");
+    counter.record("NO_PLAN");
+    assert.deepEqual(counter.snapshot(), {
+      scheduled: 5,
+      processed: 2,
+      distinct: 1,
+      collisions: 0,
+      noPlan: 1,
+    });
+  });
+
+  it("cannot count one scheduled target twice or exceed processed targets", () => {
+    const counter = createOrdinaryPlanningCounter(1);
+    counter.record("PLANNED");
+    counter.record("EFFECTIVE_COLLISION");
+    counter.record("NO_PLAN");
+    const summary = counter.snapshot();
+    assert.deepEqual(summary, {
+      scheduled: 1,
+      processed: 1,
+      distinct: 1,
+      collisions: 0,
+      noPlan: 0,
+    });
+    assert.equal(summary.distinct + summary.collisions + summary.noPlan, summary.processed);
+  });
+
+  it("preserves explicit effective-collision and no-plan outcomes for empty plans", () => {
+    assert.deepEqual(effectivePlanningOutcome({ plans: [], rejectedEffectiveCollision: 1 }), {
+      outcome: "EFFECTIVE_COLLISION",
+      plan: null,
+    });
+    assert.deepEqual(effectivePlanningOutcome({ plans: [], rejectedEffectiveCollision: 0 }), {
+      outcome: "NO_PLAN",
+      plan: null,
+    });
+  });
+
   it("progressively expands radius, samples, places and candidate caps", () => {
     const stages = explorationStages(60);
     assert.deepEqual(
@@ -56,23 +121,24 @@ describe("budget-driven corridor exploration", () => {
     const eightyFive = explorationStages(85);
     assert.deepEqual(
       eightyFive.flatMap((stage) => stage.targetExtraMinutes),
-      [30, 50, 70, 75],
+      [30, 45, 60, 70, 75],
     );
     assert.equal(
       eightyFive.reduce((sum, stage) => sum + stage.sampleCap, 0),
       15,
     );
-    assert.equal(eightyFive.at(-1)?.cumulativeRouteCap, 4);
+    assert.equal(eightyFive.at(-1)?.cumulativeRouteCap, 5);
   });
 
   it("builds exact bounded ladders and reserves refinement capacity", () => {
     const expected = new Map([
       [10, [8, 9]],
       [30, [15, 23, 27]],
-      [80, [30, 45, 65, 70]],
-      [120, [30, 60, 90, 110]],
-      [180, [30, 60, 90, 135, 160]],
-      [240, [30, 60, 120, 180, 215]],
+      [80, [30, 45, 60, 70]],
+      [110, [30, 60, 70, 85, 100]],
+      [140, [30, 60, 70, 105, 125]],
+      [180, [30, 60, 70, 135, 160]],
+      [240, [30, 60, 70, 180, 215]],
     ]);
     for (const [allowance, targets] of expected) {
       assert.deepEqual(positiveAllowanceTargetLadder(allowance), targets);
@@ -147,7 +213,7 @@ describe("budget-driven corridor exploration", () => {
     );
   });
 
-  it("scales lateral exploration by journey length instead of using one fixed corridor", () => {
+  it("uses allowance-aware reach instead of capping short routes by baseline length", () => {
     const short = targetLateralDisplacementMeters({
       baselineDistanceMeters: 100_000,
       baselineDurationSeconds: 3_857,
@@ -158,10 +224,184 @@ describe("budget-driven corridor exploration", () => {
       baselineDurationSeconds: 21_600,
       targetExtraMinutes: 70,
     });
-    assert.equal(short, 15_000);
+    assert.equal(short, 54_446);
     assert.equal(oxfordToGlasgow, 54_444);
     const modelledAddedMinutes = (oxfordToGlasgow * 2) / (560_000 / 21_600) / 60;
     assert.ok(modelledAddedMinutes >= 69 && modelledAddedMinutes <= 71);
+  });
+
+  it("assigns deterministic distinct construction roles to stable anchors", () => {
+    const roles = positiveAllowanceAttemptRoles(positiveAllowanceTargetLadder(180));
+    assert.deepEqual(
+      roles.map((role) => role.targetExtraMinutes),
+      [30, 60, 70, 135, 160],
+    );
+    assert.equal(
+      new Set(roles.map((role) => `${role.side}:${role.progress}:${role.waypointForm}`)).size,
+      5,
+    );
+    assert.equal(
+      roles.find((role) => role.targetExtraMinutes === 70)?.waypointForm,
+      "two-waypoint-arc",
+    );
+  });
+
+  it("keeps short-route +30, +80 and +180 constructions meaningfully distinct", () => {
+    const samples = [
+      { lat: 51.5, lng: -0.2 },
+      { lat: 51.55, lng: -0.1 },
+      { lat: 51.6, lng: 0 },
+    ];
+    const signatures = [30, 80, 180].map((allowance) => {
+      const targets = positiveAllowanceTargetLadder(allowance);
+      const roles = positiveAllowanceAttemptRoles(targets);
+      const plans = durationAwareCorridorSamples({
+        samples,
+        baselineDistanceMeters: 24_000,
+        baselineDurationSeconds: 1_200,
+        targetExtraMinutes: targets,
+        attemptRoles: roles,
+      });
+      return plans
+        .map((plan) =>
+          [
+            plan.targetExtraMinutes,
+            Math.round(plan.lateralDisplacementMeters / 100),
+            Math.sign(plan.center.lat - samples[plans.indexOf(plan)].lat),
+          ].join(":"),
+        )
+        .join("|");
+    });
+    assert.equal(new Set(signatures).size, 3);
+    assert.ok(positiveAllowanceTargetLadder(180).includes(70));
+    assert.equal(
+      targetLateralDisplacementMeters({
+        baselineDistanceMeters: 24_000,
+        baselineDurationSeconds: 1_200,
+        targetExtraMinutes: 180,
+      }),
+      70_000,
+    );
+  });
+
+  it("ranks equivalent provider evidence independently of response order", () => {
+    const places = [
+      { ...place("b", 0, 0.5, "park"), rating: 4.8, userRatingCount: 20 },
+      { ...place("a", 0, 0.6, "museum"), rating: 4.8, userRatingCount: 20 },
+      place("missing", 0, 0.7, "park"),
+    ];
+    const preferred = new Set(["park"]);
+    const expected = deterministicallyRankCorridorEvidence(places, preferred).map(({ id }) => id);
+    assert.deepEqual(expected, ["b", "missing", "a"]);
+    assert.deepEqual(
+      deterministicallyRankCorridorEvidence([...places].reverse(), preferred).map(({ id }) => id),
+      expected,
+    );
+  });
+
+  it("normalises spherical reach safely across poles and the antimeridian", () => {
+    const cases = [
+      geographicDestinationPoint({ lat: 51.5, lng: -0.1 }, 70_000, 90),
+      geographicDestinationPoint({ lat: 0, lng: 179.9 }, 70_000, 90),
+      geographicDestinationPoint({ lat: 0, lng: -179.9 }, 70_000, 270),
+      geographicDestinationPoint({ lat: 89.999, lng: 20 }, 70_000, 0),
+      geographicDestinationPoint({ lat: -89.999, lng: 20 }, 70_000, 180),
+      geographicDestinationPoint({ lat: 90, lng: 180 }, 70_000, 90),
+      geographicDestinationPoint({ lat: -90, lng: -180 }, 70_000, 270),
+      geographicDestinationPoint({ lat: 51.5, lng: 180 }, 0, 720),
+    ];
+    assert.ok(cases.every((point) => point != null && isValidLatLng(point)));
+    assert.equal(cases.at(-1)?.lng, -180);
+    for (const invalid of [
+      geographicDestinationPoint({ lat: 91, lng: 0 }, 1, 0),
+      geographicDestinationPoint({ lat: 0, lng: 181 }, 1, 0),
+      geographicDestinationPoint({ lat: 0, lng: 0 }, 70_001, 0),
+      geographicDestinationPoint({ lat: 0, lng: 0 }, Number.NaN, 0),
+      geographicDestinationPoint({ lat: 0, lng: 0 }, 1, Number.POSITIVE_INFINITY),
+    ])
+      assert.equal(invalid, null);
+  });
+
+  it("keeps left and right spherical centres valid and on opposite sides", () => {
+    const roles = positiveAllowanceAttemptRoles([30, 60]);
+    const samples = durationAwareCorridorSamples({
+      samples: [
+        { lat: 51, lng: -1 },
+        { lat: 51, lng: 0 },
+        { lat: 51, lng: 1 },
+      ],
+      baselineDistanceMeters: 24_000,
+      baselineDurationSeconds: 1_200,
+      targetExtraMinutes: [30, 60],
+      attemptRoles: roles,
+    });
+    assert.ok(samples.every(({ center }) => isValidLatLng(center)));
+    assert.ok(samples[0].center.lat > 51);
+    assert.ok(samples.at(-1)!.center.lat < 51);
+  });
+
+  it("drops invalid generated centres before the Places boundary", async () => {
+    const coordinator = createPositiveAllowanceProductionCoordinator({ candidates: [] });
+    const prepared = coordinator.prepareStage({
+      samples: [
+        { lat: 91, lng: 0 },
+        { lat: 91, lng: 1 },
+      ],
+      baselineDistanceMeters: 24_000,
+      baselineDurationSeconds: 1_200,
+      targetExtraMinutes: [30],
+      attemptRoles: positiveAllowanceAttemptRoles([30]),
+    });
+    let searches = 0;
+    await coordinator.collectPlaces(
+      prepared.samples.map(({ center }) => center),
+      async () => {
+        searches += 1;
+        return [];
+      },
+    );
+    assert.equal(searches, 0);
+    assert.equal(coordinator.counts().placesRequestsStarted, 0);
+  });
+
+  it("sanitises malformed evidence metadata and differentiates evidence roles", () => {
+    const places = [
+      { ...place("preferred", 0, 0, "park"), rating: 4, userRatingCount: 10 },
+      { ...place("strong", 0, 1, "museum"), rating: 5, userRatingCount: 100 },
+      { ...place("zero", 0, 2, "lake"), rating: 0, userRatingCount: 0 },
+      { ...place("nan", 0, 3, "park"), rating: Number.NaN, userRatingCount: Infinity },
+      { ...place("negative", 0, 4, "park"), rating: 8, userRatingCount: -1 },
+      { ...place("fraction", 0, 5, "park"), rating: 3, userRatingCount: 10.9 },
+    ];
+    const preferred = new Set(["park"]);
+    const preference = deterministicallyRankCorridorEvidence(
+      places,
+      preferred,
+      "preference-match",
+    ).map(({ id }) => id);
+    const overall = deterministicallyRankCorridorEvidence(places, preferred, "overall-scenic").map(
+      ({ id }) => id,
+    );
+    const alternate = deterministicallyRankCorridorEvidence(
+      places,
+      preferred,
+      "alternate-cluster",
+    ).map(({ id }) => id);
+    assert.equal(preference[0], "preferred");
+    assert.equal(overall[0], "strong");
+    assert.equal(alternate[0], "zero");
+    for (const permutation of [
+      places,
+      [...places].reverse(),
+      [places[2], ...places.slice(0, 2), ...places.slice(3)],
+    ]) {
+      assert.deepEqual(
+        deterministicallyRankCorridorEvidence(permutation, preferred, "preference-match").map(
+          ({ id }) => id,
+        ),
+        preference,
+      );
+    }
   });
 
   it("adapts the final bounded target after a routed undershoot", () => {
@@ -229,6 +469,45 @@ describe("budget-driven corridor exploration", () => {
     );
   });
 
+  it("collides effective plans by the exact provider request rather than role labels", () => {
+    const waypointA = {
+      ...place("provider-a", 0.05, 0.5, "park"),
+      reason: "Park",
+      insertionIndex: 0,
+      estimatedDetourMeters: 1_000,
+    };
+    const waypointEquivalent = { ...waypointA, id: "provider-b" };
+    const one = {
+      kind: "other" as const,
+      reason: "Scenic corridor",
+      waypoints: [waypointA],
+      estimatedDetourMeters: 1_000,
+      signature: "",
+    };
+    const equivalent = { ...one, waypoints: [waypointEquivalent] };
+    const reordered = {
+      ...one,
+      waypoints: [{ ...waypointA, insertionIndex: 1, lng: 1.5 }, waypointA],
+    };
+    assert.equal(
+      effectiveRoutePlanSignature(one, anchors),
+      effectiveRoutePlanSignature(equivalent, anchors),
+    );
+    assert.notEqual(
+      effectiveRoutePlanSignature(one, anchors),
+      effectiveRoutePlanSignature(reordered, anchors),
+    );
+    const attempted = new Set([effectiveRoutePlanSignature(one, anchors)]);
+    const result = buildCorridorPlans({
+      places: [waypointEquivalent],
+      anchors,
+      maximumEstimatedDetourMeters: 10_000,
+      maximumPlans: 1,
+      attemptedSignatures: attempted,
+    });
+    assert.equal(result.plans.length, 0);
+  });
+
   it("covers supported allowance bands without increasing request bounds", () => {
     const summaries = [15, 30, 45, 60, 85, 240].map((minutes) => {
       const stages = explorationStages(minutes);
@@ -244,7 +523,7 @@ describe("budget-driven corridor exploration", () => {
       assert.ok(summary.routeRequests <= 6, JSON.stringify(summary));
     }
     assert.deepEqual(summaries.find((item) => item.minutes === 45)?.targets.slice(-2), [35, 40]);
-    assert.deepEqual(summaries.find((item) => item.minutes === 60)?.targets.slice(-2), [50, 55]);
+    assert.deepEqual(summaries.find((item) => item.minutes === 60)?.targets.slice(-2), [55, 60]);
     assert.deepEqual(summaries.find((item) => item.minutes === 85)?.targets.slice(-2), [70, 75]);
     assert.deepEqual(summaries.find((item) => item.minutes === 240)?.targets.slice(-2), [180, 215]);
   });
@@ -340,6 +619,7 @@ describe("budget-driven corridor exploration", () => {
           baselineDistanceMeters: 560_000,
           baselineDurationSeconds: 21_600,
           targetExtraMinutes: stage.targetExtraMinutes,
+          attemptRoles: stage.attemptRoles,
         });
         await coordinator.collectPlaces(
           prepared.samples.map((sample) => sample.center),
@@ -353,7 +633,7 @@ describe("budget-driven corridor exploration", () => {
           const [response] = await Promise.allSettled([
             coordinator.requestRoute(async () => {
               events.push(`ordinary-${target}`);
-              if (target !== 30) throw new Error("FICTIONAL_PROVIDER_FAILURE");
+              if (target !== 70) throw new Error("FICTIONAL_PROVIDER_FAILURE");
               return candidate(ordinaryOrdinal, 63, 71, "medium-geometry");
             }),
           ]);
@@ -361,13 +641,12 @@ describe("budget-driven corridor exploration", () => {
         }
       }
 
-      assert.equal(coordinator.counts().remainingRouteRequests, 2);
-      for (let attempt = 1; attempt <= 2; attempt += 1) {
+      assert.equal(coordinator.counts().remainingRouteRequests, 1);
+      for (let attempt = 1; attempt <= 1; attempt += 1) {
         const [refinement] = await Promise.allSettled([
           coordinator.requestRoute(async () => {
             events.push(`refinement-${attempt}`);
-            if (!refinementSucceeds || attempt === 1)
-              throw new Error("FICTIONAL_REFINEMENT_FAILURE");
+            if (!refinementSucceeds) throw new Error("FICTIONAL_REFINEMENT_FAILURE");
             return candidate(6, 150, 71, "refined-target-geometry");
           }),
         ]);
@@ -555,5 +834,279 @@ describe("budget-driven corridor exploration", () => {
       didCompleteFullAllowanceSearch({ ...complete, longerEligibleCandidateEvaluated: false }),
       false,
     );
+  });
+
+  it("executes the real +180 Production handler from schedule through presentation", async () => {
+    // @ts-expect-error Bun's test runtime provides module-boundary mocks; the repository's
+    // project TypeScript configuration intentionally does not include Bun test declarations.
+    const { mock } = await import("bun:test");
+    const actualTanstack = await import("@tanstack/react-start");
+    const actualAuthMiddleware = await import("@/integrations/supabase/auth-middleware");
+    const actualInternalTesters = await import("./internal-testers.server");
+    const actualOrchestration = await import("./route-generation-orchestration.server");
+    const actualGoogleMaps = await import("./google-maps.server");
+    const encode = (points: Array<{ lat: number; lng: number }>) => {
+      let previousLat = 0;
+      let previousLng = 0;
+      const delta = (value: number) => {
+        let encoded = "";
+        let shifted = value < 0 ? ~(value << 1) : value << 1;
+        while (shifted >= 0x20) {
+          encoded += String.fromCharCode((0x20 | (shifted & 0x1f)) + 63);
+          shifted >>= 5;
+        }
+        return encoded + String.fromCharCode(shifted + 63);
+      };
+      return points
+        .map((point) => {
+          const latitude = Math.round(point.lat * 1e5);
+          const longitude = Math.round(point.lng * 1e5);
+          const value = delta(latitude - previousLat) + delta(longitude - previousLng);
+          previousLat = latitude;
+          previousLng = longitude;
+          return value;
+        })
+        .join("");
+    };
+    const start = { lat: 51, lng: -1, formatted: "Fictional origin" };
+    const requiredStop = { lat: 51, lng: 0, formatted: "Fictional required stop" };
+    const end = { lat: 51, lng: 1, formatted: "Fictional destination" };
+    const computed = (
+      points: Array<{ lat: number; lng: number }>,
+      durationSeconds: number,
+      distanceMeters: number,
+    ) => ({
+      encodedPolyline: encode(points),
+      durationSeconds,
+      distanceMeters,
+      duration: `${Math.round(durationSeconds / 60)} min`,
+      distance: `${distanceMeters} m`,
+      steps: points.slice(1).map((point, index) => ({
+        instruction: "Continue",
+        distance: "",
+        duration: "",
+        distanceMeters: Math.round(distanceMeters / Math.max(1, points.length - 1)),
+        durationSeconds: Math.round(durationSeconds / Math.max(1, points.length - 1)),
+        startLat: points[index].lat,
+        startLng: points[index].lng,
+        endLat: point.lat,
+        endLng: point.lng,
+      })),
+    });
+
+    const baselineDurationSeconds = 3_600;
+    let placesCalls = 0;
+    let scenicRouteCalls = 0;
+    const submittedWaypointCounts: number[] = [];
+    const returnedGeometryByDuration = new Map<number, string>();
+    const safePlaceTypes = [
+      "woods",
+      "historical_place",
+      "scenic_spot",
+      "beach",
+      "wildlife_refuge",
+      "farmers_market",
+    ];
+    const fixedCollisionPlace = {
+      id: "fixture-collision-place",
+      lat: 51.03,
+      lng: -0.45,
+      primaryType: "woods",
+      types: ["woods", "nature_preserve"],
+      displayName: "Fictional woodland",
+      rating: 4.5,
+      userRatingCount: 50,
+    };
+
+    mock.module("@tanstack/react-start", () => ({
+      ...actualTanstack,
+      createServerFn: () => {
+        const builder = {
+          middleware: () => builder,
+          inputValidator: () => builder,
+          handler: (handler: unknown) => handler,
+        };
+        return builder;
+      },
+    }));
+    mock.module("@/integrations/supabase/auth-middleware", () => ({
+      ...actualAuthMiddleware,
+      requireSupabaseAuth: {},
+    }));
+    mock.module("./internal-testers.server", () => ({
+      ...actualInternalTesters,
+      internalDiagnosticsEnabled: () => true,
+      isInternalTestUser: () => true,
+    }));
+    mock.module("./route-generation-orchestration.server", () => ({
+      ...actualOrchestration,
+      executeProductionRouteGeneration: async (input: {
+        generateRoute(input: { isPremium: boolean }): Promise<unknown>;
+      }) => input.generateRoute({ isPremium: true }),
+    }));
+    mock.module("./google-maps.server", () => ({
+      ...actualGoogleMaps,
+      geocodeAddress: async (address: string) =>
+        address === "Origin" ? start : address === "Stop" ? requiredStop : end,
+      searchNearbyScenicPlaces: async ({ center }: { center: { lat: number; lng: number } }) => {
+        placesCalls += 1;
+        if (placesCalls <= 7) return [fixedCollisionPlace];
+        return safePlaceTypes.map((primaryType, index) => ({
+          id: `fixture-evidence-${placesCalls}-${index}`,
+          lat: center.lat + (index - 2.5) * 0.002,
+          lng: center.lng + (index - 2.5) * 0.015,
+          primaryType,
+          types: [primaryType, "woods", "nature_preserve"],
+          displayName: `Fictional evidence ${placesCalls}-${index}`,
+          rating: 4.8 - index * 0.05,
+          userRatingCount: 100 - index,
+        }));
+      },
+      computeDirections: async (input: {
+        origin: { lat: number; lng: number };
+        destination: { lat: number; lng: number };
+        waypoints?: Array<{ lat: number; lng: number }>;
+      }) => {
+        if (scenicRouteCalls === 0 && (input.waypoints?.length ?? 0) === 1) {
+          scenicRouteCalls = -1;
+          return computed([start, requiredStop, end], baselineDurationSeconds, 140_000);
+        }
+        scenicRouteCalls = Math.max(0, scenicRouteCalls) + 1;
+        const ordinal = scenicRouteCalls;
+        const waypoints = input.waypoints ?? [];
+        submittedWaypointCounts.push(waypoints.length - 1);
+        if (ordinal === 1) throw new Error("FICTIONAL_PROVIDER_FAILURE");
+        const addedSecondsByOrdinal = [0, 70 * 60 + 1, 145 * 60, 160 * 60 + 1];
+        const addedSeconds = addedSecondsByOrdinal[Math.min(ordinal, 4) - 1];
+        const requestedPoints = [start, ...waypoints, end];
+        const returnedPoints =
+          ordinal === 3 && waypoints.length >= 2
+            ? [start, waypoints[1], waypoints[0], ...waypoints.slice(2), end]
+            : requestedPoints;
+        const directions = computed(
+          returnedPoints,
+          baselineDurationSeconds + addedSeconds,
+          150_000 + ordinal * 10_000,
+        );
+        returnedGeometryByDuration.set(directions.durationSeconds, directions.encodedPolyline);
+        return directions;
+      },
+    }));
+
+    const diagnosticLogs: string[] = [];
+    const originalInfo = console.info;
+    console.info = (...values: unknown[]) => {
+      const line = values.map(String).join(" ");
+      if (line.startsWith("scenik-route-summary-v3 ")) diagnosticLogs.push(line);
+    };
+    try {
+      const { planScenicRoute } = await import(`./routes.functions?production-180=${Date.now()}`);
+      const result = await (
+        planScenicRoute as unknown as (input: {
+          data: {
+            start_address: string;
+            end_address: string;
+            mood: string;
+            theme: string;
+            extra_minutes: number;
+            stops: string[];
+          };
+          context: { userId: string; supabase: object };
+        }) => Promise<{
+          scoringDiagnostics: {
+            explorationTargets: Array<{ targetExtraMinutes: number[] }>;
+            scenicRouteRequestsAttempted: number;
+            generatedCandidateOutcomes: Array<{
+              addedMinutes: number;
+              intendedAddedMinutes: number;
+              outcome: string;
+            }>;
+          };
+          scenic_score: number;
+          selectedWinner: string;
+          directions: { durationSeconds: number; encodedPolyline: string };
+          selectedRouteDurationSeconds: number;
+          fastestRouteDurationSeconds: number;
+          measuredExtraTimeSeconds: number;
+          timeTargetOutcome: string;
+          narrative: string;
+        }>
+      )({
+        data: {
+          start_address: "Origin",
+          end_address: "Destination",
+          mood: "Peaceful",
+          theme: "Forest",
+          extra_minutes: 180,
+          stops: ["Stop"],
+        },
+        context: { userId: "00000000-0000-4000-8000-000000000000", supabase: {} },
+      });
+
+      assert.deepEqual(
+        result.scoringDiagnostics.explorationTargets.flatMap(
+          (stage: { targetExtraMinutes: number[] }) => stage.targetExtraMinutes,
+        ),
+        [30, 60, 70, 135, 160],
+      );
+      assert.ok(placesCalls <= 15);
+      assert.ok(scenicRouteCalls <= 6);
+      assert.ok(result.scoringDiagnostics.scenicRouteRequestsAttempted <= 6);
+      assert.ok(submittedWaypointCounts.some((count) => count === 1));
+      assert.ok(submittedWaypointCounts.some((count) => count === 2));
+      assert.ok(
+        result.scoringDiagnostics.generatedCandidateOutcomes.some(
+          (candidate: { addedMinutes: number; outcome: string }) =>
+            candidate.addedMinutes === 70 && candidate.outcome === "ELIGIBLE",
+        ),
+        JSON.stringify(result.scoringDiagnostics.generatedCandidateOutcomes),
+      );
+      assert.ok(
+        result.scoringDiagnostics.generatedCandidateOutcomes.some(
+          (candidate: { outcome: string }) => candidate.outcome === "INCOHERENT_ROUTE",
+        ),
+      );
+      assert.ok(result.scenic_score >= 60);
+      assert.notEqual(result.selectedWinner, "fastest");
+      assert.equal(result.directions.durationSeconds, result.selectedRouteDurationSeconds);
+      assert.equal(
+        returnedGeometryByDuration.get(result.selectedRouteDurationSeconds),
+        result.directions.encodedPolyline,
+      );
+      assert.equal(
+        result.measuredExtraTimeSeconds,
+        result.selectedRouteDurationSeconds - result.fastestRouteDurationSeconds,
+      );
+      assert.equal(result.timeTargetOutcome, "TARGET_MET");
+      assert.match(result.narrative, /larger time allowance unlocked/i);
+      assert.equal(diagnosticLogs.length, 1);
+      assert.ok(diagnosticLogs[0].length < 8_000);
+      for (const forbidden of [
+        "Fictional origin",
+        "Fictional required stop",
+        "Fictional destination",
+        "fixture-evidence",
+        "fixture-collision-place",
+        result.directions.encodedPolyline,
+        "00000000-0000-4000-8000-000000000000",
+      ])
+        assert.equal(diagnosticLogs[0].includes(forbidden), false);
+      const summary = JSON.parse(diagnosticLogs[0].slice("scenik-route-summary-v3 ".length));
+      assert.deepEqual(summary.plannedTargets, [30, 60, 70, 135, 160]);
+      assert.deepEqual(summary.constructions, {
+        scheduled: 5,
+        processed: 5,
+        distinct: 4,
+        collisions: 1,
+        noPlan: 0,
+      });
+      assert.ok(summary.candidates.recorded >= 1);
+      assert.equal(summary.refinement.stopReason, "TARGET_REACHED");
+      assert.equal(summary.selected.band, "target");
+      assert.ok(Math.abs(summary.selected.addedSeconds - result.measuredExtraTimeSeconds) < 6);
+    } finally {
+      console.info = originalInfo;
+      mock.restore();
+    }
   });
 });
