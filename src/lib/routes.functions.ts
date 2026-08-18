@@ -395,7 +395,7 @@ export const planScenicRoute = createServerFn({ method: "POST" })
               buildCorridorPlans,
               classifyDurationTargetResult,
               corridorWaypointsWithRequiredStops,
-              durationAwareCorridorSamples,
+              createPositiveAllowanceProductionCoordinator,
               explorationShouldStop,
               explorationStages,
               isTargetBudgetCandidate,
@@ -423,6 +423,16 @@ export const planScenicRoute = createServerFn({ method: "POST" })
               .filter(Boolean);
             const includedTypes = selectedPlaceTypes(moods, themes);
             if (includedTypes.length > 0) {
+              const productionCoordinator = createPositiveAllowanceProductionCoordinator({
+                candidates: rawCandidates,
+                onPlacesRequested: (count) => {
+                  placesCallCount += count;
+                },
+                onRouteRequested: () => {
+                  scenicRouteRequestsAttempted += 1;
+                  routesCallCount += 1;
+                },
+              });
               const budgetSeconds = data.extra_minutes * 60;
               const averageMetersPerSecond = baseline.distanceMeters / baseline.durationSeconds;
               const requiredCoordinates = routeInput.waypoints.map(({ lat, lng }) => ({
@@ -453,28 +463,25 @@ export const planScenicRoute = createServerFn({ method: "POST" })
                   baseline.steps,
                   Math.min(corridorSampleCount(baseline.distanceMeters), stage.sampleCap),
                 );
-                const durationAwareSamples =
-                  stage.targetExtraMinutes.length > 1
-                    ? durationAwareCorridorSamples({
-                        samples: baselineSamples,
-                        baselineDistanceMeters: baseline.distanceMeters,
-                        baselineDurationSeconds: baseline.durationSeconds,
-                        targetExtraMinutes: stage.targetExtraMinutes,
-                      })
-                    : [];
+                const preparedStage = productionCoordinator.prepareStage({
+                  samples: baselineSamples,
+                  baselineDistanceMeters: baseline.distanceMeters,
+                  baselineDurationSeconds: baseline.durationSeconds,
+                  targetExtraMinutes: stage.targetExtraMinutes,
+                });
+                const stageTargets = preparedStage.targets;
+                if (stageTargets.length === 0) continue;
+                const durationAwareSamples = preparedStage.samples;
                 const samples = durationAwareSamples.length
                   ? durationAwareSamples.map((sample) => sample.center)
                   : baselineSamples;
                 corridorSamplesUsed += samples.length;
-                placesCallCount += samples.length;
-                const placeResults = await Promise.allSettled(
-                  samples.map((center) =>
-                    searchNearbyScenicPlaces({
-                      center,
-                      radiusMeters: stage.radiusMeters,
-                      includedTypes,
-                    }),
-                  ),
+                const placeResults = await productionCoordinator.collectPlaces(samples, (center) =>
+                  searchNearbyScenicPlaces({
+                    center,
+                    radiusMeters: stage.radiusMeters,
+                    includedTypes,
+                  }),
                 );
                 for (const result of placeResults) {
                   if (result.status !== "fulfilled") continue;
@@ -513,10 +520,13 @@ export const planScenicRoute = createServerFn({ method: "POST" })
                 exploredCandidateQuality.push({ score: stageBaselineScore, utilisation: 0 });
                 const remainingRouteCalls = Math.max(
                   0,
-                  stage.cumulativeRouteCap - scenicRouteRequestsAttempted,
+                  Math.min(
+                    stageTargets.length,
+                    stage.cumulativeRouteCap - scenicRouteRequestsAttempted,
+                  ),
                 );
                 const planningAnchors =
-                  stage.targetExtraMinutes.length > 1 && requiredCoordinates.length === 0
+                  stageTargets.length > 0 && requiredCoordinates.length === 0
                     ? [routeInput.origin, ...baselineSamples, routeInput.destination]
                     : anchors;
                 const updatePlanningDiagnostics = (planning: {
@@ -558,21 +568,21 @@ export const planScenicRoute = createServerFn({ method: "POST" })
                       });
                   attemptedSignatures.add(plan.signature);
                   attemptedKinds.add(plan.kind);
-                  scenicRouteRequestsAttempted += 1;
-                  routesCallCount += 1;
                   return {
                     candidateId,
                     family,
-                    request: computeDirections({
-                      origin: routeInput.origin,
-                      destination: routeInput.destination,
-                      waypoints: corridorWaypointsWithRequiredStops(
-                        requiredCoordinates,
-                        planningAnchors,
-                        plan,
-                      ),
-                      alternatives: false,
-                    }),
+                    request: productionCoordinator.requestRoute(() =>
+                      computeDirections({
+                        origin: routeInput.origin,
+                        destination: routeInput.destination,
+                        waypoints: corridorWaypointsWithRequiredStops(
+                          requiredCoordinates,
+                          planningAnchors,
+                          plan,
+                        ),
+                        alternatives: false,
+                      }),
+                    ),
                   };
                 };
                 const recordCandidateResult = (
@@ -783,7 +793,7 @@ export const planScenicRoute = createServerFn({ method: "POST" })
                     if (refinement && candidateFamily) {
                       // The shared recorder already inserted or rejected this candidate.
                     } else if (!refinement) {
-                      rawCandidates.push({
+                      productionCoordinator.recordCandidate({
                         candidateId,
                         explorationStage: stageIndex,
                         directions: scenikDirections,
@@ -824,7 +834,8 @@ export const planScenicRoute = createServerFn({ method: "POST" })
                       }).total;
                     if (!refinedRecording) {
                       constructionObservation.qualityEligible =
-                        candidateScore >= 60 && bestExploredScore - candidateScore <= 6;
+                        candidateScore >= 60 &&
+                        Object.values(candidateAssociation.evidence).some((count) => count > 0);
                     }
                     bestExploredScore = Math.max(bestExploredScore, candidateScore);
                     if (withinBudget)
@@ -840,9 +851,9 @@ export const planScenicRoute = createServerFn({ method: "POST" })
                   return actualAddedMinutes;
                 };
 
-                if (stage.targetExtraMinutes.length > 1) {
+                if (stageTargets.length > 1) {
                   longAttemptExecutions = await runSequentialLongAttempts({
-                    intendedTargets: stage.targetExtraMinutes.slice(0, remainingRouteCalls),
+                    intendedTargets: stageTargets.slice(0, remainingRouteCalls),
                     maximumExtraMinutes: data.extra_minutes,
                     adaptiveTarget: adaptiveDurationTargetMinutes,
                     execute: async ({ intendedTargetMinutes, adaptiveTargetMinutes }) => {
@@ -885,6 +896,9 @@ export const planScenicRoute = createServerFn({ method: "POST" })
                     maximumPlans: remainingRouteCalls,
                     attemptedSignatures,
                     attemptedKinds,
+                    targetDetourMeters: stageTargets.map(
+                      (target) => averageMetersPerSecond * target * 60,
+                    ),
                   });
                   updatePlanningDiagnostics(planning);
                   const candidateRequests = planning.plans.map((plan) => {
@@ -1226,7 +1240,10 @@ export const planScenicRoute = createServerFn({ method: "POST" })
               qualityEligible:
                 diagnostic == null
                   ? null
-                  : diagnostic.rejectionReason !== "BELOW_QUALITY_GUARDRAIL",
+                  : diagnostic.score >= 60 &&
+                    diagnostic.rejectionReason !== "EVIDENCE_FREE_ROUTE" &&
+                    diagnostic.rejectionReason !== "BELOW_ABSOLUTE_QUALITY_FLOOR" &&
+                    diagnostic.rejectionReason !== "BELOW_WEAK_QUALITY_GUARDRAIL",
               scenicScore: diagnostic?.score ?? null,
               scoreBreakdown: breakdown
                 ? {
@@ -1243,6 +1260,7 @@ export const planScenicRoute = createServerFn({ method: "POST" })
               targetBandEligible:
                 diagnostic != null &&
                 diagnostic.eligible &&
+                diagnostic.score >= 60 &&
                 diagnostic.allowanceUtilisation >= 0.75,
               selected: diagnostic?.selected ?? false,
               rejectionReason: diagnostic?.rejectionReason ?? outcome.outcome,

@@ -116,21 +116,62 @@ export function timeBudgetExplanation(
   timeTargetOutcome?:
     | "ZERO_TARGET"
     | "TARGET_MET"
+    | "MEANINGFUL_FALLBACK"
+    | "WEAK_ROUTE_SELECTED"
+    | "BASELINE_FALLBACK"
     | "LONGER_WEAKENED_QUALITY"
     | "NO_TARGET_BAND_ROUTE",
 ) {
-  const usedMinutes = Math.max(0, Math.round(measuredExtraSeconds / 60));
-  const allowanceMinutes = Math.max(0, Math.round(requestedExtraMinutes));
-  const utilisation = allowanceMinutes > 0 ? usedMinutes / allowanceMinutes : 0;
+  const authoritativeAddedSeconds = Number.isFinite(measuredExtraSeconds)
+    ? Math.max(0, measuredExtraSeconds)
+    : 0;
+  const authoritativeAllowanceSeconds = Number.isFinite(requestedExtraMinutes)
+    ? Math.max(0, requestedExtraMinutes * 60)
+    : 0;
+  const usedMinutes = Math.max(0, Math.round(authoritativeAddedSeconds / 60));
+  const allowanceMinutes = Math.max(0, Math.round(authoritativeAllowanceSeconds / 60));
+  const utilisation =
+    authoritativeAllowanceSeconds > 0
+      ? authoritativeAddedSeconds / authoritativeAllowanceSeconds
+      : 0;
   if (allowanceMinutes === 0) {
     return { usedMinutes, allowanceMinutes, utilisation, explanation: "Fastest route selected." };
   }
-  if (utilisation >= 0.75) {
+  if (timeTargetOutcome === "ZERO_TARGET") {
+    return { usedMinutes, allowanceMinutes, utilisation, explanation: "Fastest route selected." };
+  }
+  if (timeTargetOutcome === "TARGET_MET") {
     return {
       usedMinutes,
       allowanceMinutes,
       utilisation,
       explanation: "Your larger allowance unlocked this route.",
+    };
+  }
+  if (timeTargetOutcome === "MEANINGFUL_FALLBACK") {
+    return {
+      usedMinutes,
+      allowanceMinutes,
+      utilisation,
+      explanation:
+        "This useful longer route safely uses part of your allowance; no suitable route used more.",
+    };
+  }
+  if (timeTargetOutcome === "WEAK_ROUTE_SELECTED") {
+    return {
+      usedMinutes,
+      allowanceMinutes,
+      utilisation,
+      explanation:
+        "We found a worthwhile longer route, although the full allowance could not be used safely.",
+    };
+  }
+  if (timeTargetOutcome === "BASELINE_FALLBACK") {
+    return {
+      usedMinutes,
+      allowanceMinutes,
+      utilisation,
+      explanation: "No safe, coherent longer route met the minimum journey-quality requirements.",
     };
   }
   if (timeTargetOutcome === "LONGER_WEAKENED_QUALITY") {
@@ -150,12 +191,23 @@ export function timeBudgetExplanation(
         "We couldn’t find a suitable route using all of your requested time, so we chose the strongest journey available.",
     };
   }
-  if (utilisation >= 0.4) {
+  if (utilisation >= 0.75 && utilisation <= 1) {
     return {
       usedMinutes,
       allowanceMinutes,
       utilisation,
-      explanation: "This was the best balance of scenery and journey time.",
+      explanation: "Your larger allowance unlocked this route.",
+    };
+  }
+  if (utilisation >= 0.35 && utilisation < 0.75) {
+    return {
+      usedMinutes,
+      allowanceMinutes,
+      utilisation,
+      explanation:
+        utilisation >= 0.4
+          ? "This was the best balance of scenery and journey time."
+          : "This useful longer route safely uses part of your allowance; no suitable route used more.",
     };
   }
   return {

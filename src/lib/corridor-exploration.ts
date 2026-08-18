@@ -49,6 +49,8 @@ export type DurationAwareCorridorSample = {
 
 export const EXPLORATION_SCORE_IMPROVEMENT_THRESHOLD = 3;
 
+const MAX_ORDINARY_SCENIC_ROUTE_ATTEMPTS = 5;
+
 const CORRIDOR_ORDER: ScenicCorridorKind[] = [
   "forest",
   "coastline",
@@ -71,8 +73,53 @@ const CORRIDOR_REASON: Record<ScenicCorridorKind, string> = {
   other: "Scenic corridor",
 };
 
+function uniqueIncreasingTargets(targets: number[], maximum: number): number[] {
+  return [...new Set(targets.map((target) => Math.max(1, Math.min(maximum, Math.round(target)))))]
+    .sort((a, b) => a - b)
+    .slice(0, MAX_ORDINARY_SCENIC_ROUTE_ATTEMPTS);
+}
+
+function roundToFive(minutes: number): number {
+  return Math.max(1, Math.round(minutes / 5) * 5);
+}
+
+/**
+ * Five ordinary attempts are the maximum: the sixth scenic Routes request is
+ * deliberately left available for duration refinement. Small allowances use
+ * integer targets; larger allowances use five-minute construction increments.
+ */
+export function positiveAllowanceTargetLadder(extraMinutes: number): number[] {
+  const maximum = Math.max(0, Math.min(240, Math.floor(extraMinutes)));
+  if (maximum <= 0) return [];
+  if (maximum <= 10) {
+    return uniqueIncreasingTargets([Math.ceil(maximum * 0.75), Math.round(maximum * 0.9)], maximum);
+  }
+  if (maximum <= 30) {
+    return uniqueIncreasingTargets(
+      [Math.round(maximum * 0.5), Math.ceil(maximum * 0.75), Math.round(maximum * 0.9)],
+      maximum,
+    );
+  }
+  if (maximum < 90) {
+    return uniqueIncreasingTargets(
+      [
+        30,
+        roundToFive(maximum * 0.5625),
+        roundToFive(maximum * 0.8125),
+        roundToFive(maximum * 0.9),
+      ],
+      maximum,
+    );
+  }
+  return uniqueIncreasingTargets(
+    [30, 60, roundToFive(maximum * 0.5), roundToFive(maximum * 0.75), roundToFive(maximum * 0.9)],
+    maximum,
+  );
+}
+
 export function explorationStages(extraMinutes: number): ExplorationStage[] {
   if (extraMinutes <= 0) return [];
+  const targets = positiveAllowanceTargetLadder(extraMinutes);
   if (extraMinutes <= 10) {
     return [
       {
@@ -81,17 +128,17 @@ export function explorationStages(extraMinutes: number): ExplorationStage[] {
         cumulativePlaceCap: 14,
         cumulativeRouteCap: 1,
         planningBudgetMinutes: extraMinutes,
-        targetExtraMinutes: [extraMinutes],
+        targetExtraMinutes: targets.slice(0, 1),
       },
       {
         radiusMeters: 1_500,
         sampleCap: 3,
         cumulativePlaceCap: 24,
-        cumulativeRouteCap: 2,
+        cumulativeRouteCap: targets.length,
         planningBudgetMinutes: extraMinutes,
-        targetExtraMinutes: [extraMinutes],
+        targetExtraMinutes: targets.slice(1, 2),
       },
-    ];
+    ].filter((stage) => stage.targetExtraMinutes.length > 0);
   }
   if (extraMinutes <= 30) {
     return [
@@ -101,7 +148,7 @@ export function explorationStages(extraMinutes: number): ExplorationStage[] {
         cumulativePlaceCap: 20,
         cumulativeRouteCap: 1,
         planningBudgetMinutes: extraMinutes,
-        targetExtraMinutes: [extraMinutes],
+        targetExtraMinutes: targets.slice(0, 1),
       },
       {
         radiusMeters: 2_300,
@@ -109,32 +156,55 @@ export function explorationStages(extraMinutes: number): ExplorationStage[] {
         cumulativePlaceCap: 34,
         cumulativeRouteCap: 2,
         planningBudgetMinutes: extraMinutes,
-        targetExtraMinutes: [extraMinutes],
+        targetExtraMinutes: targets.slice(1, 2),
       },
       {
         radiusMeters: 3_500,
         sampleCap: 5,
         cumulativePlaceCap: 45,
-        cumulativeRouteCap: 4,
+        cumulativeRouteCap: targets.length,
         planningBudgetMinutes: extraMinutes,
-        targetExtraMinutes: [extraMinutes],
+        targetExtraMinutes: targets.slice(2, 3),
       },
-    ];
+    ].filter((stage) => stage.targetExtraMinutes.length > 0);
   }
-  const roundToFive = (minutes: number) => Math.max(1, Math.round(minutes / 5) * 5);
-  const intermediateTarget = Math.max(35, roundToFive(extraMinutes * 0.58));
-  const upperTarget = Math.max(40, roundToFive(extraMinutes * 0.82));
-  return [
-    ...explorationStages(30),
+  const stageDefinitions = [
+    {
+      radiusMeters: 1_200,
+      sampleCap: 3,
+      cumulativePlaceCap: 20,
+    },
+    {
+      radiusMeters: 2_300,
+      sampleCap: 4,
+      cumulativePlaceCap: 34,
+    },
+    {
+      radiusMeters: 3_500,
+      sampleCap: 5,
+      cumulativePlaceCap: 45,
+    },
     {
       radiusMeters: 10_000,
       sampleCap: 3,
       cumulativePlaceCap: 70,
-      cumulativeRouteCap: 6,
-      planningBudgetMinutes: extraMinutes,
-      targetExtraMinutes: [intermediateTarget, upperTarget],
     },
   ];
+  const stageCount = Math.min(stageDefinitions.length, targets.length);
+  const definitions =
+    stageCount === 3
+      ? [stageDefinitions[0], stageDefinitions[1], stageDefinitions[3]]
+      : stageDefinitions.slice(0, stageCount);
+  return definitions.map((definition, index) => {
+    const isFinal = index === definitions.length - 1;
+    const targetExtraMinutes = isFinal ? targets.slice(index) : targets.slice(index, index + 1);
+    return {
+      ...definition,
+      cumulativeRouteCap: isFinal ? targets.length : index + 1,
+      planningBudgetMinutes: extraMinutes,
+      targetExtraMinutes,
+    };
+  });
 }
 
 export function classifyDurationTargetResult(
@@ -235,6 +305,99 @@ export function durationAwareCorridorSamples(input: {
       journeyProgress: (index + 1) / (input.samples.length + 1),
     };
   });
+}
+
+/** Ephemeral, coordinate-free equivalence check for a single stage. Equal
+ * displacement vectors imply equal offset centres for the same validated
+ * baseline samples, even when the requested minute labels differ. */
+export function distinctDurationTargetsBySearchGeometry(input: {
+  samples: LatLng[];
+  baselineDistanceMeters: number;
+  baselineDurationSeconds: number;
+  targetExtraMinutes: number[];
+}): { targets: number[]; distinctGeometryCount: number; collisionCount: number } {
+  const signatures = new Set<string>();
+  const targets: number[] = [];
+  for (const targetExtraMinutes of input.targetExtraMinutes) {
+    const planned = durationAwareCorridorSamples({
+      samples: input.samples,
+      baselineDistanceMeters: input.baselineDistanceMeters,
+      baselineDurationSeconds: input.baselineDurationSeconds,
+      targetExtraMinutes: [targetExtraMinutes],
+    });
+    const signature = `${planned.length}:${planned
+      .map((sample) => Math.round(sample.lateralDisplacementMeters / 100) * 100)
+      .join(":")}`;
+    if (signatures.has(signature)) continue;
+    signatures.add(signature);
+    targets.push(targetExtraMinutes);
+  }
+  return {
+    targets,
+    distinctGeometryCount: signatures.size,
+    collisionCount: input.targetExtraMinutes.length - targets.length,
+  };
+}
+
+export function createPositiveAllowanceProductionCoordinator<TCandidate>(input: {
+  candidates: TCandidate[];
+  maximumPlacesRequests?: number;
+  maximumRouteRequests?: number;
+  onPlacesRequested?: (count: number) => void;
+  onRouteRequested?: () => void;
+}) {
+  const maximumPlacesRequests = input.maximumPlacesRequests ?? 15;
+  const maximumRouteRequests = input.maximumRouteRequests ?? 6;
+  let placesRequestsStarted = 0;
+  let routeRequestsStarted = 0;
+
+  return {
+    prepareStage(stage: {
+      samples: LatLng[];
+      baselineDistanceMeters: number;
+      baselineDurationSeconds: number;
+      targetExtraMinutes: number[];
+    }) {
+      const collision = distinctDurationTargetsBySearchGeometry(stage);
+      return {
+        ...collision,
+        samples: durationAwareCorridorSamples({
+          ...stage,
+          targetExtraMinutes: collision.targets,
+        }),
+      };
+    },
+    async collectPlaces<TPlace>(
+      centres: LatLng[],
+      search: (centre: LatLng) => Promise<TPlace[]>,
+    ): Promise<PromiseSettledResult<TPlace[]>[]> {
+      if (placesRequestsStarted + centres.length > maximumPlacesRequests)
+        throw new Error("PLACES_REQUEST_CAPACITY_EXHAUSTED");
+      placesRequestsStarted += centres.length;
+      input.onPlacesRequested?.(centres.length);
+      return Promise.allSettled(centres.map((centre) => search(centre)));
+    },
+    requestRoute<TResult>(request: () => Promise<TResult>): Promise<TResult> {
+      if (routeRequestsStarted >= maximumRouteRequests)
+        return Promise.reject(new Error("ROUTE_REQUEST_CAPACITY_EXHAUSTED"));
+      routeRequestsStarted += 1;
+      input.onRouteRequested?.();
+      return Promise.resolve().then(request);
+    },
+    recordCandidate(candidate: TCandidate): void {
+      input.candidates.push(candidate);
+    },
+    finalise<TResult>(select: (candidates: TCandidate[]) => TResult): TResult {
+      return select(input.candidates);
+    },
+    counts() {
+      return {
+        placesRequestsStarted,
+        routeRequestsStarted,
+        remainingRouteRequests: Math.max(0, maximumRouteRequests - routeRequestsStarted),
+      };
+    },
+  };
 }
 
 export function selectPlansForDetourTargets(

@@ -397,22 +397,11 @@ export function recordRefinedProviderCandidate(input: {
         input.requestedExtraMinutes,
       )
     : null;
-  const existingPass = scoreAndSelectRouteCandidateCollection({
-    candidates: input.candidates,
-    evidencePlaces: input.evidencePlaces,
-    start: input.start,
-    end: input.end,
-    mood: input.mood,
-    theme: input.theme,
-    requestedExtraMinutes: input.requestedExtraMinutes,
-    requiredStopCount: input.requiredStopCount,
-  });
-  const bestExistingScore = Math.max(
+  const evidenceStrength = Object.values(evaluation.evidenceAssociation.evidence).reduce(
+    (sum, count) => sum + count,
     0,
-    ...existingPass.scoredCandidates.map((candidate) => candidate.score),
   );
-  const qualityEligible =
-    evaluation.scoreResult.total >= 60 && bestExistingScore - evaluation.scoreResult.total <= 6;
+  const qualityEligible = evaluation.scoreResult.total >= 60 && evidenceStrength > 0;
   const inserted =
     evaluation.withinBudget &&
     evaluation.meaningfullyDifferent &&
@@ -597,17 +586,10 @@ function observationFromRelatedCandidate(input: {
     requestedExtraMinutes: input.requestedExtraMinutes,
     requiredStopCount: input.requiredStopCount,
   });
-  const existingPass = scoreAndSelectRouteCandidateCollection({
-    candidates: input.candidates,
-    evidencePlaces: input.evidencePlaces,
-    start: input.start,
-    end: input.end,
-    mood: input.mood,
-    theme: input.theme,
-    requestedExtraMinutes: input.requestedExtraMinutes,
-    requiredStopCount: input.requiredStopCount,
-  });
-  const bestExistingScore = Math.max(0, ...existingPass.scoredCandidates.map(({ score }) => score));
+  const evidenceStrength = Object.values(evaluation.evidenceAssociation.evidence).reduce(
+    (sum, count) => sum + count,
+    0,
+  );
   return {
     candidateId: candidate.candidateId,
     relatedPlanKey: input.related.family.familyId,
@@ -619,8 +601,7 @@ function observationFromRelatedCandidate(input: {
     withinBudget: evaluation.withinBudget,
     routeShapeEligible: evaluation.routeShape.routeShapeEligible,
     duplicate: !evaluation.meaningfullyDifferent,
-    qualityEligible:
-      evaluation.scoreResult.total >= 60 && bestExistingScore - evaluation.scoreResult.total <= 6,
+    qualityEligible: evaluation.scoreResult.total >= 60 && evidenceStrength > 0,
   };
 }
 

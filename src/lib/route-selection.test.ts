@@ -48,7 +48,7 @@ describe("selectRouteCandidate", () => {
     }));
     const before = selectRouteCandidate(ordinary, 30);
     assert.equal(before.selected.candidateId, "scenic-stage-5");
-    assert.equal(before.timeTargetOutcome, "NO_TARGET_BAND_ROUTE");
+    assert.equal(before.timeTargetOutcome, "MEANINGFUL_FALLBACK");
 
     const qualifyingRefinement = {
       ...candidate(ordinary.length, baselineSeconds + 26.2 * 60, 78),
@@ -90,10 +90,10 @@ describe("selectRouteCandidate", () => {
     const diagnostics = candidateSelectionDiagnostics(candidates, selection, 30);
 
     assert.equal(selection.selected.candidateId, "google-alternative-1");
-    assert.equal(selection.timeTargetOutcome, "LONGER_WEAKENED_QUALITY");
+    assert.equal(selection.timeTargetOutcome, "MEANINGFUL_FALLBACK");
     assert.equal(
       diagnostics.find((item) => item.candidateId === "scenic-stage-4")?.rejectionReason,
-      "BELOW_QUALITY_GUARDRAIL",
+      "BELOW_ABSOLUTE_QUALITY_FLOOR",
     );
     assert.equal(73 - 42 > TIME_TARGET_SCENIC_QUALITY_GUARDRAIL, true);
     assert.ok(
@@ -265,7 +265,7 @@ describe("selectRouteCandidate", () => {
         result,
         85,
       ).find((item) => item.selected)?.selectionReason,
-      "BELOW_TARGET_BEST_BALANCE",
+      "WEAK_ROUTE_BEST_BALANCE",
     );
   });
 
@@ -289,17 +289,17 @@ describe("selectRouteCandidate", () => {
       85,
     );
     assert.equal(result.selected.originalIndex, 1);
-    assert.equal(result.timeTargetOutcome, "LONGER_WEAKENED_QUALITY");
+    assert.equal(result.timeTargetOutcome, "WEAK_ROUTE_SELECTED");
   });
 
   it("does not reselect a target-band route that failed the absolute score floor", () => {
     const input = [candidate(0, 3_600, 50), candidate(1, 7_800, 55)];
     const result = selectRouteCandidate(input, 85);
     assert.equal(result.selected.originalIndex, 0);
-    assert.equal(result.timeTargetOutcome, "LONGER_WEAKENED_QUALITY");
+    assert.equal(result.timeTargetOutcome, "BASELINE_FALLBACK");
     assert.equal(
       candidateSelectionDiagnostics(input, result, 85)[1].rejectionReason,
-      "BELOW_QUALITY_GUARDRAIL",
+      "BELOW_ABSOLUTE_QUALITY_FLOOR",
     );
   });
 
@@ -335,7 +335,7 @@ describe("selectRouteCandidate", () => {
       85,
     );
     assert.equal(result.selected.originalIndex, 2);
-    assert.equal(result.timeTargetOutcome, "NO_TARGET_BAND_ROUTE");
+    assert.equal(result.timeTargetOutcome, "WEAK_ROUTE_SELECTED");
   });
 
   it("prefers an acceptable +28-minute route over +10 for a 30-minute request", () => {
@@ -366,7 +366,7 @@ describe("selectRouteCandidate", () => {
       ],
       85,
     );
-    assert.equal(result.selected.originalIndex, 1);
+    assert.equal(result.selected.originalIndex, 2);
     assert.ok(result.eligible.some((item) => item.originalIndex === 1));
     assert.ok(!result.eligible.some((item) => item.originalIndex === 3));
   });
@@ -432,12 +432,12 @@ describe("selectRouteCandidate", () => {
     assert.equal(result.selected.originalIndex, 2);
   });
 
-  it("does not trade away materially better scenic quality for utilisation", () => {
+  it("lets an absolute-floor target route fulfil the explicit allowance", () => {
     const result = selectRouteCandidate(
       [candidate(0, 3_600, 50), candidate(1, 4_680, 82), candidate(2, 6_480, 74)],
       60,
     );
-    assert.equal(result.selected.originalIndex, 1);
+    assert.equal(result.selected.originalIndex, 2);
   });
 
   it("prefers +23 over +1 when quality is equivalent for a 30-minute budget", () => {
@@ -485,13 +485,13 @@ describe("selectRouteCandidate", () => {
     assert.equal(result.selected.originalIndex, 2);
   });
 
-  it("rejects a severe scenic-quality collapse even inside the target band", () => {
+  it("uses the absolute floor rather than a relative target-band guardrail", () => {
     const result = selectRouteCandidate(
       [candidate(0, 3_600, 70), candidate(1, 4_500, 90), candidate(2, 7_800, 80)],
       85,
     );
-    assert.equal(result.selected.originalIndex, 1);
-    assert.equal(result.timeTargetOutcome, "LONGER_WEAKENED_QUALITY");
+    assert.equal(result.selected.originalIndex, 2);
+    assert.equal(result.timeTargetOutcome, "TARGET_MET");
   });
 
   it("uses the best legitimate lower candidate when no target-band route exists", () => {
@@ -500,7 +500,7 @@ describe("selectRouteCandidate", () => {
       85,
     );
     assert.equal(result.selected.originalIndex, 2);
-    assert.equal(result.timeTargetOutcome, "NO_TARGET_BAND_ROUTE");
+    assert.equal(result.timeTargetOutcome, "WEAK_ROUTE_SELECTED");
   });
 
   it("prefers +28 over a similarly scenic +10 route for a 30-minute target", () => {
@@ -544,5 +544,131 @@ describe("selectRouteCandidate", () => {
       result.candidates.map((item) => item.originalIndex),
       [0, 1, 2, 3],
     );
+  });
+
+  it("selects a safe +150 score-71 target over a +6 score-78 weak route", () => {
+    const result = selectRouteCandidate(
+      [
+        candidate(0, 3_600, 78),
+        candidate(1, 3_960, 78),
+        candidate(2, 7_380, 71),
+        candidate(3, 10_800, 71),
+        candidate(4, 12_600, 71),
+      ],
+      150,
+    );
+    assert.equal(result.selected.originalIndex, 4);
+    assert.equal(result.timeTargetOutcome, "TARGET_MET");
+  });
+
+  it("keeps +63 as a meaningful fallback when larger attempts fail", () => {
+    const result = selectRouteCandidate(
+      [candidate(0, 3_600, 78), candidate(1, 3_960, 78), candidate(2, 7_380, 71)],
+      180,
+    );
+    assert.equal(result.selected.originalIndex, 2);
+    assert.equal(result.timeTargetOutcome, "MEANINGFUL_FALLBACK");
+  });
+
+  it("rejects a sub-60 meaningful route and applies weak fallback policy", () => {
+    const input = [candidate(0, 3_600, 78), candidate(1, 3_960, 78), candidate(2, 7_380, 59)];
+    const result = selectRouteCandidate(input, 180);
+    assert.equal(result.selected.originalIndex, 1);
+    assert.equal(
+      candidateSelectionDiagnostics(input, result, 180)[2].rejectionReason,
+      "BELOW_ABSOLUTE_QUALITY_FLOOR",
+    );
+  });
+
+  it("selects +63 for 80 and +24 for 30 despite a stronger +6 score", () => {
+    assert.equal(
+      selectRouteCandidate(
+        [candidate(0, 3_600, 78), candidate(1, 3_960, 78), candidate(2, 7_380, 71)],
+        80,
+      ).selected.originalIndex,
+      2,
+    );
+    assert.equal(
+      selectRouteCandidate(
+        [candidate(0, 3_600, 78), candidate(1, 3_960, 78), candidate(2, 5_040, 70)],
+        30,
+      ).selected.originalIndex,
+      2,
+    );
+  });
+
+  it("uses score within the target band and utilisation within the meaningful band", () => {
+    const target = selectRouteCandidate(
+      [candidate(0, 3_600, 78), candidate(1, 10_800, 75), candidate(2, 12_600, 72)],
+      150,
+    );
+    assert.equal(target.selected.originalIndex, 1);
+    const meaningful = selectRouteCandidate(
+      [candidate(0, 3_600, 78), candidate(1, 7_380, 70), candidate(2, 9_000, 68)],
+      180,
+    );
+    assert.equal(meaningful.selected.originalIndex, 2);
+    assert.equal(meaningful.timeTargetOutcome, "MEANINGFUL_FALLBACK");
+  });
+
+  it("retains the six-point guardrail only for weak utilisation", () => {
+    const input = [candidate(0, 3_600, 78), candidate(1, 3_960, 78), candidate(2, 6_600, 71)];
+    const result = selectRouteCandidate(input, 180);
+    assert.equal(result.selected.originalIndex, 1);
+    assert.equal(
+      candidateSelectionDiagnostics(input, result, 180)[2].rejectionReason,
+      "BELOW_WEAK_QUALITY_GUARDRAIL",
+    );
+  });
+
+  it("never selects an evidence-free explicit scenic candidate", () => {
+    const evidenceFree = {
+      ...candidate(1, 8_460, 90),
+      source: "scenik" as const,
+      evidence: {
+        natural: 0,
+        historic: 0,
+        cultural: 0,
+        coastal: 0,
+        viewpoint: 0,
+        wildlife: 0,
+        food: 0,
+        otherPoi: 0,
+      },
+    };
+    const input = [candidate(0, 3_600, 70), evidenceFree];
+    const result = selectRouteCandidate(input, 85);
+    assert.equal(result.selected.originalIndex, 0);
+    assert.equal(
+      candidateSelectionDiagnostics(input, result, 85)[1].rejectionReason,
+      "EVIDENCE_FREE_ROUTE",
+    );
+  });
+
+  it("keeps unique and fully tied winners stable across complete input permutations", () => {
+    const unique = [
+      candidate(0, 3_600, 100, 9_000),
+      candidate(1, 3_960, 99, 8_000),
+      candidate(2, 7_380, 71, 12_000),
+      candidate(3, 10_800, 75, 14_000),
+      candidate(4, 12_600, 72, 13_000),
+    ];
+    const permutations = [
+      unique,
+      [...unique].reverse(),
+      [unique[3], unique[1], unique[4], unique[0], unique[2]],
+    ];
+    assert.deepEqual(
+      permutations.map((items) => selectRouteCandidate(items, 180).selected.originalIndex),
+      [4, 4, 4],
+    );
+
+    const tied = [
+      candidate(0, 3_600, 70, 9_000),
+      candidate(7, 10_800, 75, 12_000),
+      candidate(4, 10_800, 75, 12_000),
+    ];
+    assert.equal(selectRouteCandidate(tied, 150).selected.originalIndex, 4);
+    assert.equal(selectRouteCandidate([...tied].reverse(), 150).selected.originalIndex, 4);
   });
 });

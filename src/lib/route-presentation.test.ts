@@ -75,12 +75,53 @@ describe("selected route presentation", () => {
 
   it("explains below-target outcomes truthfully", () => {
     assert.equal(
+      timeBudgetExplanation(63 * 60, 180, true, "MEANINGFUL_FALLBACK").explanation,
+      "This useful longer route safely uses part of your allowance; no suitable route used more.",
+    );
+    assert.equal(
+      timeBudgetExplanation(6 * 60, 180, true, "WEAK_ROUTE_SELECTED").explanation,
+      "We found a worthwhile longer route, although the full allowance could not be used safely.",
+    );
+    assert.equal(
+      timeBudgetExplanation(0, 180, true, "BASELINE_FALLBACK").explanation,
+      "No safe, coherent longer route met the minimum journey-quality requirements.",
+    );
+    assert.equal(
       timeBudgetExplanation(15 * 60, 85, true, "LONGER_WEAKENED_QUALITY").explanation,
       "Longer routes were available, but they weakened the journey too much.",
     );
     assert.equal(
       timeBudgetExplanation(28 * 60, 85, true, "NO_TARGET_BAND_ROUTE").explanation,
       "We couldn’t find a suitable route using all of your requested time, so we chose the strongest journey available.",
+    );
+  });
+
+  it("uses authoritative seconds and outcome precedence at every utilisation boundary", () => {
+    const allowanceMinutes = 400 / 60;
+    const targetCopy = "Your larger allowance unlocked this route.";
+    const meaningfulCopy =
+      "This useful longer route safely uses part of your allowance; no suitable route used more.";
+    const balancedCopy = "This was the best balance of scenery and journey time.";
+
+    assert.notEqual(timeBudgetExplanation(139, allowanceMinutes).explanation, meaningfulCopy);
+    assert.equal(timeBudgetExplanation(140, allowanceMinutes).explanation, meaningfulCopy);
+    assert.equal(timeBudgetExplanation(299, allowanceMinutes).explanation, balancedCopy);
+    assert.equal(timeBudgetExplanation(300, allowanceMinutes).explanation, targetCopy);
+    assert.equal(timeBudgetExplanation(400, allowanceMinutes).explanation, targetCopy);
+    assert.notEqual(timeBudgetExplanation(401, allowanceMinutes).explanation, targetCopy);
+
+    assert.equal(timeBudgetExplanation(179, 4).utilisation, 179 / 240);
+    assert.equal(timeBudgetExplanation(179, 4).explanation, balancedCopy);
+    assert.notEqual(timeBudgetExplanation(83, 4).explanation, meaningfulCopy);
+
+    assert.equal(
+      timeBudgetExplanation(179, 4, true, "MEANINGFUL_FALLBACK").explanation,
+      meaningfulCopy,
+    );
+    assert.equal(timeBudgetExplanation(179, 4, true, "TARGET_MET").explanation, targetCopy);
+    assert.equal(
+      timeBudgetExplanation(Number.NaN, Number.NaN).explanation,
+      "Fastest route selected.",
     );
   });
 });

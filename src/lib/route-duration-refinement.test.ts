@@ -599,7 +599,7 @@ describe("bounded duration refinement", () => {
         })(),
       }),
     });
-    assert.equal(orchestration.initialPass.selection.timeTargetOutcome, "NO_TARGET_BAND_ROUTE");
+    assert.equal(orchestration.initialPass.selection.timeTargetOutcome, "MEANINGFUL_FALLBACK");
     assert.equal(orchestration.initialPass.selection.selected.candidateId, "ordinary-lower");
     assert.equal(orchestration.controllerInvocations, 1);
     assert.equal(orchestration.controller.executions.length, 1);
@@ -630,7 +630,7 @@ describe("bounded duration refinement", () => {
     assert.equal(after.timeTargetOutcome, "TARGET_MET");
     assert.equal(
       orchestration.finalPassWithoutRecordedCandidates.selection.timeTargetOutcome,
-      "NO_TARGET_BAND_ROUTE",
+      "MEANINGFUL_FALLBACK",
     );
   });
 
@@ -702,7 +702,7 @@ describe("bounded duration refinement", () => {
     });
     assert.equal(rejected.result.controller.stopReason, "PROVIDER_REQUEST_FAILED");
     assert.equal(rejected.result.controller.stateCounts.providerRequestsFailed, 1);
-    assert.equal(rejected.result.finalPass.selection.timeTargetOutcome, "NO_TARGET_BAND_ROUTE");
+    assert.equal(rejected.result.finalPass.selection.timeTargetOutcome, "MEANINGFUL_FALLBACK");
 
     const unusable = await run(async () =>
       computed([start, { lat: 0.01, lng: 0.5 }, end], Number.NaN, 118_000),
@@ -710,7 +710,7 @@ describe("bounded duration refinement", () => {
     assert.equal(unusable.result.controller.stopReason, "PROVIDER_RESPONSE_REJECTED");
     assert.equal(unusable.result.controller.stateCounts.providerResponsesEvaluated, 1);
     assert.equal(unusable.candidates.length, 2);
-    assert.equal(unusable.result.finalPass.selection.timeTargetOutcome, "NO_TARGET_BAND_ROUTE");
+    assert.equal(unusable.result.finalPass.selection.timeTargetOutcome, "MEANINGFUL_FALLBACK");
 
     const evaluationFailed = await run(async () => {
       const directions = computed([start, { lat: 0.01, lng: 0.5 }, end], 5_100, 118_000);
@@ -734,7 +734,7 @@ describe("bounded duration refinement", () => {
     assert.equal(recorded.durationTargetClassification, "MODERATE_UNDERSHOOT");
     assert.ok(boundary.result.controller.executions[0].observation);
     assert.equal(boundary.result.controller.reachedTargetBand, false);
-    assert.equal(boundary.result.finalPass.selection.timeTargetOutcome, "NO_TARGET_BAND_ROUTE");
+    assert.equal(boundary.result.finalPass.selection.timeTargetOutcome, "MEANINGFUL_FALLBACK");
   });
 
   function recordConnectedNegative(directions: ComputedDirections) {

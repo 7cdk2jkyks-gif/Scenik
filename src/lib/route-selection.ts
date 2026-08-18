@@ -23,6 +23,9 @@ export type RouteSelection<TScore> = {
   timeTargetOutcome:
     | "ZERO_TARGET"
     | "TARGET_MET"
+    | "MEANINGFUL_FALLBACK"
+    | "WEAK_ROUTE_SELECTED"
+    | "BASELINE_FALLBACK"
     | "LONGER_WEAKENED_QUALITY"
     | "NO_TARGET_BAND_ROUTE";
 };
@@ -45,6 +48,9 @@ export type CandidateSelectionDiagnostic = {
     | "DUPLICATE_ROUTE"
     | "OVER_TIME_BUDGET"
     | "INCOHERENT_ROUTE"
+    | "EVIDENCE_FREE_ROUTE"
+    | "BELOW_ABSOLUTE_QUALITY_FLOOR"
+    | "BELOW_WEAK_QUALITY_GUARDRAIL"
     | "BELOW_QUALITY_GUARDRAIL"
     | "LOWER_UTILISATION_OR_TIEBREAK"
     | null;
@@ -52,6 +58,9 @@ export type CandidateSelectionDiagnostic = {
     | "ZERO_MINUTE_BUDGET"
     | "ONLY_ELIGIBLE_ROUTE"
     | "TARGET_BAND_HIGHEST_SCENIC_QUALITY"
+    | "MEANINGFUL_FALLBACK_HIGHEST_UTILISATION"
+    | "WEAK_ROUTE_BEST_BALANCE"
+    | "BASELINE_FALLBACK"
     | "BELOW_TARGET_BEST_BALANCE"
     | null;
 };
@@ -62,6 +71,7 @@ export const MIN_TARGET_UTILISATION = 0.75;
 export const MIN_ACCEPTABLE_TARGET_SCORE = 60;
 /** Never trade more than six Scenic Score points solely to consume the requested time. */
 export const TIME_TARGET_SCENIC_QUALITY_GUARDRAIL = 6;
+export const MIN_MEANINGFUL_UTILISATION = 0.35;
 
 export type BudgetUtilisationBand = "none" | "weak" | "acceptable" | "strong" | "near-full";
 
@@ -149,7 +159,8 @@ export function routesAreMeaningfullyDifferent(
 export function deduplicateCandidates<TScore>(
   candidates: ScoredRouteCandidate<TScore>[],
 ): ScoredRouteCandidate<TScore>[] {
-  return candidates.filter((candidate, index, all) => {
+  const stableCandidates = [...candidates].sort((a, b) => a.originalIndex - b.originalIndex);
+  return stableCandidates.filter((candidate, index, all) => {
     if (
       !validMetric(candidate.directions.durationSeconds) ||
       candidate.directions.durationSeconds === 0 ||
@@ -184,18 +195,36 @@ export function selectRouteCandidate<TScore>(
   );
   const highestEligibleScore = Math.max(...eligible.map((candidate) => candidate.score));
   const qualityGuardrailScore = highestEligibleScore - TIME_TARGET_SCENIC_QUALITY_GUARDRAIL;
-  const targetBandCandidates = eligible.filter(
+  const hasRequiredEvidence = (candidate: ScoredRouteCandidate<TScore>) =>
+    candidate.source !== "scenik" ||
+    (candidate.evidence != null &&
+      Object.values(candidate.evidence).some((count) => Number.isFinite(count) && count > 0));
+  const utilisation = (candidate: ScoredRouteCandidate<TScore>) =>
+    candidateBudgetUtilisation(
+      fastestDurationSeconds,
+      candidate.directions.durationSeconds,
+      requestedExtraMinutes,
+    );
+  const safeQualityCandidates = eligible.filter(
     (candidate) =>
-      candidateBudgetUtilisation(
-        fastestDurationSeconds,
-        candidate.directions.durationSeconds,
-        requestedExtraMinutes,
-      ) >= MIN_TARGET_UTILISATION,
+      candidate.originalIndex !== baseline.originalIndex &&
+      candidate.directions.durationSeconds > fastestDurationSeconds &&
+      candidate.score >= MIN_ACCEPTABLE_TARGET_SCORE &&
+      hasRequiredEvidence(candidate),
   );
-  const acceptableTargetBandCandidates = targetBandCandidates.filter(
-    (candidate) =>
-      candidate.score >= MIN_ACCEPTABLE_TARGET_SCORE && candidate.score >= qualityGuardrailScore,
+  const targetBandCandidates = safeQualityCandidates.filter(
+    (candidate) => utilisation(candidate) >= MIN_TARGET_UTILISATION,
   );
+  const meaningfulFallbackCandidates = safeQualityCandidates.filter((candidate) => {
+    const value = utilisation(candidate);
+    return value >= MIN_MEANINGFUL_UTILISATION && value < MIN_TARGET_UTILISATION;
+  });
+  const weakCandidates = safeQualityCandidates.filter((candidate) => {
+    const value = utilisation(candidate);
+    return (
+      value > 0 && value < MIN_MEANINGFUL_UTILISATION && candidate.score >= qualityGuardrailScore
+    );
+  });
 
   const deterministicTargetSort = (
     a: ScoredRouteCandidate<TScore>,
@@ -238,29 +267,27 @@ export function selectRouteCandidate<TScore>(
     requestedExtraTimeBudgetSeconds === 0
       ? baseline
       : (() => {
-          if (acceptableTargetBandCandidates.length > 0)
-            return [...acceptableTargetBandCandidates].sort(deterministicTargetSort)[0];
-          const qualityEquivalent = eligible.filter(
-            (candidate) =>
-              candidateBudgetUtilisation(
-                fastestDurationSeconds,
-                candidate.directions.durationSeconds,
-                requestedExtraMinutes,
-              ) < MIN_TARGET_UTILISATION && candidate.score >= qualityGuardrailScore,
-          );
-          return [...qualityEquivalent].sort(deterministicFallbackSort)[0] ?? baseline;
+          if (targetBandCandidates.length > 0)
+            return [...targetBandCandidates].sort(deterministicTargetSort)[0];
+          if (meaningfulFallbackCandidates.length > 0)
+            return [...meaningfulFallbackCandidates].sort(deterministicFallbackSort)[0];
+          if (weakCandidates.length > 0)
+            return [...weakCandidates].sort(deterministicFallbackSort)[0];
+          return baseline;
         })();
 
   const timeTargetOutcome =
     requestedExtraTimeBudgetSeconds === 0
       ? "ZERO_TARGET"
-      : acceptableTargetBandCandidates.some(
-            (candidate) => candidate.originalIndex === selected.originalIndex,
-          )
+      : targetBandCandidates.some((candidate) => candidate.originalIndex === selected.originalIndex)
         ? "TARGET_MET"
-        : targetBandCandidates.length > 0
-          ? "LONGER_WEAKENED_QUALITY"
-          : "NO_TARGET_BAND_ROUTE";
+        : meaningfulFallbackCandidates.some(
+              (candidate) => candidate.originalIndex === selected.originalIndex,
+            )
+          ? "MEANINGFUL_FALLBACK"
+          : weakCandidates.some((candidate) => candidate.originalIndex === selected.originalIndex)
+            ? "WEAK_ROUTE_SELECTED"
+            : "BASELINE_FALLBACK";
 
   return {
     selected,
@@ -308,10 +335,16 @@ export function candidateSelectionDiagnostics<TScore>(
       directions.durationSeconds,
       requestedExtraMinutes,
     );
-    const belowTargetQualityGuardrail =
-      utilisation >= MIN_TARGET_UTILISATION &&
-      (candidate.score < MIN_ACCEPTABLE_TARGET_SCORE ||
-        scoreDifference > TIME_TARGET_SCENIC_QUALITY_GUARDRAIL);
+    const evidenceStrength = candidate.evidence
+      ? Object.values(candidate.evidence).reduce((sum, count) => sum + count, 0)
+      : null;
+    const evidenceFree = candidate.source === "scenik" && (evidenceStrength ?? 0) <= 0;
+    const belowAbsoluteQualityFloor =
+      utilisation > 0 && candidate.score < MIN_ACCEPTABLE_TARGET_SCORE;
+    const belowWeakQualityGuardrail =
+      utilisation > 0 &&
+      utilisation < MIN_MEANINGFUL_UTILISATION &&
+      scoreDifference > TIME_TARGET_SCENIC_QUALITY_GUARDRAIL;
     const rejectionReason = selected
       ? null
       : invalid
@@ -322,26 +355,24 @@ export function candidateSelectionDiagnostics<TScore>(
             ? "INCOHERENT_ROUTE"
             : !eligible
               ? "OVER_TIME_BUDGET"
-              : belowTargetQualityGuardrail ||
-                  scoreDifference > TIME_TARGET_SCENIC_QUALITY_GUARDRAIL
-                ? "BELOW_QUALITY_GUARDRAIL"
-                : "LOWER_UTILISATION_OR_TIEBREAK";
-    const evidenceStrength = candidate.evidence
-      ? Object.values(candidate.evidence).reduce((sum, count) => sum + count, 0)
-      : null;
+              : evidenceFree
+                ? "EVIDENCE_FREE_ROUTE"
+                : belowAbsoluteQualityFloor
+                  ? "BELOW_ABSOLUTE_QUALITY_FLOOR"
+                  : belowWeakQualityGuardrail
+                    ? "BELOW_WEAK_QUALITY_GUARDRAIL"
+                    : "LOWER_UTILISATION_OR_TIEBREAK";
     const selectionReason = !selected
       ? null
       : requestedExtraMinutes <= 0
         ? "ZERO_MINUTE_BUDGET"
-        : selection.eligible.length === 1
-          ? "ONLY_ELIGIBLE_ROUTE"
-          : candidateBudgetUtilisation(
-                selection.fastestDurationSeconds,
-                candidate.directions.durationSeconds,
-                requestedExtraMinutes,
-              ) >= MIN_TARGET_UTILISATION
-            ? "TARGET_BAND_HIGHEST_SCENIC_QUALITY"
-            : "BELOW_TARGET_BEST_BALANCE";
+        : selection.timeTargetOutcome === "TARGET_MET"
+          ? "TARGET_BAND_HIGHEST_SCENIC_QUALITY"
+          : selection.timeTargetOutcome === "MEANINGFUL_FALLBACK"
+            ? "MEANINGFUL_FALLBACK_HIGHEST_UTILISATION"
+            : selection.timeTargetOutcome === "WEAK_ROUTE_SELECTED"
+              ? "WEAK_ROUTE_BEST_BALANCE"
+              : "BASELINE_FALLBACK";
     return {
       candidateId: candidate.candidateId ?? null,
       originalIndex: candidate.originalIndex,
