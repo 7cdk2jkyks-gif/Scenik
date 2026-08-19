@@ -99,10 +99,15 @@ type SafeAttemptDiagnostic = {
   affectedWaypointIndex?: number | null;
   waypointAssociationStatus?: string | null;
   routeShapeAnalysisStatus?: string | null;
+  requestedWaypointForm?: "one-waypoint" | "two-waypoint-arc" | null;
+  effectiveWaypointForm?: "one-waypoint" | "two-waypoint-arc" | null;
+  effectiveProgress?: "early" | "middle" | "late" | "distributed" | null;
+  effectiveOrientation?: "left" | "right" | "alternating-mixed" | null;
+  effectiveWaypointCount?: number | null;
   refinementParentCandidateId?: string | null;
   refinementUpperCandidateId?: string | null;
   refinementAttemptNumber?: number | null;
-  refinementStrategy?: "RELATED_BRACKET" | "BOUNDED_EXPANSION" | null;
+  refinementStrategy?: "RELATED_BRACKET" | "BASELINE_ZERO_BRACKET" | "BOUNDED_EXPANSION" | null;
   refinementBracketLowerMinutes?: number | null;
   refinementBracketUpperMinutes?: number | null;
   refinementTargetBandReached?: boolean | null;
@@ -142,8 +147,11 @@ const SAFE_REFINEMENT_STOP_REASONS = new Set([
   "TARGET_REACHED",
   "PROVIDER_REMAINED_BELOW_TARGET",
   "NO_SAFE_REFINEMENT_BRACKET",
-  "NO_SUITABLE_WAYPOINT_PLAN",
-  "NO_RELATED_PLAN",
+  "NO_CALIBRATION_LOWER_BOUND",
+  "NO_SAFE_CALIBRATION_UPPER",
+  "NO_RELATED_PLAN_FAMILY",
+  "NO_DISTINCT_DERIVED_CONSTRUCTION",
+  "NO_CONSTRUCTION_HEADROOM",
   "PROVIDER_REQUEST_FAILED",
   "PROVIDER_RESPONSE_REJECTED",
   "PROVIDER_EVALUATION_FAILED",
@@ -170,6 +178,7 @@ export function buildRouteGenerationDiagnostic(input: {
   attemptsPlanned: number;
   attemptsCompleted: number;
   intendedTargetMinutes: number[];
+  processedTargetMinutes?: number[];
   adaptiveTargetMinutes: number[];
   actualAddedMinutesReturned: number;
   outcomeClassification: string;
@@ -223,6 +232,9 @@ export function buildRouteGenerationDiagnostic(input: {
     attemptsPlanned: input.attemptsPlanned,
     attemptsCompleted: input.attemptsCompleted,
     intendedTargetMinutes: [...input.intendedTargetMinutes],
+    ...(input.processedTargetMinutes
+      ? { processedTargetMinutes: [...input.processedTargetMinutes] }
+      : {}),
     adaptiveTargetMinutes: [...input.adaptiveTargetMinutes],
     actualAddedMinutesReturned: input.actualAddedMinutesReturned,
     outcomeClassification: input.outcomeClassification,
@@ -274,6 +286,16 @@ export function buildRouteGenerationDiagnostic(input: {
       affectedWaypointIndex: candidate.affectedWaypointIndex ?? null,
       waypointAssociationStatus: candidate.waypointAssociationStatus ?? null,
       routeShapeAnalysisStatus: candidate.routeShapeAnalysisStatus ?? null,
+      ...(candidate.requestedWaypointForm != null || candidate.effectiveWaypointForm != null
+        ? {
+            requestedWaypointForm: candidate.requestedWaypointForm ?? null,
+            effectiveWaypointForm: candidate.effectiveWaypointForm ?? null,
+            effectiveProgress: candidate.effectiveProgress ?? null,
+            effectiveOrientation: candidate.effectiveOrientation ?? null,
+            effectiveWaypointCount:
+              safeNonNegativeNumber(candidate.effectiveWaypointCount, true) ?? null,
+          }
+        : {}),
       ...(candidate.refinementAttemptNumber != null
         ? {
             refinementParentCandidateId: safeCandidateId(candidate.refinementParentCandidateId),
@@ -281,6 +303,7 @@ export function buildRouteGenerationDiagnostic(input: {
             refinementAttemptNumber: safeNonNegativeNumber(candidate.refinementAttemptNumber, true),
             refinementStrategy:
               candidate.refinementStrategy === "RELATED_BRACKET" ||
+              candidate.refinementStrategy === "BASELINE_ZERO_BRACKET" ||
               candidate.refinementStrategy === "BOUNDED_EXPANSION"
                 ? candidate.refinementStrategy
                 : null,
@@ -419,6 +442,13 @@ export function serializeRouteGenerationDiagnostic(
     plannedTargets: diagnostic.plannedExplorationStages.flatMap(
       (stage) => stage.targetExtraMinutes,
     ),
+    processedTargets: diagnostic.processedTargetMinutes ?? diagnostic.intendedTargetMinutes,
+    intendedTargets:
+      diagnostic.intendedTargetMinutes.length ===
+      (diagnostic.processedTargetMinutes ?? diagnostic.intendedTargetMinutes).length
+        ? diagnostic.intendedTargetMinutes
+        : null,
+    adaptiveTargets: diagnostic.adaptiveTargetMinutes,
     attemptRoles: input.attemptRoles ?? [],
     attemptsStarted: input.attemptsStarted ?? diagnostic.attemptsCompleted,
     attemptsCompleted: diagnostic.attemptsCompleted,

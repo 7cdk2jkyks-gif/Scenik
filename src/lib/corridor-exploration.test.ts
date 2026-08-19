@@ -19,6 +19,7 @@ import {
   isTargetBudgetCandidate,
   positiveAllowanceTargetLadder,
   positiveAllowanceAttemptRoles,
+  prepareRoleSpecificCorridorPlan,
   deterministicallyRankCorridorEvidence,
   selectPlansForDetourTargets,
   targetLateralDisplacementMeters,
@@ -26,6 +27,7 @@ import {
 import { timeBudgetExplanation } from "./route-presentation";
 import { selectRouteCandidate, type ScoredRouteCandidate } from "./route-selection";
 import { isValidLatLng, type ScenicPlace } from "./scenic-waypoint";
+import { effectiveConstructionMetadata } from "./route-duration-refinement";
 
 const anchors = [
   { lat: 0, lng: 0 },
@@ -244,6 +246,34 @@ describe("budget-driven corridor exploration", () => {
       roles.find((role) => role.targetExtraMinutes === 70)?.waypointForm,
       "two-waypoint-arc",
     );
+  });
+
+  it("distinguishes a requested two-waypoint role from its effective one-waypoint fallback", () => {
+    const requestedRole = {
+      targetExtraMinutes: 30,
+      side: "left" as const,
+      progress: "distributed" as const,
+      waypointForm: "two-waypoint-arc" as const,
+      evidencePreference: "overall-scenic" as const,
+    };
+    const planning = prepareRoleSpecificCorridorPlan({
+      places: [place("forest", 0.05, 0.4, "woods"), place("coast", 0.05, 0.6, "beach")],
+      preferredTypes: new Set(["woods"]),
+      anchors,
+      maximumEstimatedDetourMeters: 100_000,
+      attemptedSignatures: new Set(),
+      attemptedKinds: new Set(),
+      targetDetourMeters: [10_000],
+      attemptRole: requestedRole,
+    });
+    assert.equal(planning.plans[0]?.waypoints.length, 1);
+    const effective = planning.plans[0]
+      ? effectiveConstructionMetadata(planning.plans[0], anchors)
+      : null;
+    assert.equal(requestedRole.waypointForm, "two-waypoint-arc");
+    assert.equal(effective?.waypointForm, "one-waypoint");
+    assert.equal(effective?.progress, "middle");
+    assert.equal(effective?.orientation, "left");
   });
 
   it("keeps short-route +30, +80 and +180 constructions meaningfully distinct", () => {
@@ -897,6 +927,7 @@ describe("budget-driven corridor exploration", () => {
     const baselineDurationSeconds = 3_600;
     let placesCalls = 0;
     let scenicRouteCalls = 0;
+    let activeFixture: "180" | "30" = "180";
     const submittedWaypointCounts: number[] = [];
     const returnedGeometryByDuration = new Map<number, string>();
     const safePlaceTypes = [
@@ -950,11 +981,19 @@ describe("budget-driven corridor exploration", () => {
         address === "Origin" ? start : address === "Stop" ? requiredStop : end,
       searchNearbyScenicPlaces: async ({ center }: { center: { lat: number; lng: number } }) => {
         placesCalls += 1;
-        if (placesCalls <= 7) return [fixedCollisionPlace];
+        if (activeFixture === "180" && placesCalls <= 7) return [fixedCollisionPlace];
         return safePlaceTypes.map((primaryType, index) => ({
           id: `fixture-evidence-${placesCalls}-${index}`,
-          lat: center.lat + (index - 2.5) * 0.002,
-          lng: center.lng + (index - 2.5) * 0.015,
+          lat:
+            activeFixture === "30"
+              ? 51.04 + (index % 3) * 0.004
+              : center.lat + (index - 2.5) * 0.002,
+          lng:
+            activeFixture === "30"
+              ? index % 2 === 0
+                ? -0.5
+                : 0.5
+              : center.lng + (index - 2.5) * 0.015,
           primaryType,
           types: [primaryType, "woods", "nature_preserve"],
           displayName: `Fictional evidence ${placesCalls}-${index}`,
@@ -975,12 +1014,26 @@ describe("budget-driven corridor exploration", () => {
         const ordinal = scenicRouteCalls;
         const waypoints = input.waypoints ?? [];
         submittedWaypointCounts.push(waypoints.length - 1);
-        if (ordinal === 1) throw new Error("FICTIONAL_PROVIDER_FAILURE");
-        const addedSecondsByOrdinal = [0, 70 * 60 + 1, 145 * 60, 160 * 60 + 1];
-        const addedSeconds = addedSecondsByOrdinal[Math.min(ordinal, 4) - 1];
-        const requestedPoints = [start, ...waypoints, end];
+        if (activeFixture === "180" && ordinal === 1) throw new Error("FICTIONAL_PROVIDER_FAILURE");
+        const addedSecondsByOrdinal =
+          activeFixture === "180"
+            ? [0, 70 * 60 + 1, 145 * 60, 160 * 60 + 1]
+            : [33.5 * 60, 37.7 * 60, 97.7 * 60, 35 * 60, 27 * 60];
+        const addedSeconds =
+          addedSecondsByOrdinal[Math.min(ordinal, addedSecondsByOrdinal.length) - 1];
+        const requestedPoints =
+          activeFixture === "30" && ordinal >= 3
+            ? [
+                start,
+                ...[...waypoints, { lat: 51.04, lng: -0.5 }, { lat: 51.04, lng: 0.5 }].sort(
+                  (a, b) => a.lng - b.lng,
+                ),
+                end,
+              ]
+            : [start, ...waypoints, end];
         const returnedPoints =
-          ordinal === 3 && waypoints.length >= 2
+          (activeFixture === "180" && ordinal === 3 && waypoints.length >= 2) ||
+          (activeFixture === "30" && ordinal <= 2 && waypoints.length >= 2)
             ? [start, waypoints[1], waypoints[0], ...waypoints.slice(2), end]
             : requestedPoints;
         const directions = computed(
@@ -1093,6 +1146,8 @@ describe("budget-driven corridor exploration", () => {
         assert.equal(diagnosticLogs[0].includes(forbidden), false);
       const summary = JSON.parse(diagnosticLogs[0].slice("scenik-route-summary-v3 ".length));
       assert.deepEqual(summary.plannedTargets, [30, 60, 70, 135, 160]);
+      assert.deepEqual(summary.processedTargets, [30, 60, 70, 135, 160]);
+      assert.deepEqual(summary.intendedTargets, [30, 60, 70, 135, 160]);
       assert.deepEqual(summary.constructions, {
         scheduled: 5,
         processed: 5,
@@ -1104,6 +1159,62 @@ describe("budget-driven corridor exploration", () => {
       assert.equal(summary.refinement.stopReason, "TARGET_REACHED");
       assert.equal(summary.selected.band, "target");
       assert.ok(Math.abs(summary.selected.addedSeconds - result.measuredExtraTimeSeconds) < 6);
+
+      activeFixture = "30";
+      placesCalls = 0;
+      scenicRouteCalls = 0;
+      submittedWaypointCounts.length = 0;
+      returnedGeometryByDuration.clear();
+      diagnosticLogs.length = 0;
+      const downward = await (
+        planScenicRoute as unknown as (input: {
+          data: {
+            start_address: string;
+            end_address: string;
+            mood: string;
+            theme: string;
+            extra_minutes: number;
+            stops: string[];
+          };
+          context: { userId: string; supabase: object };
+        }) => Promise<typeof result>
+      )({
+        data: {
+          start_address: "Origin",
+          end_address: "Destination",
+          mood: "Peaceful",
+          theme: "Forest",
+          extra_minutes: 30,
+          stops: ["Stop"],
+        },
+        context: { userId: "00000000-0000-4000-8000-000000000000", supabase: {} },
+      });
+      assert.deepEqual(
+        downward.scoringDiagnostics.explorationTargets.flatMap(
+          (stage: { targetExtraMinutes: number[] }) => stage.targetExtraMinutes,
+        ),
+        [15, 23, 27],
+      );
+      assert.equal(scenicRouteCalls, 5);
+      assert.ok(placesCalls <= 15);
+      assert.equal(downward.scoringDiagnostics.scenicRouteRequestsAttempted, 5);
+      assert.equal(downward.selectedWinner, "scenik");
+      assert.equal(downward.timeTargetOutcome, "TARGET_MET");
+      assert.equal(downward.measuredExtraTimeSeconds, 27 * 60);
+      assert.equal(
+        returnedGeometryByDuration.get(downward.selectedRouteDurationSeconds),
+        downward.directions.encodedPolyline,
+      );
+      assert.equal(diagnosticLogs.length, 1);
+      const downwardSummary = JSON.parse(
+        diagnosticLogs[0].slice("scenik-route-summary-v3 ".length),
+      );
+      assert.deepEqual(downwardSummary.plannedTargets, [15, 23, 27]);
+      assert.deepEqual(downwardSummary.processedTargets, [15, 23, 27]);
+      assert.deepEqual(downwardSummary.intendedTargets, [15, 23, 27]);
+      assert.equal(downwardSummary.refinement.attemptsUsed, 2);
+      assert.equal(downwardSummary.refinement.stopReason, "TARGET_REACHED");
+      assert.equal(downwardSummary.selected.band, "target");
     } finally {
       console.info = originalInfo;
       mock.restore();

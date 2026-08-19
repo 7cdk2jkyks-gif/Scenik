@@ -79,6 +79,46 @@ describe("sequential long-budget attempts", () => {
 });
 
 describe("route-generation diagnostic log", () => {
+  it("keeps every processed ordinary target, including no-plan and collision outcomes", () => {
+    const serialized = serializeRouteGenerationDiagnostic({
+      correlationId: "route-target-lineage",
+      requestedExtraMinutes: 180,
+      baselineDurationSeconds: 3_600,
+      plannedExplorationStages: [
+        {
+          radiusMeters: 1_000,
+          sampleCap: 3,
+          cumulativePlaceCap: 20,
+          cumulativeRouteCap: 3,
+          targetExtraMinutes: [30, 60, 70, 135],
+        },
+      ],
+      attemptsPlanned: 4,
+      attemptsCompleted: 1,
+      processedTargetMinutes: [30, 60, 70],
+      intendedTargetMinutes: [30, 60, 70],
+      adaptiveTargetMinutes: [],
+      actualAddedMinutesReturned: 0,
+      outcomeClassification: "BASELINE_FALLBACK",
+      candidateEligibility: [],
+      candidateScenicScores: [],
+      finalSelectionReason: null,
+      totalServerProcessingDurationMs: 1,
+      constructionSummary: {
+        scheduled: 4,
+        processed: 3,
+        distinct: 1,
+        collisions: 1,
+        noPlan: 1,
+      },
+    });
+    const summary = JSON.parse(serialized.slice("scenik-route-summary-v3 ".length));
+    assert.deepEqual(summary.plannedTargets, [30, 60, 70, 135]);
+    assert.deepEqual(summary.processedTargets, [30, 60, 70]);
+    assert.deepEqual(summary.intendedTargets, [30, 60, 70]);
+    assert.deepEqual(summary.adaptiveTargets, []);
+  });
+
   it("joins null-target candidates by request-local ID rather than the first matching target", () => {
     const candidates = [
       { candidateId: "baseline-0", intended: null, score: 77 },
@@ -153,6 +193,11 @@ describe("route-generation diagnostic log", () => {
           affectedWaypointIndex: 1,
           waypointAssociationStatus: "EXACT",
           routeShapeAnalysisStatus: "ANALYSED",
+          requestedWaypointForm: "two-waypoint-arc",
+          effectiveWaypointForm: "one-waypoint",
+          effectiveProgress: "middle",
+          effectiveOrientation: "left",
+          effectiveWaypointCount: 1,
         },
       ],
       candidateScenicScores: [66, 72],
@@ -214,6 +259,11 @@ describe("route-generation diagnostic log", () => {
       affectedWaypointIndex: 1,
       waypointAssociationStatus: "EXACT",
       routeShapeAnalysisStatus: "ANALYSED",
+      requestedWaypointForm: "two-waypoint-arc",
+      effectiveWaypointForm: "one-waypoint",
+      effectiveProgress: "middle",
+      effectiveOrientation: "left",
+      effectiveWaypointCount: 1,
     });
     for (const forbidden of [
       "coordinates",
@@ -947,7 +997,7 @@ describe("route-generation diagnostic log", () => {
       providerResponsesReturned: 0,
       providerRequestsFailed: 0,
       providerResponsesEvaluated: 0,
-      stopReason: "NO_RELATED_PLAN",
+      stopReason: "NO_SAFE_REFINEMENT_BRACKET",
     });
   });
 });

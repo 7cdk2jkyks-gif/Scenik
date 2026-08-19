@@ -3,7 +3,12 @@ import {
   routesAreMeaningfullyDifferent,
   selectRouteCandidate,
 } from "./route-selection";
-import { classifyDurationTargetResult, type ScenicCorridorPlan } from "./corridor-exploration";
+import {
+  classifyDurationTargetResult,
+  effectiveRoutePlanSignature,
+  type PositiveAllowanceAttemptRole,
+  type ScenicCorridorPlan,
+} from "./corridor-exploration";
 import type { ComputedDirections, GeocodedLocation } from "./google-maps.server";
 import { safeAssociateEvidenceWithRoute } from "./route-evidence-association";
 import {
@@ -31,14 +36,21 @@ export const MIN_UNAMBIGUOUS_CORRIDOR_OFFSET_METERS = 50;
 export const DERIVED_MOVEMENT_NUMERICAL_EPSILON_METERS = 0.01;
 const MIN_SEGMENT_PROGRESS = 0.05;
 const MAX_SEGMENT_PROGRESS = 0.95;
+export const MIN_DERIVED_WAYPOINT_SEPARATION_METERS = 1_000;
 
-export type DurationRefinementStrategy = "RELATED_BRACKET" | "BOUNDED_EXPANSION";
+export type DurationRefinementStrategy =
+  | "RELATED_BRACKET"
+  | "BASELINE_ZERO_BRACKET"
+  | "BOUNDED_EXPANSION";
 export type DurationRefinementStopReason =
   | "TARGET_REACHED"
   | "PROVIDER_REMAINED_BELOW_TARGET"
   | "NO_SAFE_REFINEMENT_BRACKET"
-  | "NO_SUITABLE_WAYPOINT_PLAN"
-  | "NO_RELATED_PLAN"
+  | "NO_CALIBRATION_LOWER_BOUND"
+  | "NO_SAFE_CALIBRATION_UPPER"
+  | "NO_RELATED_PLAN_FAMILY"
+  | "NO_DISTINCT_DERIVED_CONSTRUCTION"
+  | "NO_CONSTRUCTION_HEADROOM"
   | "PROVIDER_REQUEST_FAILED"
   | "PROVIDER_RESPONSE_REJECTED"
   | "PROVIDER_EVALUATION_FAILED"
@@ -55,6 +67,20 @@ export type DurationConstructionObservation = {
   routeShapeEligible: boolean;
   duplicate: boolean;
   qualityEligible: boolean;
+  calibrationSafe: boolean;
+  intendedTargetSeconds: number | null;
+  constructionTargetSeconds: number | null;
+  adaptiveTargetSeconds: number | null;
+  requestedRole: PositiveAllowanceAttemptRole | null;
+  effectiveConstruction: EffectiveConstructionMetadata | null;
+  effectiveWaypointCount: number;
+};
+
+export type EffectiveConstructionMetadata = {
+  waypointForm: "one-waypoint" | "two-waypoint-arc";
+  insertionPositions: number[];
+  progress: "early" | "middle" | "late" | "distributed";
+  orientation: "left" | "right" | "alternating-mixed";
 };
 
 export type RequestLocalPlanFamily = {
@@ -181,6 +207,51 @@ function waypointDisplacement(waypoint: ScenicWaypointPlan, anchors: LatLng[]): 
   return projection ? Math.abs(projection.signedOffsetMeters) : null;
 }
 
+export function effectiveConstructionMetadata(
+  plan: ScenicCorridorPlan,
+  anchors: LatLng[],
+): EffectiveConstructionMetadata | null {
+  if (plan.waypoints.length < 1 || plan.waypoints.length > 2) return null;
+  const projections = plan.waypoints.map((waypoint) => {
+    const start = anchors[waypoint.insertionIndex];
+    const end = anchors[waypoint.insertionIndex + 1];
+    return start && end ? corridorProjection(start, end, waypoint) : null;
+  });
+  if (projections.some((projection) => projection == null)) return null;
+  const insertionPositions = plan.waypoints.map((waypoint) => waypoint.insertionIndex);
+  const progressValues = insertionPositions.map(
+    (position) => (position + 0.5) / Math.max(1, anchors.length - 1),
+  );
+  const progress =
+    Math.min(...progressValues) < 0.5 && Math.max(...progressValues) > 0.5
+      ? "distributed"
+      : progressValues.every((value) => value >= 0.25 && value <= 0.75)
+        ? "middle"
+        : progressValues.every((value) => value <= 0.5)
+          ? "early"
+          : "late";
+  const signs = (projections as CorridorProjection[]).map((projection) =>
+    Math.sign(projection.signedOffsetMeters),
+  );
+  const orientation = signs.every((sign) => sign > 0)
+    ? "left"
+    : signs.every((sign) => sign < 0)
+      ? "right"
+      : "alternating-mixed";
+  return {
+    waypointForm: plan.waypoints.length === 1 ? "one-waypoint" : "two-waypoint-arc",
+    insertionPositions,
+    progress,
+    orientation,
+  };
+}
+
+export function hasSafeDerivedWaypointSeparation(waypoints: ScenicWaypointPlan[]): boolean {
+  if (waypoints.length !== 2) return waypoints.length === 1;
+  const separation = haversineDistanceMeters(waypoints[0], waypoints[1]);
+  return Number.isFinite(separation) && separation >= MIN_DERIVED_WAYPOINT_SEPARATION_METERS;
+}
+
 export function createRequestLocalPlanFamily(input: {
   familyId: string;
   origin: LatLng;
@@ -218,11 +289,14 @@ export function deriveRouteShapingPlan(
   family: RequestLocalPlanFamily,
   targetDisplacementMeters: number,
 ): ScenicCorridorPlan | null {
+  const movingInward = targetDisplacementMeters < family.currentDisplacementMeters;
   if (
     !finitePositive(targetDisplacementMeters) ||
-    targetDisplacementMeters <= family.currentDisplacementMeters ||
-    targetDisplacementMeters - family.sourceDisplacementMeters >
-      MAX_DERIVED_WAYPOINT_DISPLACEMENT_FROM_SOURCE_METERS ||
+    targetDisplacementMeters === family.currentDisplacementMeters ||
+    targetDisplacementMeters > 70_000 ||
+    (!movingInward &&
+      targetDisplacementMeters - family.sourceDisplacementMeters >
+        MAX_DERIVED_WAYPOINT_DISPLACEMENT_FROM_SOURCE_METERS) ||
     family.sourcePlan.waypoints.length !== family.sourceWaypointIds.length ||
     planFamilyStructuralKey({
       origin: family.origin,
@@ -240,8 +314,11 @@ export function deriveRouteShapingPlan(
     const projection = corridorProjection(start, end, source);
     if (!projection) return null;
     const sourceOffset = Math.abs(projection.signedOffsetMeters);
-    const additional = targetDisplacementMeters - family.sourceDisplacementMeters;
-    const derivedOffset = sourceOffset + additional;
+    const derivedOffset = movingInward
+      ? sourceOffset * (targetDisplacementMeters / family.currentDisplacementMeters)
+      : sourceOffset + (targetDisplacementMeters - family.sourceDisplacementMeters);
+    if (!Number.isFinite(derivedOffset) || derivedOffset < MIN_UNAMBIGUOUS_CORRIDOR_OFFSET_METERS)
+      return null;
     const sign = Math.sign(projection.signedOffsetMeters);
     const east = projection.projectedEastMeters + projection.unitNormalEast * derivedOffset * sign;
     const north =
@@ -254,8 +331,9 @@ export function deriveRouteShapingPlan(
     };
     if (!finiteCoordinate(coordinate)) return null;
     const physicalMovementMeters = haversineDistanceMeters(source, coordinate);
+    if (!Number.isFinite(physicalMovementMeters) || physicalMovementMeters < 50) return null;
     if (
-      !Number.isFinite(physicalMovementMeters) ||
+      !movingInward &&
       physicalMovementMeters >
         MAX_DERIVED_WAYPOINT_DISPLACEMENT_FROM_SOURCE_METERS +
           DERIVED_MOVEMENT_NUMERICAL_EPSILON_METERS
@@ -270,18 +348,22 @@ export function deriveRouteShapingPlan(
     };
   });
   if (waypoints.some((waypoint) => waypoint == null)) return null;
-  return {
+  if (!hasSafeDerivedWaypointSeparation(waypoints as ScenicWaypointPlan[])) return null;
+  const derived = {
     ...family.sourcePlan,
     waypoints: waypoints as ScenicWaypointPlan[],
     estimatedDetourMeters: targetDisplacementMeters,
-    signature: `${family.sourcePlan.signature}:derived:${Math.round(targetDisplacementMeters)}`,
+    signature: "",
   };
+  derived.signature = effectiveRoutePlanSignature(derived, family.anchors);
+  return derived;
 }
 
 /** Production-used boundary: construction failure occurs before `request` and
  * therefore cannot consume or be reported as a provider request. */
 export type DerivedProviderResult<TObservation> =
   | { status: "NO_SAFE_CONSTRUCTION"; providerRequested: false; observation: null }
+  | { status: "EFFECTIVE_COLLISION"; providerRequested: false; observation: null }
   | { status: "PROVIDER_REQUEST_FAILED"; providerRequested: true; observation: null }
   | { status: "PROVIDER_RESPONSE_REJECTED"; providerRequested: true; observation: null }
   | { status: "PROVIDER_EVALUATION_FAILED"; providerRequested: true; observation: null }
@@ -295,6 +377,7 @@ export async function executeDerivedRouteRequest<TProviderResult, TObservation>(
   family: RequestLocalPlanFamily;
   targetDisplacementMeters: number;
   request(plan: ScenicCorridorPlan): Promise<TProviderResult>;
+  isEffectiveCollision?(plan: ScenicCorridorPlan): boolean;
   evaluate(
     plan: ScenicCorridorPlan,
     result: PromiseSettledResult<TProviderResult>,
@@ -303,6 +386,9 @@ export async function executeDerivedRouteRequest<TProviderResult, TObservation>(
   const plan = deriveRouteShapingPlan(input.family, input.targetDisplacementMeters);
   if (!plan || !isSafeRefinementCorridorPlan(plan)) {
     return { status: "NO_SAFE_CONSTRUCTION", providerRequested: false, observation: null };
+  }
+  if (input.isEffectiveCollision?.(plan)) {
+    return { status: "EFFECTIVE_COLLISION", providerRequested: false, observation: null };
   }
   const [result] = await Promise.allSettled([input.request(plan)]);
   if (result.status === "rejected") {
@@ -346,6 +432,8 @@ export type RouteCandidateForFinalScoring = {
     | null;
   scenicWaypoints: ScenicWaypointPlan[];
   routeShapeEligible: boolean;
+  requestedRole?: PositiveAllowanceAttemptRole | null;
+  effectiveConstruction?: EffectiveConstructionMetadata | null;
   refinementLineage?: RefinementCandidateLineage;
 };
 
@@ -369,6 +457,7 @@ export function recordRefinedProviderCandidate(input: {
   requestedExtraMinutes: number;
   requiredStopCount: number;
   expectedAnchors?: LatLng[];
+  constructionAnchors?: LatLng[];
   intendedAddedMinutes: number;
   constructionTargetMinutes: number;
 }) {
@@ -421,6 +510,11 @@ export function recordRefinedProviderCandidate(input: {
       durationTargetClassification,
       scenicWaypoints: [],
       routeShapeEligible: true,
+      requestedRole: null,
+      effectiveConstruction: effectiveConstructionMetadata(
+        input.shapingPlan,
+        input.constructionAnchors ?? [input.start, input.end],
+      ),
       refinementLineage: {
         parentCandidateId: input.parentCandidateId,
         familyId: input.familyId,
@@ -437,6 +531,20 @@ export function recordRefinedProviderCandidate(input: {
     routeShapeEligible: evaluation.routeShape.routeShapeEligible,
     duplicate: !evaluation.meaningfullyDifferent,
     qualityEligible,
+    calibrationSafe:
+      Number.isFinite(actualAddedSeconds) &&
+      actualAddedSeconds > 0 &&
+      evaluation.routeShape.routeShapeEligible &&
+      evaluation.meaningfullyDifferent,
+    intendedTargetSeconds: input.intendedAddedMinutes * 60,
+    constructionTargetSeconds: input.constructionTargetMinutes * 60,
+    adaptiveTargetSeconds: input.constructionTargetMinutes * 60,
+    requestedRole: null,
+    effectiveConstruction: effectiveConstructionMetadata(
+      input.shapingPlan,
+      input.constructionAnchors ?? [input.start, input.end],
+    ),
+    effectiveWaypointCount: input.shapingPlan.waypoints.length,
   };
   return { evaluation, inserted, observation, durationTargetClassification };
 }
@@ -610,6 +718,21 @@ function observationFromRelatedCandidate(input: {
     routeShapeEligible: evaluation.routeShape.routeShapeEligible,
     duplicate: !evaluation.meaningfullyDifferent,
     qualityEligible: evaluation.scoreResult.total >= 60 && evidenceStrength > 0,
+    calibrationSafe:
+      Number.isFinite(candidate.directions.durationSeconds) &&
+      candidate.directions.durationSeconds > baseline.durationSeconds &&
+      evaluation.routeShape.routeShapeEligible &&
+      evaluation.meaningfullyDifferent,
+    intendedTargetSeconds:
+      candidate.intendedAddedMinutes == null ? null : candidate.intendedAddedMinutes * 60,
+    constructionTargetSeconds:
+      candidate.constructionTargetMinutes == null ? null : candidate.constructionTargetMinutes * 60,
+    adaptiveTargetSeconds: null,
+    requestedRole: candidate.requestedRole ?? null,
+    effectiveConstruction:
+      candidate.effectiveConstruction ??
+      effectiveConstructionMetadata(input.related.family.sourcePlan, input.related.family.anchors),
+    effectiveWaypointCount: input.related.family.sourcePlan.waypoints.length,
   };
 }
 
@@ -636,6 +759,7 @@ export async function orchestrateDurationRefinement(input: {
     response: Promise<ComputedDirections>;
     expectedAnchors?: LatLng[];
   };
+  isEffectiveCollision?(plan: ScenicCorridorPlan): boolean;
   onRecorded?(input: {
     plan: ScenicCorridorPlan;
     result: PromiseSettledResult<ComputedDirections>;
@@ -685,16 +809,15 @@ export async function orchestrateDurationRefinement(input: {
     construct: async (refinement) => {
       controllerInvocations += 1;
       const related = input.relatedCandidates.find(
-        ({ candidateId, family }) =>
-          candidateId === refinement.parentCandidateId &&
-          family.familyId === refinement.relatedPlanKey,
+        ({ family }) => family.familyId === refinement.relatedPlanKey,
       );
-      if (!related) return { status: "NO_SAFE_CONSTRUCTION" as const };
+      if (!related) return { status: "NO_RELATED_PLAN_FAMILY" as const };
       let requestedCandidateId: string | null = null;
       let requestedExpectedAnchors: LatLng[] | undefined;
       const execution = await executeDerivedRouteRequest({
         family: related.family,
         targetDisplacementMeters: refinement.constructionValue,
+        isEffectiveCollision: input.isEffectiveCollision,
         request: (plan) => {
           const requested = input.request(plan, related.family);
           requestedCandidateId = requested.candidateId;
@@ -734,6 +857,7 @@ export async function orchestrateDurationRefinement(input: {
             requestedExtraMinutes: input.requestedExtraMinutes,
             requiredStopCount: input.requiredStopCount,
             expectedAnchors: requestedExpectedAnchors,
+            constructionAnchors: related.family.anchors,
             intendedAddedMinutes: refinement.intendedTargetMinutes,
             constructionTargetMinutes: refinement.adaptiveTargetMinutes,
           });
@@ -749,6 +873,7 @@ export async function orchestrateDurationRefinement(input: {
         },
       });
       if (execution.status === "NO_SAFE_CONSTRUCTION") return execution;
+      if (execution.status === "EFFECTIVE_COLLISION") return execution;
       if (execution.status === "PROVIDER_REQUEST_FAILED") return execution;
       if (execution.status === "PROVIDER_RESPONSE_REJECTED") return execution;
       if (execution.status === "PROVIDER_EVALUATION_FAILED") return execution;
@@ -783,7 +908,9 @@ export type DurationRefinementExecution = {
 };
 
 export type DurationRefinementConstructionResult =
+  | { status: "NO_RELATED_PLAN_FAMILY" }
   | { status: "NO_SAFE_CONSTRUCTION" }
+  | { status: "EFFECTIVE_COLLISION" }
   | { status: "PROVIDER_REQUEST_FAILED" }
   | { status: "PROVIDER_RESPONSE_REJECTED" }
   | { status: "PROVIDER_EVALUATION_FAILED" }
@@ -847,18 +974,25 @@ export function isSafeRefinementCorridorPlan(plan: ScenicCorridorPlan): boolean 
   );
 }
 
-function isEligibleUnderTarget(
-  observation: DurationConstructionObservation,
-  targetMinimumSeconds: number,
-) {
+export function isCalibrationSafeObservation(observation: DurationConstructionObservation) {
   return (
-    observation.withinBudget &&
+    observation.calibrationSafe &&
     observation.routeShapeEligible &&
     !observation.duplicate &&
-    observation.qualityEligible &&
     observation.actualAddedSeconds > 0 &&
-    observation.actualAddedSeconds < targetMinimumSeconds &&
-    finitePositive(observation.constructionValue)
+    Number.isFinite(observation.actualAddedSeconds) &&
+    finitePositive(observation.constructionValue) &&
+    observation.relatedPlanKey.length > 0 &&
+    observation.effectiveConstruction != null &&
+    observation.effectiveConstruction.insertionPositions.length ===
+      observation.effectiveWaypointCount &&
+    (observation.effectiveWaypointCount === 1 || observation.effectiveWaypointCount === 2)
+  );
+}
+
+function isCalibrationLower(observation: DurationConstructionObservation, desiredSeconds: number) {
+  return (
+    isCalibrationSafeObservation(observation) && observation.actualAddedSeconds < desiredSeconds
   );
 }
 
@@ -870,9 +1004,7 @@ function isSafeUpper(
   return (
     observation.relatedPlanKey === lower.relatedPlanKey &&
     observation.actualAddedSeconds > requestedExtraSeconds &&
-    observation.routeShapeEligible &&
-    !observation.duplicate &&
-    finitePositive(observation.constructionValue) &&
+    isCalibrationSafeObservation(observation) &&
     observation.constructionValue > lower.constructionValue
   );
 }
@@ -953,7 +1085,7 @@ export async function runBoundedDurationRefinement(input: {
     return {
       attempted: false,
       reachedTargetBand: false,
-      stopReason: "NO_SUITABLE_WAYPOINT_PLAN",
+      stopReason: "NO_CONSTRUCTION_HEADROOM",
       executions: [],
       stateCounts: refinementStateCounts([]),
     };
@@ -967,36 +1099,114 @@ export async function runBoundedDurationRefinement(input: {
       stateCounts: refinementStateCounts([]),
     };
   }
-  let lower = input.observations
-    .filter((observation) => isEligibleUnderTarget(observation, targetMinimumSeconds))
-    .sort(
-      (a, b) =>
-        b.actualAddedSeconds - a.actualAddedSeconds || a.candidateId.localeCompare(b.candidateId),
-    )[0];
-  if (!lower) {
+  const safeObservations = input.observations.filter(isCalibrationSafeObservation);
+  const families = new Map<string, DurationConstructionObservation[]>();
+  for (const observation of safeObservations) {
+    const family = families.get(observation.relatedPlanKey) ?? [];
+    family.push(observation);
+    families.set(observation.relatedPlanKey, family);
+  }
+  const realBrackets = [...families.entries()].flatMap(([familyKey, observations]) => {
+    const lowers = observations.filter((observation) =>
+      isCalibrationLower(observation, desiredSeconds),
+    );
+    const uppers = observations.filter(
+      (observation) => observation.actualAddedSeconds >= desiredSeconds,
+    );
+    return lowers.flatMap((lowerCandidate) =>
+      uppers
+        .filter(
+          (upperCandidate) => upperCandidate.constructionValue > lowerCandidate.constructionValue,
+        )
+        .map((upperCandidate) => ({ familyKey, lower: lowerCandidate, upper: upperCandidate })),
+    );
+  });
+  realBrackets.sort(
+    (a, b) =>
+      a.upper.actualAddedSeconds -
+        a.lower.actualAddedSeconds -
+        (b.upper.actualAddedSeconds - b.lower.actualAddedSeconds) ||
+      desiredSeconds - a.lower.actualAddedSeconds - (desiredSeconds - b.lower.actualAddedSeconds) ||
+      a.upper.actualAddedSeconds - desiredSeconds - (b.upper.actualAddedSeconds - desiredSeconds) ||
+      a.upper.effectiveWaypointCount - b.upper.effectiveWaypointCount ||
+      a.familyKey.localeCompare(b.familyKey) ||
+      a.lower.candidateId.localeCompare(b.lower.candidateId) ||
+      a.upper.candidateId.localeCompare(b.upper.candidateId),
+  );
+  const selectedBracket = realBrackets[0];
+  let lower = selectedBracket?.lower;
+  let upper = selectedBracket?.upper;
+  let usesBaselineZero = false;
+  if (!selectedBracket) {
+    upper = safeObservations
+      .filter((observation) => observation.actualAddedSeconds > desiredSeconds)
+      .sort(
+        (a, b) =>
+          a.actualAddedSeconds - b.actualAddedSeconds ||
+          a.effectiveWaypointCount - b.effectiveWaypointCount ||
+          a.relatedPlanKey.localeCompare(b.relatedPlanKey) ||
+          a.candidateId.localeCompare(b.candidateId),
+      )[0];
+    if (upper) usesBaselineZero = true;
+    else
+      lower = safeObservations
+        .filter((observation) => isCalibrationLower(observation, desiredSeconds))
+        .sort(
+          (a, b) =>
+            b.actualAddedSeconds - a.actualAddedSeconds ||
+            a.effectiveWaypointCount - b.effectiveWaypointCount ||
+            a.relatedPlanKey.localeCompare(b.relatedPlanKey) ||
+            a.candidateId.localeCompare(b.candidateId),
+        )[0];
+  }
+  if (!lower && !upper) {
     return {
       attempted: false,
       reachedTargetBand: false,
-      stopReason: "NO_SUITABLE_WAYPOINT_PLAN",
+      stopReason: input.observations.some(
+        (observation) => observation.actualAddedSeconds > desiredSeconds,
+      )
+        ? "NO_SAFE_CALIBRATION_UPPER"
+        : "NO_CALIBRATION_LOWER_BOUND",
       executions: [],
       stateCounts: refinementStateCounts([]),
     };
   }
-  let upper = input.observations
-    .filter((observation) => isSafeUpper(observation, lower, requestedExtraSeconds))
-    .sort(
-      (a, b) =>
-        a.actualAddedSeconds - b.actualAddedSeconds || a.candidateId.localeCompare(b.candidateId),
-    )[0];
+  if (!lower && upper) {
+    lower = {
+      ...upper,
+      candidateId: "baseline-zero",
+      actualAddedSeconds: 0,
+      constructionValue: 0,
+      withinBudget: true,
+      qualityEligible: false,
+      intendedTargetSeconds: null,
+      constructionTargetSeconds: null,
+      adaptiveTargetSeconds: null,
+      requestedRole: null,
+      effectiveWaypointCount: upper.effectiveWaypointCount,
+    };
+  }
+  if (!lower) throw new Error("REFINEMENT_LOWER_INVARIANT");
   const executions: DurationRefinementExecution[] = [];
   let sawOverBudget = false;
   let sawIncoherent = false;
   let sawUnderTarget = false;
 
   for (let index = 0; index < maximumAttempts; index += 1) {
-    const bracketValue = upper ? bracketConstructionValue({ lower, upper, desiredSeconds }) : null;
+    let bracketValue = upper ? bracketConstructionValue({ lower, upper, desiredSeconds }) : null;
+    if (
+      upper &&
+      bracketValue == null &&
+      upper.constructionValue > lower.constructionValue &&
+      upper.actualAddedSeconds > lower.actualAddedSeconds
+    )
+      bracketValue =
+        lower.constructionValue + (upper.constructionValue - lower.constructionValue) / 2;
     const strategy: DurationRefinementStrategy = bracketValue
-      ? "RELATED_BRACKET"
+      ? usesBaselineZero && lower.actualAddedSeconds === 0
+        ? "BASELINE_ZERO_BRACKET"
+        : "RELATED_BRACKET"
       : "BOUNDED_EXPANSION";
     const expansionRatio = Math.min(
       MAX_UNBRACKETED_EXPANSION_RATIO,
@@ -1006,11 +1216,14 @@ export async function runBoundedDurationRefinement(input: {
       input.maximumConstructionValue,
       bracketValue ?? lower.constructionValue * expansionRatio,
     );
-    if (!finitePositive(constructionValue) || constructionValue <= lower.constructionValue) {
+    const boundedConstruction = upper
+      ? constructionValue > lower.constructionValue && constructionValue < upper.constructionValue
+      : constructionValue > lower.constructionValue;
+    if (!finitePositive(constructionValue) || !boundedConstruction) {
       return {
         attempted: executions.length > 0,
         reachedTargetBand: false,
-        stopReason: upper ? "NO_SAFE_REFINEMENT_BRACKET" : "NO_SUITABLE_WAYPOINT_PLAN",
+        stopReason: upper ? "NO_CONSTRUCTION_HEADROOM" : "NO_CALIBRATION_LOWER_BOUND",
         executions,
         stateCounts: refinementStateCounts(executions),
       };
@@ -1018,7 +1231,8 @@ export async function runBoundedDurationRefinement(input: {
     const executionInput = {
       strategy,
       attemptNumber: index + 1,
-      parentCandidateId: lower.candidateId,
+      parentCandidateId:
+        lower.candidateId === "baseline-zero" && upper ? upper.candidateId : lower.candidateId,
       upperCandidateId: upper?.candidateId ?? null,
       intendedTargetMinutes: desiredSeconds / 60,
       adaptiveTargetMinutes: desiredSeconds / 60,
@@ -1028,11 +1242,29 @@ export async function runBoundedDurationRefinement(input: {
       relatedPlanKey: lower.relatedPlanKey,
     };
     const construction = await input.construct(executionInput);
+    if (construction.status === "NO_RELATED_PLAN_FAMILY") {
+      return {
+        attempted: executions.length > 0,
+        reachedTargetBand: false,
+        stopReason: "NO_RELATED_PLAN_FAMILY",
+        executions,
+        stateCounts: refinementStateCounts(executions),
+      };
+    }
     if (construction.status === "NO_SAFE_CONSTRUCTION") {
       return {
         attempted: executions.length > 0,
         reachedTargetBand: false,
-        stopReason: "NO_RELATED_PLAN",
+        stopReason: "NO_CONSTRUCTION_HEADROOM",
+        executions,
+        stateCounts: refinementStateCounts(executions),
+      };
+    }
+    if (construction.status === "EFFECTIVE_COLLISION") {
+      return {
+        attempted: executions.length > 0,
+        reachedTargetBand: false,
+        stopReason: "NO_DISTINCT_DERIVED_CONSTRUCTION",
         executions,
         stateCounts: refinementStateCounts(executions),
       };
@@ -1085,13 +1317,13 @@ export async function runBoundedDurationRefinement(input: {
       observation,
       providerResult: "PROVIDER_RESPONSE_EVALUATED",
     });
-    if (!observation.routeShapeEligible) {
+    if (!isCalibrationSafeObservation(observation)) {
       sawIncoherent = true;
       continue;
     }
     if (!observation.withinBudget) {
       sawOverBudget = true;
-      if (isSafeUpper(observation, lower, requestedExtraSeconds)) upper = observation;
+      if (isSafeUpper(observation, lower, desiredSeconds)) upper = observation;
       continue;
     }
     if (
@@ -1107,7 +1339,11 @@ export async function runBoundedDurationRefinement(input: {
         stateCounts: refinementStateCounts(executions),
       };
     }
-    if (isEligibleUnderTarget(observation, targetMinimumSeconds)) {
+    if (observation.actualAddedSeconds >= desiredSeconds) {
+      if (isSafeUpper(observation, lower, desiredSeconds)) upper = observation;
+      continue;
+    }
+    if (isCalibrationLower(observation, desiredSeconds)) {
       sawUnderTarget = true;
       lower = observation;
     }

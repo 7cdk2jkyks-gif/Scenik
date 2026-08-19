@@ -2,11 +2,15 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   DERIVED_MOVEMENT_NUMERICAL_EPSILON_METERS,
+  MIN_DERIVED_WAYPOINT_SEPARATION_METERS,
   MAX_SCENIC_ROUTE_ATTEMPTS,
   MAX_DERIVED_WAYPOINT_DISPLACEMENT_FROM_SOURCE_METERS,
   createRequestLocalPlanFamily,
   deriveRouteShapingPlan,
   executeDerivedRouteRequest,
+  effectiveConstructionMetadata,
+  isCalibrationSafeObservation,
+  hasSafeDerivedWaypointSeparation,
   isSafeRefinementCorridorPlan,
   orchestrateDurationRefinement,
   planFamilyStructuralKey,
@@ -83,6 +87,18 @@ function observation(
     routeShapeEligible: true,
     duplicate: false,
     qualityEligible: true,
+    calibrationSafe: true,
+    intendedTargetSeconds: actualAddedMinutes * 60,
+    constructionTargetSeconds: actualAddedMinutes * 60,
+    adaptiveTargetSeconds: null,
+    requestedRole: null,
+    effectiveConstruction: {
+      waypointForm: "one-waypoint",
+      insertionPositions: [0],
+      progress: "middle",
+      orientation: "left",
+    },
+    effectiveWaypointCount: 1,
     ...overrides,
   };
 }
@@ -157,6 +173,217 @@ describe("bounded duration refinement", () => {
         MAX_DERIVED_WAYPOINT_DISPLACEMENT_FROM_SOURCE_METERS +
           DERIVED_MOVEMENT_NUMERICAL_EPSILON_METERS,
     );
+  });
+
+  it("derives inward for one- and two-waypoint families while preserving topology", () => {
+    const one = family();
+    assert.ok(one);
+    const inward = deriveRouteShapingPlan(one, one.currentDisplacementMeters * 0.5);
+    assert.ok(inward);
+    assert.equal(inward.waypoints.length, 1);
+    assert.equal(inward.waypoints[0].id, sourcePlan.waypoints[0].id);
+    assert.equal(inward.waypoints[0].insertionIndex, 0);
+    assert.ok(Math.abs(inward.waypoints[0].lat) < Math.abs(sourcePlan.waypoints[0].lat));
+    assert.equal(inward.waypoints.at(-1)?.lng, sourcePlan.waypoints.at(-1)?.lng);
+
+    const twoPlan = {
+      ...sourcePlan,
+      waypoints: [
+        { ...sourcePlan.waypoints[0], id: "evidence-1", lng: 0.25, insertionIndex: 0 },
+        { ...sourcePlan.waypoints[0], id: "evidence-2", lng: 0.75, insertionIndex: 0 },
+      ],
+    };
+    const two = family({ sourceWaypointIds: ["evidence-1", "evidence-2"], plan: twoPlan });
+    assert.ok(two);
+    const twoInward = deriveRouteShapingPlan(two, two.currentDisplacementMeters * 0.4);
+    assert.ok(twoInward);
+    assert.deepEqual(
+      twoInward.waypoints.map(({ id, insertionIndex }) => ({ id, insertionIndex })),
+      [
+        { id: "evidence-1", insertionIndex: 0 },
+        { id: "evidence-2", insertionIndex: 0 },
+      ],
+    );
+    assert.ok(twoInward.waypoints.every((waypoint) => waypoint.lat > 0 && waypoint.lat < 0.01));
+  });
+
+  it("derives coordinate-free effective form, progress and orientation from the selected plan", () => {
+    const one = effectiveConstructionMetadata(sourcePlan, [
+      { lat: 0, lng: 0 },
+      { lat: 0, lng: 1 },
+    ]);
+    assert.deepEqual(one, {
+      waypointForm: "one-waypoint",
+      insertionPositions: [0],
+      progress: "middle",
+      orientation: "left",
+    });
+    assert.deepEqual(
+      effectiveConstructionMetadata(
+        {
+          ...sourcePlan,
+          waypoints: [{ ...sourcePlan.waypoints[0], lat: -0.01 }],
+        },
+        [
+          { lat: 0, lng: 0 },
+          { lat: 0, lng: 1 },
+        ],
+      ),
+      {
+        waypointForm: "one-waypoint",
+        insertionPositions: [0],
+        progress: "middle",
+        orientation: "right",
+      },
+    );
+    const mixedPlan = {
+      ...sourcePlan,
+      waypoints: [
+        { ...sourcePlan.waypoints[0], id: "evidence-1", lng: 0.5, insertionIndex: 0 },
+        {
+          ...sourcePlan.waypoints[0],
+          id: "evidence-2",
+          lat: -0.01,
+          lng: 1.5,
+          insertionIndex: 1,
+        },
+      ],
+    };
+    assert.deepEqual(
+      effectiveConstructionMetadata(mixedPlan, [
+        { lat: 0, lng: 0 },
+        { lat: 0, lng: 1 },
+        { lat: 0, lng: 2 },
+      ]),
+      {
+        waypointForm: "two-waypoint-arc",
+        insertionPositions: [0, 1],
+        progress: "distributed",
+        orientation: "alternating-mixed",
+      },
+    );
+  });
+
+  it("rejects an inward two-waypoint family that converges below the ordinary separation", async () => {
+    const closeAnchors = [
+      { lat: 0, lng: 0 },
+      { lat: 0, lng: 0.01 },
+      { lat: 0, lng: 0.02 },
+    ];
+    const convergingPlan = {
+      ...sourcePlan,
+      waypoints: [
+        { ...sourcePlan.waypoints[0], id: "evidence-1", lat: 0.01, lng: 0.009, insertionIndex: 0 },
+        { ...sourcePlan.waypoints[0], id: "evidence-2", lat: -0.01, lng: 0.011, insertionIndex: 1 },
+      ],
+    };
+    const converging = family({
+      destination: closeAnchors[2],
+      requiredStops: [closeAnchors[1]],
+      anchors: closeAnchors,
+      sourceWaypointIds: ["evidence-1", "evidence-2"],
+      plan: convergingPlan,
+    });
+    assert.ok(converging);
+    assert.ok(
+      haversineDistanceMeters(
+        converging.sourcePlan.waypoints[0],
+        converging.sourcePlan.waypoints[1],
+      ) >= MIN_DERIVED_WAYPOINT_SEPARATION_METERS,
+    );
+    assert.equal(
+      deriveRouteShapingPlan(converging, converging.currentDisplacementMeters * 0.1),
+      null,
+    );
+    let providerCalls = 0;
+    const execution = await executeDerivedRouteRequest({
+      family: converging,
+      targetDisplacementMeters: converging.currentDisplacementMeters * 0.1,
+      request: async () => {
+        providerCalls += 1;
+        return {};
+      },
+      evaluate: () => observation("never", 1, 1),
+    });
+    assert.equal(execution.status, "NO_SAFE_CONSTRUCTION");
+    assert.equal(providerCalls, 0);
+  });
+
+  it("applies an inclusive finite 1 km separation policy globally", () => {
+    const base = sourcePlan.waypoints[0];
+    let lower = 0;
+    let upper = 0.02;
+    for (let iteration = 0; iteration < 80; iteration += 1) {
+      const midpoint = (lower + upper) / 2;
+      if (haversineDistanceMeters({ lat: 0, lng: 0 }, { lat: midpoint, lng: 0 }) < 1_000)
+        lower = midpoint;
+      else upper = midpoint;
+    }
+    const exact = upper;
+    assert.equal(
+      hasSafeDerivedWaypointSeparation([
+        { ...base, lat: 0, lng: 0 },
+        { ...base, id: "evidence-2", lat: exact, lng: 0 },
+      ]),
+      true,
+    );
+    assert.equal(
+      hasSafeDerivedWaypointSeparation([
+        { ...base, lat: 0, lng: 0 },
+        { ...base, id: "evidence-2", lat: exact + 1e-8, lng: 0 },
+      ]),
+      true,
+    );
+    assert.equal(
+      hasSafeDerivedWaypointSeparation([
+        { ...base, lat: 0, lng: 0 },
+        { ...base, id: "evidence-2", lat: exact - 1e-8, lng: 0 },
+      ]),
+      false,
+    );
+    assert.equal(
+      hasSafeDerivedWaypointSeparation([
+        { ...base, lat: 10, lng: 179.999 },
+        { ...base, id: "evidence-2", lat: 10.01, lng: -179.999 },
+      ]),
+      true,
+    );
+    assert.equal(
+      hasSafeDerivedWaypointSeparation([
+        { ...base, lat: 89.98, lng: -90 },
+        { ...base, id: "evidence-2", lat: 89.98, lng: 90 },
+      ]),
+      true,
+    );
+    assert.equal(
+      hasSafeDerivedWaypointSeparation([
+        { ...base, lat: Number.NaN, lng: 0 },
+        { ...base, id: "evidence-2", lat: 0, lng: 0 },
+      ]),
+      false,
+    );
+  });
+
+  it("derives inward safely near the antimeridian and high latitude", () => {
+    const polarPlan = {
+      ...sourcePlan,
+      waypoints: [{ ...sourcePlan.waypoints[0], lat: 84.01, lng: 179.9 }],
+    };
+    const polar = family({
+      origin: { lat: 84, lng: 179.5 },
+      destination: { lat: 84, lng: -179.5 },
+      anchors: [
+        { lat: 84, lng: 179.5 },
+        { lat: 84, lng: -179.5 },
+      ],
+      plan: polarPlan,
+    });
+    assert.ok(polar);
+    const inward = deriveRouteShapingPlan(polar, polar.currentDisplacementMeters * 0.5);
+    assert.ok(inward);
+    assert.ok(Number.isFinite(inward.waypoints[0].lat));
+    assert.ok(inward.waypoints[0].lat <= 90 && inward.waypoints[0].lat >= -90);
+    assert.ok(inward.waypoints[0].lng <= 180 && inward.waypoints[0].lng >= -180);
   });
 
   it("enforces the physical displacement cap exactly and fails beyond it", () => {
@@ -378,6 +605,23 @@ describe("bounded duration refinement", () => {
       evaluate: () => observation("never", 0, 0),
     });
     assert.equal(noDerivation.providerRequested, false);
+    assert.equal(providerCalls, 0);
+
+    const collision = await executeDerivedRouteRequest({
+      family: exactFamily,
+      targetDisplacementMeters: exactFamily.currentDisplacementMeters * 0.5,
+      isEffectiveCollision: () => true,
+      request: async () => {
+        providerCalls += 1;
+        return { durationSeconds: 1 };
+      },
+      evaluate: () => observation("never", 0, 0),
+    });
+    assert.deepEqual(collision, {
+      status: "EFFECTIVE_COLLISION",
+      providerRequested: false,
+      observation: null,
+    });
     assert.equal(providerCalls, 0);
 
     const requested = await executeDerivedRouteRequest({
@@ -633,6 +877,120 @@ describe("bounded duration refinement", () => {
       orchestration.finalPassWithoutRecordedCandidates.selection.timeTargetOutcome,
       "MEANINGFUL_FALLBACK",
     );
+  });
+
+  it("executes the captured +30 downward fixture through Production recording and selection", async () => {
+    const exactFamily = family();
+    assert.ok(exactFamily);
+    const start = { lat: 0, lng: 0, formatted: "Start" };
+    const end = { lat: 0, lng: 1, formatted: "End" };
+    const baseline = computed([start, end], 3_600, 111_000);
+    const candidates: RouteCandidateForFinalScoring[] = [
+      {
+        candidateId: "baseline-0",
+        explorationStage: null,
+        directions: baseline,
+        source: "fastest",
+        selectedWaypointReason: null,
+        intendedAddedMinutes: null,
+        constructionTargetMinutes: null,
+        durationTargetClassification: null,
+        scenicWaypoints: [],
+        routeShapeEligible: true,
+      },
+    ];
+    const evidencePlaces = [
+      "woods",
+      "historical_place",
+      "scenic_spot",
+      "beach",
+      "wildlife_refuge",
+      "farmers_market",
+    ].map((primaryType, index) => ({
+      id: `verified-downward-${index}`,
+      lat: 0.004 + index * 0.0001,
+      lng: 0.75,
+      primaryType,
+      types: [primaryType, "woods", "nature_preserve"],
+      displayName: `Verified downward evidence ${index}`,
+    }));
+    const existingObservations = [
+      observation("target-15-spur", 33.5, exactFamily.currentDisplacementMeters * 0.6, {
+        relatedPlanKey: exactFamily.familyId,
+        withinBudget: false,
+        routeShapeEligible: false,
+        calibrationSafe: false,
+      }),
+      observation("target-23-spur", 37.7, exactFamily.currentDisplacementMeters * 0.8, {
+        relatedPlanKey: exactFamily.familyId,
+        withinBudget: false,
+        routeShapeEligible: false,
+        calibrationSafe: false,
+      }),
+      observation("target-27-upper", 97.7, exactFamily.currentDisplacementMeters, {
+        relatedPlanKey: exactFamily.familyId,
+        withinBudget: false,
+        qualityEligible: false,
+      }),
+    ];
+    const constructionRatios: number[] = [];
+    let calls = 3;
+    let selectedGeometry = "";
+    const result = await orchestrateDurationRefinement({
+      candidates,
+      relatedCandidates: [{ candidateId: "target-27-upper", family: exactFamily }],
+      existingObservations,
+      evidencePlaces,
+      start,
+      end,
+      mood: "Peaceful",
+      theme: "Forest",
+      requestedExtraMinutes: 30,
+      requiredStopCount: 0,
+      attemptsAlreadyUsed: 3,
+      maximumConstructionValue: 70_000,
+      explorationStage: 2,
+      request: (plan) => {
+        calls += 1;
+        constructionRatios.push(plan.estimatedDetourMeters / exactFamily.currentDisplacementMeters);
+        const addedSeconds = calls === 4 ? 35 * 60 : 27 * 60;
+        const directions = computed(
+          [start, plan.waypoints[0], { lat: 0.004, lng: 0.75 }, end],
+          baseline.durationSeconds + addedSeconds,
+          118_000,
+        );
+        if (addedSeconds === 27 * 60) selectedGeometry = directions.encodedPolyline;
+        return {
+          candidateId: `duration-refinement-${calls - 3}`,
+          expectedAnchors: [start, plan.waypoints[0], end],
+          response: Promise.resolve(directions),
+        };
+      },
+    });
+    assert.equal(calls, 5);
+    assert.ok(Math.abs(constructionRatios[0] - 27 / 97.7) < 0.001);
+    assert.ok(constructionRatios[1] < constructionRatios[0]);
+    assert.equal(result.controller.stopReason, "TARGET_REACHED");
+    assert.equal(result.controller.stateCounts.providerRequestsStarted, 2);
+    assert.equal(result.finalPass.selection.selected.candidateId, "duration-refinement-2");
+    assert.equal(result.finalPass.selection.selected.directions.encodedPolyline, selectedGeometry);
+    assert.equal(result.finalPass.selection.timeTargetOutcome, "TARGET_MET");
+    const selected = result.finalPass.scoredCandidates.find(
+      (candidate) => candidate.candidateId === "duration-refinement-2",
+    );
+    assert.ok(selected);
+    assert.ok(selected.scoreResult.total >= 60);
+    assert.equal(selected.evidenceAssociation.evidenceMatchedThroughWaypoints, 0);
+    assert.equal(selected.evidenceAssociation.evidenceMatchedToGeometry, 6);
+    assert.equal(
+      candidates.some((candidate) => candidate.candidateId === "duration-refinement-1"),
+      false,
+    );
+    assert.deepEqual(candidates.at(-1)?.refinementLineage, {
+      parentCandidateId: "duration-refinement-1",
+      familyId: exactFamily.familyId,
+      attemptNumber: 2,
+    });
   });
 
   it("classifies full-chain provider failures and the one-second boundary", async () => {
@@ -1041,7 +1399,7 @@ describe("bounded duration refinement", () => {
           return { status: "NO_SAFE_CONSTRUCTION" as const };
         },
       });
-      assert.equal(calls.length, utilisation < 0.75 ? 1 : 0);
+      assert.equal(calls.length, utilisation < 0.75 || utilisation > 1 ? 1 : 0);
     }
   });
 
@@ -1207,6 +1565,214 @@ describe("bounded duration refinement", () => {
     });
     assert.deepEqual(upperIds, [null, "refined-upper"]);
     assert.equal(result.reachedTargetBand, true);
+  });
+
+  it("uses baseline zero and a safe +97.7 upper for deterministic downward refinement", async () => {
+    const constructions: number[] = [];
+    const unsafeSpur = (candidateId: string, minutes: number, value: number) =>
+      observation(candidateId, minutes, value, {
+        withinBudget: false,
+        routeShapeEligible: false,
+        calibrationSafe: false,
+      });
+    const result = await runBoundedDurationRefinement({
+      requestedExtraMinutes: 30,
+      baselineDurationMinutes: 367.7,
+      attemptsAlreadyUsed: 3,
+      observations: [
+        unsafeSpur("target-15-spur", 33.5, 6_000),
+        unsafeSpur("target-23-spur", 37.7, 8_000),
+        observation("target-27-upper", 97.7, 10_000, {
+          withinBudget: false,
+          qualityEligible: false,
+        }),
+      ],
+      maximumConstructionValue: 70_000,
+      construct: async (input) => {
+        constructions.push(input.constructionValue);
+        return evaluated(
+          constructions.length === 1
+            ? observation("first-refinement", 35, input.constructionValue, {
+                withinBudget: false,
+              })
+            : observation("selected-refinement", 27, input.constructionValue),
+        );
+      },
+    });
+    assert.equal(result.reachedTargetBand, true);
+    assert.equal(result.executions.length, 2);
+    assert.equal(result.executions[0].strategy, "BASELINE_ZERO_BRACKET");
+    assert.equal(result.executions[0].parentCandidateId, "target-27-upper");
+    assert.ok(Math.abs(constructions[0] / 10_000 - 27 / 97.7) < 0.001);
+    assert.ok(constructions[1] < constructions[0]);
+    assert.deepEqual(result.stateCounts, {
+      safeConstructionsProduced: 2,
+      providerRequestsStarted: 2,
+      providerResponsesReturned: 2,
+      providerRequestsFailed: 0,
+      providerResponsesEvaluated: 2,
+    });
+  });
+
+  it("separates calibration safety from budget, evidence and score eligibility", () => {
+    const safeOverBudget = observation("safe-upper", 97.7, 10_000, {
+      withinBudget: false,
+      qualityEligible: false,
+    });
+    const safeScore43 = observation("score-43", 77, 20_000, {
+      qualityEligible: false,
+    });
+    assert.equal(isCalibrationSafeObservation(safeOverBudget), true);
+    assert.equal(isCalibrationSafeObservation(safeScore43), true);
+    for (const unsafe of [
+      { calibrationSafe: false },
+      { routeShapeEligible: false },
+      { duplicate: true },
+      { relatedPlanKey: "" },
+      { effectiveWaypointCount: 3 },
+    ]) {
+      assert.equal(isCalibrationSafeObservation(observation("unsafe", 20, 10_000, unsafe)), false);
+    }
+  });
+
+  it("uses coherent score-43 calibration for +80, +140 and +180 without selecting it", async () => {
+    for (const requestedExtraMinutes of [80, 140, 180]) {
+      const constructions: number[] = [];
+      const result = await runBoundedDurationRefinement({
+        requestedExtraMinutes,
+        baselineDurationMinutes: 367.7,
+        attemptsAlreadyUsed: 5,
+        observations: [
+          observation("score-43-lower", 77, 20_000, {
+            withinBudget: true,
+            qualityEligible: false,
+          }),
+        ],
+        maximumConstructionValue: 70_000,
+        construct: async (input) => {
+          constructions.push(input.constructionValue);
+          return evaluated(
+            observation(
+              "independently-qualified",
+              requestedExtraMinutes * 0.9,
+              input.constructionValue,
+              { withinBudget: true },
+            ),
+          );
+        },
+      });
+      assert.equal(result.executions[0].parentCandidateId, "score-43-lower");
+      assert.equal(
+        result.executions[0].strategy,
+        requestedExtraMinutes === 80 ? "BASELINE_ZERO_BRACKET" : "BOUNDED_EXPANSION",
+      );
+      assert.equal(constructions[0] > 20_000, requestedExtraMinutes !== 80);
+      assert.equal(result.reachedTargetBand, true);
+    }
+  });
+
+  it("chooses the smallest safe upper then the simpler plan deterministically", async () => {
+    let selectedParent = "";
+    const result = await runBoundedDurationRefinement({
+      requestedExtraMinutes: 30,
+      baselineDurationMinutes: 300,
+      attemptsAlreadyUsed: 5,
+      observations: [
+        observation("larger", 45, 9_000, { withinBudget: false }),
+        observation("two-waypoint", 40, 8_000, {
+          withinBudget: false,
+          effectiveWaypointCount: 2,
+        }),
+        observation("one-waypoint", 40, 8_000, { withinBudget: false }),
+      ],
+      maximumConstructionValue: 70_000,
+      construct: async (input) => {
+        selectedParent = input.parentCandidateId;
+        return evaluated(observation("target", 27, input.constructionValue));
+      },
+    });
+    assert.equal(selectedParent, "one-waypoint");
+    assert.equal(result.reachedTargetBand, true);
+  });
+
+  it("ranks complete real brackets globally by family before expansion or synthetic zero", async () => {
+    const fixtures = [
+      observation("family-a-high-lower", 26, 26_000, {
+        relatedPlanKey: "family-a",
+        qualityEligible: false,
+      }),
+      observation("family-b-lower", 20, 20_000, {
+        relatedPlanKey: "family-b",
+        qualityEligible: false,
+        requestedRole: {
+          targetExtraMinutes: 30,
+          waypointForm: "two-waypoint-arc",
+          progress: "distributed",
+          side: "alternating-arc",
+          evidencePreference: "alternate-cluster",
+        },
+      }),
+      observation("family-b-upper", 30, 30_000, {
+        relatedPlanKey: "family-b",
+        withinBudget: true,
+        qualityEligible: false,
+      }),
+      observation("family-c-lower", 18, 18_000, {
+        relatedPlanKey: "family-c",
+        qualityEligible: false,
+      }),
+      observation("family-c-upper", 40, 40_000, {
+        relatedPlanKey: "family-c",
+        withinBudget: false,
+      }),
+    ];
+    const selections: string[] = [];
+    for (const observations of [
+      fixtures,
+      [...fixtures].reverse(),
+      [fixtures[2], fixtures[0], fixtures[4], fixtures[1], fixtures[3]],
+    ]) {
+      const result = await runBoundedDurationRefinement({
+        requestedExtraMinutes: 30,
+        baselineDurationMinutes: 300,
+        attemptsAlreadyUsed: 5,
+        observations,
+        maximumConstructionValue: 50_000,
+        construct: async (input) => {
+          selections.push(
+            `${input.relatedPlanKey}:${input.parentCandidateId}:${input.upperCandidateId}`,
+          );
+          return evaluated(
+            observation("target", 27, input.constructionValue, {
+              relatedPlanKey: input.relatedPlanKey,
+            }),
+          );
+        },
+      });
+      assert.equal(result.executions[0].strategy, "RELATED_BRACKET");
+      assert.equal(result.reachedTargetBand, true);
+    }
+    assert.deepEqual(selections, [
+      "family-b:family-b-lower:family-b-upper",
+      "family-b:family-b-lower:family-b-upper",
+      "family-b:family-b-lower:family-b-upper",
+    ]);
+  });
+
+  it("reports an effective derived collision without counting a provider request", async () => {
+    let requests = 0;
+    const result = await runBoundedDurationRefinement({
+      requestedExtraMinutes: 30,
+      baselineDurationMinutes: 300,
+      attemptsAlreadyUsed: 3,
+      observations: [observation("upper", 97.7, 10_000, { withinBudget: false })],
+      maximumConstructionValue: 70_000,
+      construct: async () => ({ status: "EFFECTIVE_COLLISION" as const }),
+    });
+    requests += result.stateCounts.providerRequestsStarted;
+    assert.equal(result.stopReason, "NO_DISTINCT_DERIVED_CONSTRUCTION");
+    assert.equal(result.attempted, false);
+    assert.equal(requests, 0);
   });
 
   it("stops after the fifth total attempt when the first refinement reaches target", async () => {
