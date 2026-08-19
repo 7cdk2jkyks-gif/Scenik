@@ -212,12 +212,40 @@ export function effectiveConstructionMetadata(
   anchors: LatLng[],
 ): EffectiveConstructionMetadata | null {
   if (plan.waypoints.length < 1 || plan.waypoints.length > 2) return null;
-  const projections = plan.waypoints.map((waypoint) => {
+  if (plan.waypoints.length === 2 && !hasSafeDerivedWaypointSeparation(plan.waypoints)) return null;
+  const sides = plan.waypoints.map((waypoint) => {
     const start = anchors[waypoint.insertionIndex];
     const end = anchors[waypoint.insertionIndex + 1];
-    return start && end ? corridorProjection(start, end, waypoint) : null;
+    if (!start || !end || !finiteCoordinate(waypoint)) return null;
+    const radians = (value: number) => (value * Math.PI) / 180;
+    const angularDistance = haversineDistanceMeters(start, waypoint) / 6_371_008.8;
+    const bearing = (from: LatLng, to: LatLng) => {
+      const fromLatitude = radians(from.lat);
+      const toLatitude = radians(to.lat);
+      const longitudeDelta = radians(wrappedLongitudeDelta(from.lng, to.lng));
+      return Math.atan2(
+        Math.sin(longitudeDelta) * Math.cos(toLatitude),
+        Math.cos(fromLatitude) * Math.sin(toLatitude) -
+          Math.sin(fromLatitude) * Math.cos(toLatitude) * Math.cos(longitudeDelta),
+      );
+    };
+    if (haversineDistanceMeters(start, end) < 100) return null;
+    const signedCrossTrackMeters =
+      -Math.asin(
+        Math.max(
+          -1,
+          Math.min(
+            1,
+            Math.sin(angularDistance) * Math.sin(bearing(start, waypoint) - bearing(start, end)),
+          ),
+        ),
+      ) * 6_371_008.8;
+    return Number.isFinite(signedCrossTrackMeters) &&
+      Math.abs(signedCrossTrackMeters) >= MIN_UNAMBIGUOUS_CORRIDOR_OFFSET_METERS
+      ? Math.sign(signedCrossTrackMeters)
+      : null;
   });
-  if (projections.some((projection) => projection == null)) return null;
+  if (sides.some((side) => side == null)) return null;
   const insertionPositions = plan.waypoints.map((waypoint) => waypoint.insertionIndex);
   const progressValues = insertionPositions.map(
     (position) => (position + 0.5) / Math.max(1, anchors.length - 1),
@@ -230,9 +258,7 @@ export function effectiveConstructionMetadata(
         : progressValues.every((value) => value <= 0.5)
           ? "early"
           : "late";
-  const signs = (projections as CorridorProjection[]).map((projection) =>
-    Math.sign(projection.signedOffsetMeters),
-  );
+  const signs = sides as number[];
   const orientation = signs.every((sign) => sign > 0)
     ? "left"
     : signs.every((sign) => sign < 0)

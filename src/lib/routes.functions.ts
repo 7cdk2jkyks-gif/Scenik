@@ -66,6 +66,15 @@ export const planScenicRoute = createServerFn({ method: "POST" })
       string,
       import("./route-duration-refinement").DurationConstructionObservation
     >();
+    const submittedConstructionByCandidateId = new Map<
+      string,
+      {
+        plan: import("./corridor-exploration").ScenicCorridorPlan;
+        effectiveConstruction:
+          | import("./route-duration-refinement").EffectiveConstructionMetadata
+          | null;
+      }
+    >();
     const rejectionReasons = new Set<string>();
 
     const { executeProductionRouteGeneration } =
@@ -628,6 +637,19 @@ export const planScenicRoute = createServerFn({ method: "POST" })
                   existingFamily?: import("./route-duration-refinement").RequestLocalPlanFamily,
                 ) => {
                   const candidateId = `${lineageSource}-${nextCandidateOrdinal++}`;
+                  const submittedPlan = {
+                    ...plan,
+                    waypoints: [...plan.waypoints].sort(
+                      (a, b) =>
+                        a.insertionIndex - b.insertionIndex ||
+                        haversineDistanceMeters(planningAnchors[a.insertionIndex], a) -
+                          haversineDistanceMeters(planningAnchors[b.insertionIndex], b),
+                    ),
+                  };
+                  const effectiveConstruction = effectiveConstructionMetadata(
+                    submittedPlan,
+                    planningAnchors,
+                  );
                   const family = existingFamily
                     ? {
                         ...existingFamily,
@@ -639,21 +661,26 @@ export const planScenicRoute = createServerFn({ method: "POST" })
                         destination: routeInput.destination,
                         requiredStops: requiredCoordinates,
                         anchors: planningAnchors,
-                        sourceWaypointIds: plan.waypoints.map((waypoint) =>
+                        sourceWaypointIds: submittedPlan.waypoints.map((waypoint) =>
                           requestLocalEvidenceId(waypoint.id),
                         ),
-                        plan,
+                        plan: submittedPlan,
                       });
-                  attemptedSignatures.add(plan.signature);
-                  attemptedKinds.add(plan.kind);
+                  attemptedSignatures.add(submittedPlan.signature);
+                  attemptedKinds.add(submittedPlan.kind);
                   const requestWaypoints = corridorWaypointsWithRequiredStops(
                     requiredCoordinates,
                     planningAnchors,
-                    plan,
+                    submittedPlan,
                   );
+                  submittedConstructionByCandidateId.set(candidateId, {
+                    plan: submittedPlan,
+                    effectiveConstruction,
+                  });
                   return {
                     candidateId,
                     family,
+                    submittedPlan,
                     expectedAnchors: [
                       routeInput.origin,
                       ...requestWaypoints,
@@ -790,10 +817,14 @@ export const planScenicRoute = createServerFn({ method: "POST" })
                           data.extra_minutes,
                         );
                   const candidateFamily = constructionFamilies.get(candidateId) ?? null;
-                  const effectiveConstruction = effectiveConstructionMetadata(
-                    corridorPlan,
-                    planningAnchors,
-                  );
+                  const submittedConstruction = submittedConstructionByCandidateId.get(candidateId);
+                  const effectivePlan = submittedConstruction?.plan ?? corridorPlan;
+                  const effectiveConstruction =
+                    submittedConstruction?.effectiveConstruction ??
+                    effectiveConstructionMetadata(
+                      effectivePlan,
+                      candidateFamily?.anchors ?? planningAnchors,
+                    );
                   const refinedRecording =
                     existingRefinedRecording ??
                     (refinement && candidateFamily
@@ -850,7 +881,7 @@ export const planScenicRoute = createServerFn({ method: "POST" })
                           : null,
                       requestedRole,
                       effectiveConstruction,
-                      effectiveWaypointCount: corridorPlan.waypoints.length,
+                      effectiveWaypointCount: effectivePlan.waypoints.length,
                     } satisfies import("./route-duration-refinement").DurationConstructionObservation);
                   constructionObservations.push({
                     plan: corridorPlan,

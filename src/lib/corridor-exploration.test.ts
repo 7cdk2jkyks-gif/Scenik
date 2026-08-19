@@ -1018,7 +1018,7 @@ describe("budget-driven corridor exploration", () => {
         const addedSecondsByOrdinal =
           activeFixture === "180"
             ? [0, 70 * 60 + 1, 145 * 60, 160 * 60 + 1]
-            : [33.5 * 60, 37.7 * 60, 97.7 * 60, 35 * 60, 27 * 60];
+            : [38.7 * 60, 57.7 * 60, 79.6 * 60, 35 * 60, 27 * 60];
         const addedSeconds =
           addedSecondsByOrdinal[Math.min(ordinal, addedSecondsByOrdinal.length) - 1];
         const requestedPoints =
@@ -1083,6 +1083,28 @@ describe("budget-driven corridor exploration", () => {
           measuredExtraTimeSeconds: number;
           timeTargetOutcome: string;
           narrative: string;
+          routeGenerationDiagnostics: {
+            candidateEligibility: Array<{
+              intendedTargetMinutes: number | null;
+              actualAddedMinutes: number | null;
+              routeShapeEligible: boolean | null;
+              duplicateEligible: boolean | null;
+              effectiveWaypointCount: number | null;
+              effectiveWaypointForm: string | null;
+              effectiveProgress: string | null;
+              effectiveOrientation: string | null;
+              refinementAttemptNumber: number | null;
+              refinementStrategy: string | null;
+              selected: boolean;
+              evidenceEligible: boolean | null;
+              qualityEligible: boolean | null;
+              scenicScore: number | null;
+            }>;
+            durationRefinement: {
+              providerRequestsStarted: number;
+              stopReason: string;
+            } | null;
+          };
         }>
       )({
         data: {
@@ -1201,6 +1223,49 @@ describe("budget-driven corridor exploration", () => {
       assert.equal(downward.selectedWinner, "scenik");
       assert.equal(downward.timeTargetOutcome, "TARGET_MET");
       assert.equal(downward.measuredExtraTimeSeconds, 27 * 60);
+      const liveStyleSafeUpper = downward.routeGenerationDiagnostics.candidateEligibility.find(
+        (candidate) =>
+          candidate.intendedTargetMinutes === 27 && candidate.actualAddedMinutes === 79.6,
+      );
+      assert.ok(liveStyleSafeUpper);
+      assert.equal(liveStyleSafeUpper.routeShapeEligible, true);
+      assert.equal(liveStyleSafeUpper.duplicateEligible, true);
+      assert.equal(liveStyleSafeUpper.effectiveWaypointCount, 2);
+      assert.equal(liveStyleSafeUpper.effectiveWaypointForm, "two-waypoint-arc");
+      assert.notEqual(liveStyleSafeUpper.effectiveProgress, null);
+      assert.notEqual(liveStyleSafeUpper.effectiveOrientation, null);
+      assert.equal(
+        downward.routeGenerationDiagnostics.candidateEligibility.some(
+          (candidate) =>
+            candidate.effectiveWaypointCount === 2 &&
+            (candidate.effectiveWaypointForm == null ||
+              candidate.effectiveProgress == null ||
+              candidate.effectiveOrientation == null),
+        ),
+        false,
+      );
+      assert.equal(
+        downward.routeGenerationDiagnostics.durationRefinement?.providerRequestsStarted,
+        2,
+      );
+      assert.equal(
+        downward.routeGenerationDiagnostics.candidateEligibility.some(
+          (candidate) => candidate.refinementStrategy === "BASELINE_ZERO_BRACKET",
+        ),
+        true,
+      );
+      assert.equal(
+        downward.routeGenerationDiagnostics.durationRefinement?.stopReason,
+        "TARGET_REACHED",
+      );
+      const selectedRefinement = downward.routeGenerationDiagnostics.candidateEligibility.find(
+        (candidate) => candidate.selected && candidate.refinementAttemptNumber != null,
+      );
+      assert.ok(selectedRefinement);
+      assert.equal(selectedRefinement.actualAddedMinutes, 27);
+      assert.equal(selectedRefinement.evidenceEligible, true);
+      assert.equal(selectedRefinement.qualityEligible, true);
+      assert.ok((selectedRefinement.scenicScore ?? 0) >= 60);
       assert.equal(
         returnedGeometryByDuration.get(downward.selectedRouteDurationSeconds),
         downward.directions.encodedPolyline,

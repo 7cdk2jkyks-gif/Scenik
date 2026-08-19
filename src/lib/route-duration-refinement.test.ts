@@ -262,6 +262,32 @@ describe("bounded duration refinement", () => {
         orientation: "alternating-mixed",
       },
     );
+    const submittedNearSegmentEnds = {
+      ...sourcePlan,
+      waypoints: [
+        { ...sourcePlan.waypoints[0], id: "evidence-1", lat: 0.01, lng: 0.01, insertionIndex: 0 },
+        {
+          ...sourcePlan.waypoints[0],
+          id: "evidence-2",
+          lat: -0.01,
+          lng: 1.99,
+          insertionIndex: 1,
+        },
+      ],
+    };
+    assert.deepEqual(
+      effectiveConstructionMetadata(submittedNearSegmentEnds, [
+        { lat: 0, lng: 0 },
+        { lat: 0, lng: 1 },
+        { lat: 0, lng: 2 },
+      ]),
+      {
+        waypointForm: "two-waypoint-arc",
+        insertionPositions: [0, 1],
+        progress: "distributed",
+        orientation: "alternating-mixed",
+      },
+    );
   });
 
   it("rejects an inward two-waypoint family that converges below the ordinary separation", async () => {
