@@ -118,6 +118,57 @@ export type ConstructionRecoverySeed = {
   lineageDepth: 0 | 1;
 };
 
+export type ProviderResultOrchestrationFacts = {
+  authoritativeAddedSeconds: number | null;
+  overBudget: boolean;
+  submittedConstructionValid: boolean;
+  effectiveConstruction: EffectiveConstructionMetadata | null;
+  effectiveWaypointCount: number;
+  routeShapeEligible: boolean;
+  routeShapeRejectionReason: string | null;
+  affectedWaypointIndex: number | null | undefined;
+  anchorsValid: boolean;
+  duplicateEligible: boolean;
+  providerResponseValid: boolean;
+};
+
+/** Keeps duration calibration and shape recovery independent from the lossy
+ * final-candidate rejection reason. This result is request-local only. */
+export function classifyProviderResultForOrchestration(input: ProviderResultOrchestrationFacts): {
+  calibrationEligible: boolean;
+  recoveryEligible: boolean;
+} {
+  const hasAuthoritativeDuration =
+    input.authoritativeAddedSeconds != null &&
+    Number.isFinite(input.authoritativeAddedSeconds) &&
+    input.authoritativeAddedSeconds > 0;
+  const hasCompleteEffectiveConstruction =
+    input.effectiveConstruction != null &&
+    input.effectiveConstruction.insertionPositions.length === input.effectiveWaypointCount &&
+    (input.effectiveWaypointCount === 1 || input.effectiveWaypointCount === 2);
+  const commonEligible =
+    hasAuthoritativeDuration &&
+    input.submittedConstructionValid &&
+    hasCompleteEffectiveConstruction &&
+    input.anchorsValid &&
+    input.duplicateEligible &&
+    input.providerResponseValid;
+  const hasValidAffectedWaypointIndex =
+    Number.isInteger(input.affectedWaypointIndex) &&
+    (input.affectedWaypointIndex ?? -1) >= 0 &&
+    (input.affectedWaypointIndex ?? -1) < input.effectiveWaypointCount;
+  return {
+    calibrationEligible:
+      commonEligible && input.routeShapeEligible && input.routeShapeRejectionReason == null,
+    recoveryEligible:
+      commonEligible &&
+      input.overBudget &&
+      !input.routeShapeEligible &&
+      ((input.routeShapeRejectionReason === "WAYPOINT_SPUR" && hasValidAffectedWaypointIndex) ||
+        input.routeShapeRejectionReason === "MATERIAL_REVERSE_RETRACE"),
+  };
+}
+
 export function classifyConstructionRecoveryPreflight(input: {
   plan: ScenicCorridorPlan | null;
   attemptedSignatures: ReadonlySet<string>;

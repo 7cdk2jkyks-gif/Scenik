@@ -638,7 +638,6 @@ describe("budget-driven corridor exploration", () => {
         routeRequestsStarted: 0,
         remainingRouteRequests: 6,
       });
-
       let ordinaryOrdinal = 0;
       for (const stage of explorationStages(180)) {
         const prepared = coordinator.prepareStage({
@@ -900,6 +899,9 @@ describe("budget-driven corridor exploration", () => {
     const actualInternalTesters = await import("./internal-testers.server");
     const actualOrchestration = await import("./route-generation-orchestration.server");
     const actualGoogleMaps = await import("./google-maps.server");
+    const actualRouteCoherence = await import("./route-coherence");
+    const actualSafeEvaluateRouteCoherenceWithAnchors =
+      actualRouteCoherence.safeEvaluateRouteCoherenceWithAnchors;
     const encode = (points: Array<{ lat: number; lng: number }>) => {
       let previousLat = 0;
       let previousLng = 0;
@@ -957,6 +959,7 @@ describe("budget-driven corridor exploration", () => {
       | "165"
       | "165-meaningful"
       | "30"
+      | "invalid-index-spur"
       | "recovery"
       | "recovery-over"
       | "recovery-under"
@@ -1009,6 +1012,23 @@ describe("budget-driven corridor exploration", () => {
       executeProductionRouteGeneration: async (input: {
         generateRoute(input: { isPremium: boolean }): Promise<unknown>;
       }) => input.generateRoute({ isPremium: true }),
+    }));
+    mock.module("./route-coherence", () => ({
+      ...actualRouteCoherence,
+      safeEvaluateRouteCoherenceWithAnchors: (
+        ...args: Parameters<typeof actualSafeEvaluateRouteCoherenceWithAnchors>
+      ) => {
+        const result = actualSafeEvaluateRouteCoherenceWithAnchors(...args);
+        return activeFixture === "invalid-index-spur"
+          ? {
+              ...result,
+              routeShapeEligible: false,
+              routeShapeRejectionReason: "WAYPOINT_SPUR" as const,
+              waypointSpurDetected: true,
+              affectedWaypointIndex: args[1].length,
+            }
+          : result;
+      },
     }));
     mock.module("./google-maps.server", () => ({
       ...actualGoogleMaps,
@@ -1141,14 +1161,16 @@ describe("budget-driven corridor exploration", () => {
               : activeFixture === "165-meaningful"
                 ? [32.1 * 60, 103 * 60, 60 * 60, 180 * 60, 125 * 60, 135 * 60]
                 : activeFixture === "30"
-                  ? [38.7 * 60, 57.7 * 60, 79.6 * 60, 35 * 60, 27 * 60]
-                  : activeFixture === "recovery-over"
-                    ? [40 * 60, 55.9 * 60, 91 * 60, 40 * 60, 27 * 60]
-                    : activeFixture === "recovery-under"
-                      ? [40 * 60, 55.9 * 60, 91 * 60, 18 * 60, 27 * 60]
-                      : activeFixture === "recovery-invalid"
-                        ? [40 * 60, 55.9 * 60, 91 * 60, 45 * 60, 27 * 60]
-                        : [40 * 60, 55.9 * 60, 91 * 60, 27 * 60, 27 * 60];
+                  ? [32.9 * 60, 31.9 * 60, 69.9 * 60, 35 * 60, 27 * 60]
+                  : activeFixture === "invalid-index-spur"
+                    ? [32.9 * 60, 31.9 * 60, 69.9 * 60]
+                    : activeFixture === "recovery-over"
+                      ? [40 * 60, 55.9 * 60, 91 * 60, 40 * 60, 27 * 60]
+                      : activeFixture === "recovery-under"
+                        ? [40 * 60, 55.9 * 60, 91 * 60, 18 * 60, 27 * 60]
+                        : activeFixture === "recovery-invalid"
+                          ? [40 * 60, 55.9 * 60, 91 * 60, 45 * 60, 27 * 60]
+                          : [40 * 60, 55.9 * 60, 91 * 60, 27 * 60, 27 * 60];
         const addedSeconds =
           addedSecondsByOrdinal[Math.min(ordinal, addedSecondsByOrdinal.length) - 1];
         const requestedPoints =
@@ -1164,42 +1186,52 @@ describe("budget-driven corridor exploration", () => {
               ]
             : [start, ...waypoints, end];
         const returnedPoints =
-          activeFixture.startsWith("165") &&
-          (ordinal <= 2 ||
-            (ordinal >= 4 &&
-              !(activeFixture === "165-meaningful" && (ordinal === 4 || ordinal === 6))))
+          activeFixture === "invalid-index-spur"
             ? [start, waypoints[0], start, ...waypoints.slice(1), end]
-            : activeFixture.startsWith("165") && (ordinal === 3 || ordinal === 6)
-              ? [
-                  start,
-                  ...[
-                    ...waypoints,
-                    { lat: 51.04, lng: -0.5 },
-                    { lat: 51.04, lng: 0.5 },
-                    ...(activeFixture === "165-meaningful" && ordinal === 6
-                      ? [
-                          { lat: 50.6, lng: -0.4 },
-                          { lat: 50.6, lng: 0 },
-                          { lat: 50.6, lng: 0.4 },
-                        ]
-                      : []),
-                  ].sort((a, b) => a.lng - b.lng),
-                  end,
-                ]
-              : activeFixture.startsWith("recovery") && ordinal === 1
-                ? [start, waypoints[0], start, ...waypoints.slice(1), end]
-                : activeFixture.startsWith("recovery") && ordinal === 2
-                  ? [start, { lat: 51, lng: -0.7 }, { lat: 51, lng: -0.9 }, ...waypoints, end]
-                  : activeFixture.startsWith("recovery") && ordinal === 3
-                    ? [start, ...waypoints, waypoints[1] ?? waypoints[0], end]
-                    : activeFixture === "recovery-invalid" && ordinal === 4
-                      ? [start, waypoints[0], start, ...waypoints.slice(1), end]
-                      : activeFixture === "recovery-invalid" && ordinal === 5
-                        ? [start, { lat: 51, lng: -0.7 }, { lat: 51, lng: -0.9 }, ...waypoints, end]
-                        : (activeFixture === "180" && ordinal === 3 && waypoints.length >= 2) ||
-                            (activeFixture === "30" && ordinal <= 2 && waypoints.length >= 2)
-                          ? [start, waypoints[1], waypoints[0], ...waypoints.slice(2), end]
-                          : requestedPoints;
+            : activeFixture.startsWith("165") &&
+                (ordinal <= 2 ||
+                  (ordinal >= 4 &&
+                    !(activeFixture === "165-meaningful" && (ordinal === 4 || ordinal === 6))))
+              ? [start, waypoints[0], start, ...waypoints.slice(1), end]
+              : activeFixture.startsWith("165") && (ordinal === 3 || ordinal === 6)
+                ? [
+                    start,
+                    ...[
+                      ...waypoints,
+                      { lat: 51.04, lng: -0.5 },
+                      { lat: 51.04, lng: 0.5 },
+                      ...(activeFixture === "165-meaningful" && ordinal === 6
+                        ? [
+                            { lat: 50.6, lng: -0.4 },
+                            { lat: 50.6, lng: 0 },
+                            { lat: 50.6, lng: 0.4 },
+                          ]
+                        : []),
+                    ].sort((a, b) => a.lng - b.lng),
+                    end,
+                  ]
+                : activeFixture.startsWith("recovery") && ordinal === 1
+                  ? [start, waypoints[0], start, ...waypoints.slice(1), end]
+                  : activeFixture.startsWith("recovery") && ordinal === 2
+                    ? [start, { lat: 51, lng: -0.7 }, { lat: 51, lng: -0.9 }, ...waypoints, end]
+                    : activeFixture === "30" && ordinal === 2
+                      ? [start, { lat: 51, lng: -0.7 }, { lat: 51, lng: -0.9 }, ...waypoints, end]
+                      : activeFixture.startsWith("recovery") && ordinal === 3
+                        ? [start, ...waypoints, waypoints[1] ?? waypoints[0], end]
+                        : activeFixture === "recovery-invalid" && ordinal === 4
+                          ? [start, waypoints[0], start, ...waypoints.slice(1), end]
+                          : activeFixture === "recovery-invalid" && ordinal === 5
+                            ? [
+                                start,
+                                { lat: 51, lng: -0.7 },
+                                { lat: 51, lng: -0.9 },
+                                ...waypoints,
+                                end,
+                              ]
+                            : (activeFixture === "180" && ordinal === 3 && waypoints.length >= 2) ||
+                                (activeFixture === "30" && ordinal <= 2 && waypoints.length >= 2)
+                              ? [start, waypoints[1], waypoints[0], ...waypoints.slice(2), end]
+                              : requestedPoints;
         const directions = computed(
           returnedPoints,
           baselineDurationSeconds + addedSeconds,
@@ -1548,9 +1580,45 @@ describe("budget-driven corridor exploration", () => {
       assert.equal(downward.selectedWinner, "scenik");
       assert.equal(downward.timeTargetOutcome, "TARGET_MET");
       assert.equal(downward.measuredExtraTimeSeconds, 27 * 60);
+      const ordinaryLiveResults = downward.routeGenerationDiagnostics.candidateEligibility
+        .filter((candidate) => [32.9, 31.9, 69.9].includes(candidate.actualAddedMinutes ?? -1))
+        .map((candidate) => ({
+          added: candidate.actualAddedMinutes,
+          budgetEligible: candidate.budgetEligible,
+          routeShapeEligible: candidate.routeShapeEligible,
+          routeShapeRejectionReason: candidate.routeShapeRejectionReason,
+          duplicateEligible: candidate.duplicateEligible,
+          selected: candidate.selected,
+        }));
+      assert.deepEqual(ordinaryLiveResults, [
+        {
+          added: 32.9,
+          budgetEligible: false,
+          routeShapeEligible: false,
+          routeShapeRejectionReason: "WAYPOINT_SPUR",
+          duplicateEligible: true,
+          selected: false,
+        },
+        {
+          added: 31.9,
+          budgetEligible: false,
+          routeShapeEligible: false,
+          routeShapeRejectionReason: "MATERIAL_REVERSE_RETRACE",
+          duplicateEligible: true,
+          selected: false,
+        },
+        {
+          added: 69.9,
+          budgetEligible: false,
+          routeShapeEligible: true,
+          routeShapeRejectionReason: null,
+          duplicateEligible: true,
+          selected: false,
+        },
+      ]);
       const liveStyleSafeUpper = downward.routeGenerationDiagnostics.candidateEligibility.find(
         (candidate) =>
-          candidate.intendedTargetMinutes === 27 && candidate.actualAddedMinutes === 79.6,
+          candidate.intendedTargetMinutes === 27 && candidate.actualAddedMinutes === 69.9,
       );
       assert.ok(liveStyleSafeUpper);
       assert.equal(liveStyleSafeUpper.routeShapeEligible, true);
@@ -1606,6 +1674,72 @@ describe("budget-driven corridor exploration", () => {
       assert.equal(downwardSummary.refinement.stopReason, "TARGET_REACHED");
       assert.equal(downwardSummary.selected.band, "target");
       assert.equal(downward.routeGenerationDiagnostics.constructionRecovery ?? null, null);
+
+      activeFixture = "invalid-index-spur";
+      placesCalls = 0;
+      scenicRouteCalls = 0;
+      submittedWaypointCounts.length = 0;
+      submittedShapingWaypoints.length = 0;
+      returnedGeometryByDuration.clear();
+      diagnosticLogs.length = 0;
+      const invalidIndexSpur = await (
+        planScenicRoute as unknown as (input: {
+          data: {
+            start_address: string;
+            end_address: string;
+            mood: string;
+            theme: string;
+            extra_minutes: number;
+            stops: string[];
+          };
+          context: { userId: string; supabase: object };
+        }) => Promise<typeof result>
+      )({
+        data: {
+          start_address: "Origin",
+          end_address: "Destination",
+          mood: "Peaceful",
+          theme: "Forest",
+          extra_minutes: 30,
+          stops: ["Stop"],
+        },
+        context: { userId: "00000000-0000-4000-8000-000000000000", supabase: {} },
+      });
+      assert.equal(
+        scenicRouteCalls,
+        3,
+        JSON.stringify(invalidIndexSpur.routeGenerationDiagnostics),
+      );
+      assert.equal(invalidIndexSpur.scoringDiagnostics.scenicRouteRequestsAttempted, 3);
+      assert.equal(invalidIndexSpur.selectedWinner, "fastest");
+      assert.deepEqual(invalidIndexSpur.routeGenerationDiagnostics.constructionRecovery, {
+        attempted: false,
+        seedsConsidered: 0,
+        safeConstructionsProduced: 0,
+        providerRequestsStarted: 0,
+        providerResponsesReturned: 0,
+        providerRequestsFailed: 0,
+        responsesEvaluated: 0,
+        stopReason: "NO_RECOVERABLE_SHAPE_SEED",
+      });
+      assert.equal(
+        invalidIndexSpur.routeGenerationDiagnostics.durationRefinement?.providerRequestsStarted,
+        0,
+      );
+      const invalidSpurs = invalidIndexSpur.routeGenerationDiagnostics.candidateEligibility.filter(
+        (candidate) => candidate.routeShapeRejectionReason === "WAYPOINT_SPUR",
+      );
+      assert.equal(invalidSpurs.length, 3);
+      assert.equal(
+        invalidSpurs.every((candidate) => !candidate.selected),
+        true,
+      );
+      assert.equal(
+        invalidSpurs.every(
+          (candidate) => candidate.affectedWaypointIndex === candidate.effectiveWaypointCount,
+        ),
+        true,
+      );
 
       activeFixture = "recovery";
       placesCalls = 0;

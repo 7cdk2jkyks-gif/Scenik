@@ -5,6 +5,7 @@ import {
   MIN_DERIVED_WAYPOINT_SEPARATION_METERS,
   MAX_SCENIC_ROUTE_ATTEMPTS,
   MIN_ANTIPODAL_CLEARANCE_RADIANS,
+  classifyProviderResultForOrchestration,
   classifyConstructionRecoveryPreflight,
   MAX_DERIVED_WAYPOINT_DISPLACEMENT_FROM_SOURCE_METERS,
   createRequestLocalPlanFamily,
@@ -120,6 +121,126 @@ const productionGap = [
 ];
 
 describe("bounded duration refinement", () => {
+  it("classifies calibration and recovery from orthogonal provider facts", () => {
+    const base = {
+      authoritativeAddedSeconds: 31 * 60,
+      overBudget: true,
+      submittedConstructionValid: true,
+      effectiveConstruction: {
+        waypointForm: "one-waypoint" as const,
+        insertionPositions: [0],
+        progress: "middle" as const,
+        orientation: "left" as const,
+      },
+      effectiveWaypointCount: 1,
+      routeShapeEligible: true,
+      routeShapeRejectionReason: null,
+      affectedWaypointIndex: null,
+      anchorsValid: true,
+      duplicateEligible: true,
+      providerResponseValid: true,
+    };
+    assert.deepEqual(classifyProviderResultForOrchestration(base), {
+      calibrationEligible: true,
+      recoveryEligible: false,
+    });
+    assert.deepEqual(
+      classifyProviderResultForOrchestration({
+        ...base,
+        routeShapeEligible: false,
+        routeShapeRejectionReason: "WAYPOINT_SPUR",
+        affectedWaypointIndex: 0,
+      }),
+      { calibrationEligible: false, recoveryEligible: true },
+    );
+    assert.deepEqual(
+      classifyProviderResultForOrchestration({
+        ...base,
+        routeShapeEligible: false,
+        routeShapeRejectionReason: "MATERIAL_REVERSE_RETRACE",
+      }),
+      { calibrationEligible: false, recoveryEligible: true },
+    );
+    assert.deepEqual(classifyProviderResultForOrchestration({ ...base, overBudget: false }), {
+      calibrationEligible: true,
+      recoveryEligible: false,
+    });
+    for (const override of [
+      { duplicateEligible: false },
+      { anchorsValid: false },
+      { providerResponseValid: false },
+      { authoritativeAddedSeconds: null },
+      { effectiveConstruction: null },
+    ]) {
+      assert.deepEqual(classifyProviderResultForOrchestration({ ...base, ...override }), {
+        calibrationEligible: false,
+        recoveryEligible: false,
+      });
+    }
+    assert.deepEqual(
+      classifyProviderResultForOrchestration({
+        ...base,
+        overBudget: false,
+        routeShapeEligible: false,
+        routeShapeRejectionReason: "WAYPOINT_SPUR",
+        affectedWaypointIndex: 0,
+      }),
+      { calibrationEligible: false, recoveryEligible: false },
+    );
+
+    for (const affectedWaypointIndex of [
+      undefined,
+      null,
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+      -1,
+      0.5,
+      1,
+      2,
+    ]) {
+      assert.deepEqual(
+        classifyProviderResultForOrchestration({
+          ...base,
+          routeShapeEligible: false,
+          routeShapeRejectionReason: "WAYPOINT_SPUR",
+          affectedWaypointIndex,
+        }),
+        { calibrationEligible: false, recoveryEligible: false },
+      );
+    }
+    const twoWaypoint = {
+      ...base,
+      effectiveConstruction: {
+        waypointForm: "two-waypoint-arc" as const,
+        insertionPositions: [0, 1],
+        progress: "distributed" as const,
+        orientation: "alternating-mixed" as const,
+      },
+      effectiveWaypointCount: 2,
+      routeShapeEligible: false,
+      routeShapeRejectionReason: "WAYPOINT_SPUR",
+    };
+    for (const affectedWaypointIndex of [0, 1])
+      assert.deepEqual(
+        classifyProviderResultForOrchestration({ ...twoWaypoint, affectedWaypointIndex }),
+        { calibrationEligible: false, recoveryEligible: true },
+      );
+    assert.deepEqual(
+      classifyProviderResultForOrchestration({ ...twoWaypoint, affectedWaypointIndex: 2 }),
+      { calibrationEligible: false, recoveryEligible: false },
+    );
+    assert.deepEqual(
+      classifyProviderResultForOrchestration({
+        ...base,
+        effectiveConstruction: null,
+        effectiveWaypointCount: 0,
+        routeShapeEligible: false,
+        routeShapeRejectionReason: "WAYPOINT_SPUR",
+        affectedWaypointIndex: 0,
+      }),
+      { calibrationEligible: false, recoveryEligible: false },
+    );
+  });
   const sourcePlan = {
     kind: "forest" as const,
     reason: "Forest corridor",

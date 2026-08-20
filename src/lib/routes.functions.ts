@@ -441,9 +441,11 @@ export const planScenicRoute = createServerFn({ method: "POST" })
             const {
               MAX_SCENIC_ROUTE_ATTEMPTS,
               MAX_DERIVED_WAYPOINT_DISPLACEMENT_FROM_SOURCE_METERS,
+              classifyProviderResultForOrchestration,
               createRequestLocalPlanFamily,
               effectiveConstructionMetadata,
               evaluateRefinedProviderCandidate,
+              isSafeRefinementCorridorPlan,
               orchestrateDurationRefinement,
               recordRefinedProviderCandidate,
               scoreAndSelectRouteCandidateCollection,
@@ -842,6 +844,25 @@ export const planScenicRoute = createServerFn({ method: "POST" })
                       effectivePlan,
                       candidateFamily?.anchors ?? planningAnchors,
                     );
+                  const orchestrationFacts = classifyProviderResultForOrchestration({
+                    authoritativeAddedSeconds: actualAddedSeconds,
+                    overBudget: !withinBudget,
+                    submittedConstructionValid:
+                      candidateFamily != null && isSafeRefinementCorridorPlan(effectivePlan),
+                    effectiveConstruction,
+                    effectiveWaypointCount: effectivePlan.waypoints.length,
+                    routeShapeEligible: routeShape.routeShapeEligible,
+                    routeShapeRejectionReason: routeShape.routeShapeRejectionReason,
+                    affectedWaypointIndex: routeShape.affectedWaypointIndex,
+                    anchorsValid:
+                      routeShape.routeShapeAnalysisStatus === "ANALYSED" &&
+                      routeShape.routeShapeRejectionReason !== "ANCHOR_ORDER_INVALID",
+                    duplicateEligible: meaningfullyDifferent,
+                    providerResponseValid:
+                      Number.isFinite(scenikDirections.durationSeconds) &&
+                      scenikDirections.durationSeconds > 0 &&
+                      scenikDirections.encodedPolyline.length > 0,
+                  });
                   const refinedRecording =
                     existingRefinedRecording ??
                     (refinement && candidateFamily
@@ -880,12 +901,7 @@ export const planScenicRoute = createServerFn({ method: "POST" })
                       routeShapeEligible: routeShape.routeShapeEligible,
                       duplicate: !meaningfullyDifferent,
                       qualityEligible: false,
-                      calibrationSafe:
-                        Number.isFinite(actualAddedSeconds) &&
-                        actualAddedSeconds > 0 &&
-                        routeShape.routeShapeEligible &&
-                        meaningfullyDifferent &&
-                        candidateFamily != null,
+                      calibrationSafe: orchestrationFacts.calibrationEligible,
                       intendedTargetSeconds:
                         intendedAddedMinutes == null ? null : intendedAddedMinutes * 60,
                       constructionTargetSeconds:
@@ -908,15 +924,11 @@ export const planScenicRoute = createServerFn({ method: "POST" })
                   constructionMetadataByCandidateId.set(candidateId, constructionObservation);
                   if (
                     recoverySeedLineage !== false &&
-                    !withinBudget &&
-                    meaningfullyDifferent &&
-                    !routeShape.routeShapeEligible &&
-                    (routeShape.routeShapeRejectionReason === "WAYPOINT_SPUR" ||
-                      routeShape.routeShapeRejectionReason === "MATERIAL_REVERSE_RETRACE") &&
+                    orchestrationFacts.recoveryEligible &&
                     effectiveConstruction != null &&
                     candidateFamily != null &&
-                    Number.isFinite(actualAddedSeconds) &&
-                    actualAddedSeconds > data.extra_minutes * 60
+                    (routeShape.routeShapeRejectionReason === "WAYPOINT_SPUR" ||
+                      routeShape.routeShapeRejectionReason === "MATERIAL_REVERSE_RETRACE")
                   )
                     recoverableShapeSeeds.push({
                       candidateId,
@@ -1176,18 +1188,19 @@ export const planScenicRoute = createServerFn({ method: "POST" })
                     ({ observation }) =>
                       observation.calibrationSafe && observation.routeShapeEligible,
                   );
-                  const recoveryCounts = {
-                    attempted: false,
-                    seedsConsidered: recoverableShapeSeeds.length,
-                    safeConstructionsProduced: 0,
-                    providerRequestsStarted: 0,
-                    providerResponsesReturned: 0,
-                    providerRequestsFailed: 0,
-                    responsesEvaluated: 0,
-                    stopReason:
-                      "NO_RECOVERABLE_SHAPE_SEED" as import("./route-duration-refinement").ConstructionRecoveryStopReason,
-                  };
-                  if (!hadSafeObservationBeforeRecovery && recoverableShapeSeeds.length > 0) {
+                  const runConstructionRecovery = async () => {
+                    const recoveryCounts = {
+                      attempted: false,
+                      seedsConsidered: recoverableShapeSeeds.length,
+                      safeConstructionsProduced: 0,
+                      providerRequestsStarted: 0,
+                      providerResponsesReturned: 0,
+                      providerRequestsFailed: 0,
+                      responsesEvaluated: 0,
+                      stopReason:
+                        "NO_RECOVERABLE_SHAPE_SEED" as import("./route-duration-refinement").ConstructionRecoveryStopReason,
+                    };
+                    if (recoverableShapeSeeds.length === 0) return recoveryCounts;
                     const {
                       classifyConstructionRecoveryPreflight,
                       deriveShapeRecoveryPlan,
@@ -1309,10 +1322,10 @@ export const planScenicRoute = createServerFn({ method: "POST" })
                           desiredAddedSeconds,
                         );
                     }
-                  }
-                  constructionRecoveryResult = hadSafeObservationBeforeRecovery
-                    ? null
-                    : recoveryCounts;
+                    return recoveryCounts;
+                  };
+                  if (!hadSafeObservationBeforeRecovery)
+                    constructionRecoveryResult = await runConstructionRecovery();
                   const maximumConstructionValue = Math.min(
                     averageMetersPerSecond * stage.planningBudgetMinutes * 60 * 0.95,
                     Math.max(
@@ -1413,6 +1426,13 @@ export const planScenicRoute = createServerFn({ method: "POST" })
                       },
                     });
                     durationRefinementResult = orchestration.controller;
+                    if (
+                      hadSafeObservationBeforeRecovery &&
+                      orchestration.controller.stateCounts.providerRequestsStarted === 0 &&
+                      !orchestration.controller.reachedTargetBand &&
+                      recoverableShapeSeeds.length > 0
+                    )
+                      constructionRecoveryResult = await runConstructionRecovery();
                   }
                 }
                 const qualityEquivalent = exploredCandidateQuality.filter(
