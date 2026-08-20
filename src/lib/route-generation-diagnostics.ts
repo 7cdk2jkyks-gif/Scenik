@@ -139,6 +139,11 @@ function safeRefinementCount(value: unknown): number | null {
   return count != null && count <= 2 ? count : null;
 }
 
+function safeScenicRequestCount(value: unknown): number | null {
+  const count = safeNonNegativeNumber(value, true);
+  return count != null && count <= 6 ? count : null;
+}
+
 function safeEvidenceAssociationStatus(value: unknown): string | null {
   return typeof value === "string" && SAFE_EVIDENCE_ASSOCIATION_STATUSES.has(value) ? value : null;
 }
@@ -158,6 +163,15 @@ const SAFE_REFINEMENT_STOP_REASONS = new Set([
   "REFINED_CANDIDATES_OVER_BUDGET",
   "REFINED_CANDIDATES_INCOHERENT",
   "ATTEMPT_CAPACITY_EXHAUSTED",
+]);
+const SAFE_RECOVERY_STOP_REASONS = new Set([
+  "TARGET_REACHED",
+  "SAFE_OBSERVATION_PRODUCED",
+  "NO_RECOVERABLE_SHAPE_SEED",
+  "NO_DISTINCT_RECOVERY_CONSTRUCTION",
+  "RECOVERY_SHAPE_REJECTED",
+  "RECOVERY_CAPACITY_EXHAUSTED",
+  "PROVIDER_REQUEST_FAILED",
 ]);
 
 function safeCandidateId(value: unknown): string | null {
@@ -195,6 +209,16 @@ export function buildRouteGenerationDiagnostic(input: {
     providerResponsesReturned: number;
     providerRequestsFailed: number;
     providerResponsesEvaluated: number;
+    stopReason: string;
+  } | null;
+  constructionRecovery?: {
+    attempted: boolean;
+    seedsConsidered: number;
+    safeConstructionsProduced: number;
+    providerRequestsStarted: number;
+    providerResponsesReturned: number;
+    providerRequestsFailed: number;
+    responsesEvaluated: number;
     stopReason: string;
   } | null;
   preferencePresence?: { mood: boolean; theme: boolean };
@@ -348,6 +372,28 @@ export function buildRouteGenerationDiagnostic(input: {
           },
         }
       : {}),
+    ...(input.constructionRecovery
+      ? {
+          constructionRecovery: {
+            attempted: input.constructionRecovery.attempted === true,
+            seedsConsidered:
+              safeScenicRequestCount(input.constructionRecovery.seedsConsidered) ?? 0,
+            safeConstructionsProduced:
+              safeRefinementCount(input.constructionRecovery.safeConstructionsProduced) ?? 0,
+            providerRequestsStarted:
+              safeRefinementCount(input.constructionRecovery.providerRequestsStarted) ?? 0,
+            providerResponsesReturned:
+              safeRefinementCount(input.constructionRecovery.providerResponsesReturned) ?? 0,
+            providerRequestsFailed:
+              safeRefinementCount(input.constructionRecovery.providerRequestsFailed) ?? 0,
+            responsesEvaluated:
+              safeRefinementCount(input.constructionRecovery.responsesEvaluated) ?? 0,
+            stopReason: SAFE_RECOVERY_STOP_REASONS.has(input.constructionRecovery.stopReason)
+              ? input.constructionRecovery.stopReason
+              : "NO_RECOVERABLE_SHAPE_SEED",
+          },
+        }
+      : {}),
   };
 }
 
@@ -464,6 +510,7 @@ export function serializeRouteGenerationDiagnostic(
       weak: bestInBand(0, 0.35),
     },
     refinement: diagnostic.durationRefinement ?? null,
+    recovery: diagnostic.constructionRecovery ?? null,
     selected: selected
       ? {
           band:

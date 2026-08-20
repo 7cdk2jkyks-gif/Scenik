@@ -1000,4 +1000,51 @@ describe("route-generation diagnostic log", () => {
       stopReason: "NO_SAFE_REFINEMENT_BRACKET",
     });
   });
+
+  it("allow-lists bounded recovery aggregates without construction or provider data", () => {
+    const diagnostic = buildRouteGenerationDiagnostic({
+      correlationId: "recovery-aggregate",
+      requestedExtraMinutes: 30,
+      baselineDurationSeconds: 3_600,
+      plannedExplorationStages: [],
+      attemptsPlanned: 4,
+      attemptsCompleted: 4,
+      intendedTargetMinutes: [15, 23, 27],
+      adaptiveTargetMinutes: [],
+      actualAddedMinutesReturned: 27,
+      outcomeClassification: "TARGET_MET",
+      candidateEligibility: [],
+      candidateScenicScores: [],
+      finalSelectionReason: "TARGET_BAND_ELIGIBLE",
+      totalServerProcessingDurationMs: 1,
+      constructionRecovery: {
+        attempted: true,
+        seedsConsidered: 3,
+        safeConstructionsProduced: 1,
+        providerRequestsStarted: 1,
+        providerResponsesReturned: 1,
+        providerRequestsFailed: 0,
+        responsesEvaluated: 1,
+        stopReason: "TARGET_REACHED",
+        coordinates: [{ lat: 51, lng: -1 }],
+        signature: "private-signature",
+        providerPayload: "private-provider-payload",
+      } as Parameters<typeof buildRouteGenerationDiagnostic>[0]["constructionRecovery"] &
+        Record<string, unknown>,
+    });
+    assert.deepEqual(diagnostic.constructionRecovery, {
+      attempted: true,
+      seedsConsidered: 3,
+      safeConstructionsProduced: 1,
+      providerRequestsStarted: 1,
+      providerResponsesReturned: 1,
+      providerRequestsFailed: 0,
+      responsesEvaluated: 1,
+      stopReason: "TARGET_REACHED",
+    });
+    const serialized = serializeRouteGenerationDiagnostic(diagnostic);
+    assert.equal(serialized.includes("private-signature"), false);
+    assert.equal(serialized.includes("private-provider-payload"), false);
+    assert.equal(serialized.includes('"lat"'), false);
+  });
 });

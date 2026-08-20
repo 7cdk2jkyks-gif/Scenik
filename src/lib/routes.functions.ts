@@ -61,6 +61,9 @@ export const planScenicRoute = createServerFn({ method: "POST" })
     let durationRefinementResult:
       | import("./route-duration-refinement").DurationRefinementResult
       | null = null;
+    let constructionRecoveryResult:
+      | import("./route-duration-refinement").ConstructionRecoveryStateCounts
+      | null = null;
     const processedOrdinaryAttempts: Array<{ attemptId: string; targetMinutes: number }> = [];
     const constructionMetadataByCandidateId = new Map<
       string,
@@ -75,6 +78,9 @@ export const planScenicRoute = createServerFn({ method: "POST" })
           | null;
       }
     >();
+    const recoverableShapeSeeds: Array<
+      import("./route-duration-refinement").ConstructionRecoverySeed
+    > = [];
     const rejectionReasons = new Set<string>();
 
     const { executeProductionRouteGeneration } =
@@ -633,7 +639,11 @@ export const planScenicRoute = createServerFn({ method: "POST" })
                 };
                 const requestCandidate = (
                   plan: import("./corridor-exploration").ScenicCorridorPlan,
-                  lineageSource: "scenic-stage" | "long-target" | "duration-refinement",
+                  lineageSource:
+                    | "scenic-stage"
+                    | "long-target"
+                    | "construction-recovery"
+                    | "duration-refinement",
                   existingFamily?: import("./route-duration-refinement").RequestLocalPlanFamily,
                 ) => {
                   const candidateId = `${lineageSource}-${nextCandidateOrdinal++}`;
@@ -723,6 +733,13 @@ export const planScenicRoute = createServerFn({ method: "POST" })
                   requestedRole:
                     | import("./corridor-exploration").PositiveAllowanceAttemptRole
                     | null = null,
+                  recoverySeedLineage?:
+                    | {
+                        rootSeedCandidateId: string;
+                        parentCandidateId: string;
+                        lineageDepth: 1;
+                      }
+                    | false,
                 ): number | null => {
                   scenicRouteRequestsCompleted += 1;
                   if (result.status === "rejected") {
@@ -889,6 +906,30 @@ export const planScenicRoute = createServerFn({ method: "POST" })
                     observation: constructionObservation,
                   });
                   constructionMetadataByCandidateId.set(candidateId, constructionObservation);
+                  if (
+                    recoverySeedLineage !== false &&
+                    !withinBudget &&
+                    meaningfullyDifferent &&
+                    !routeShape.routeShapeEligible &&
+                    (routeShape.routeShapeRejectionReason === "WAYPOINT_SPUR" ||
+                      routeShape.routeShapeRejectionReason === "MATERIAL_REVERSE_RETRACE") &&
+                    effectiveConstruction != null &&
+                    candidateFamily != null &&
+                    Number.isFinite(actualAddedSeconds) &&
+                    actualAddedSeconds > data.extra_minutes * 60
+                  )
+                    recoverableShapeSeeds.push({
+                      candidateId,
+                      plan: effectivePlan,
+                      actualAddedSeconds,
+                      rejectionReason: routeShape.routeShapeRejectionReason,
+                      affectedWaypointIndex: routeShape.affectedWaypointIndex,
+                      effectiveConstruction,
+                      familyId: candidateFamily.familyId,
+                      rootSeedCandidateId: recoverySeedLineage?.rootSeedCandidateId ?? candidateId,
+                      parentCandidateId: recoverySeedLineage?.parentCandidateId ?? null,
+                      lineageDepth: recoverySeedLineage?.lineageDepth ?? 0,
+                    });
                   generatedCandidateOutcomes.push({
                     candidateId,
                     explorationStage: stageIndex,
@@ -1131,6 +1172,147 @@ export const planScenicRoute = createServerFn({ method: "POST" })
                   );
                 }
                 if (stageIndex === stages.length - 1) {
+                  const hadSafeObservationBeforeRecovery = constructionObservations.some(
+                    ({ observation }) =>
+                      observation.calibrationSafe && observation.routeShapeEligible,
+                  );
+                  const recoveryCounts = {
+                    attempted: false,
+                    seedsConsidered: recoverableShapeSeeds.length,
+                    safeConstructionsProduced: 0,
+                    providerRequestsStarted: 0,
+                    providerResponsesReturned: 0,
+                    providerRequestsFailed: 0,
+                    responsesEvaluated: 0,
+                    stopReason:
+                      "NO_RECOVERABLE_SHAPE_SEED" as import("./route-duration-refinement").ConstructionRecoveryStopReason,
+                  };
+                  if (!hadSafeObservationBeforeRecovery && recoverableShapeSeeds.length > 0) {
+                    const {
+                      classifyConstructionRecoveryPreflight,
+                      deriveShapeRecoveryPlan,
+                      selectConstructionRecoverySeed,
+                    } = await import("./route-duration-refinement");
+                    const desiredAddedSeconds = data.extra_minutes * 60 * 0.9;
+                    let seed = selectConstructionRecoverySeed(
+                      recoverableShapeSeeds,
+                      desiredAddedSeconds,
+                    );
+                    if (seed) {
+                      recoveryCounts.attempted = true;
+                      recoveryCounts.stopReason = "NO_DISTINCT_RECOVERY_CONSTRUCTION";
+                    }
+                    const usedSeedCandidateIds = new Set<string>();
+                    for (
+                      let recoveryAttempt = 1;
+                      seed && recoveryAttempt <= 2;
+                      recoveryAttempt += 1
+                    ) {
+                      if (usedSeedCandidateIds.has(seed.candidateId)) break;
+                      usedSeedCandidateIds.add(seed.candidateId);
+                      const activeSeed = seed;
+                      const recoveredPlan = deriveShapeRecoveryPlan({
+                        plan: activeSeed.plan,
+                        anchors: planningAnchors,
+                        desiredAddedSeconds,
+                        observedAddedSeconds: activeSeed.actualAddedSeconds,
+                        rejectionReason: activeSeed.rejectionReason,
+                        affectedWaypointIndex: activeSeed.affectedWaypointIndex,
+                        attemptNumber: recoveryAttempt,
+                      });
+                      const preflight = classifyConstructionRecoveryPreflight({
+                        plan: recoveredPlan,
+                        attemptedSignatures,
+                        attemptsAlreadyUsed: scenicRouteRequestsAttempted,
+                      });
+                      if (preflight === "RECOVERY_CAPACITY_EXHAUSTED") {
+                        recoveryCounts.stopReason = preflight;
+                        break;
+                      }
+                      if (preflight === "NO_DISTINCT_RECOVERY_CONSTRUCTION") continue;
+                      if (!recoveredPlan) continue;
+                      recoveryCounts.safeConstructionsProduced += 1;
+                      const requested = requestCandidate(recoveredPlan, "construction-recovery");
+                      if (requested.family)
+                        constructionFamilies.set(requested.candidateId, requested.family);
+                      recoveryCounts.providerRequestsStarted += 1;
+                      const [result] = await Promise.allSettled([requested.request]);
+                      if (result.status === "rejected") {
+                        recoveryCounts.providerRequestsFailed += 1;
+                        recordCandidateResult(
+                          requested.submittedPlan,
+                          result,
+                          data.extra_minutes,
+                          data.extra_minutes,
+                          requested.candidateId,
+                          undefined,
+                          undefined,
+                          requested.expectedAnchors,
+                          null,
+                          false,
+                        );
+                        recoveryCounts.stopReason = "PROVIDER_REQUEST_FAILED";
+                        break;
+                      }
+                      recoveryCounts.providerResponsesReturned += 1;
+                      try {
+                        recordCandidateResult(
+                          requested.submittedPlan,
+                          result,
+                          data.extra_minutes,
+                          data.extra_minutes,
+                          requested.candidateId,
+                          undefined,
+                          undefined,
+                          requested.expectedAnchors,
+                          null,
+                          recoveryAttempt === 1
+                            ? {
+                                rootSeedCandidateId: activeSeed.rootSeedCandidateId,
+                                parentCandidateId: activeSeed.candidateId,
+                                lineageDepth: 1,
+                              }
+                            : false,
+                        );
+                        recoveryCounts.responsesEvaluated += 1;
+                      } catch {
+                        recoveryCounts.stopReason = "RECOVERY_SHAPE_REJECTED";
+                        break;
+                      }
+                      const observation = constructionMetadataByCandidateId.get(
+                        requested.candidateId,
+                      );
+                      if (observation?.routeShapeEligible && !observation.duplicate) {
+                        recoveryCounts.stopReason =
+                          observation.withinBudget &&
+                          observation.actualAddedSeconds >= data.extra_minutes * 60 * 0.75
+                            ? "TARGET_REACHED"
+                            : "SAFE_OBSERVATION_PRODUCED";
+                        break;
+                      }
+                      recoveryCounts.stopReason = "RECOVERY_SHAPE_REJECTED";
+                      const adaptiveSeed = recoverableShapeSeeds.find(
+                        (candidate) =>
+                          candidate.parentCandidateId === activeSeed.candidateId &&
+                          candidate.rootSeedCandidateId === activeSeed.rootSeedCandidateId &&
+                          candidate.lineageDepth === 1 &&
+                          !usedSeedCandidateIds.has(candidate.candidateId),
+                      );
+                      seed =
+                        adaptiveSeed ??
+                        selectConstructionRecoverySeed(
+                          recoverableShapeSeeds.filter(
+                            (candidate) =>
+                              candidate.lineageDepth === 0 &&
+                              !usedSeedCandidateIds.has(candidate.candidateId),
+                          ),
+                          desiredAddedSeconds,
+                        );
+                    }
+                  }
+                  constructionRecoveryResult = hadSafeObservationBeforeRecovery
+                    ? null
+                    : recoveryCounts;
                   const maximumConstructionValue = Math.min(
                     averageMetersPerSecond * stage.planningBudgetMinutes * 60 * 0.95,
                     Math.max(
@@ -1641,6 +1823,7 @@ export const planScenicRoute = createServerFn({ method: "POST" })
                   stopReason: durationRefinementResult.stopReason,
                 }
               : null,
+            constructionRecovery: constructionRecoveryResult,
             preferencePresence: { mood: moodIn.length > 0, theme: themeIn.length > 0 },
             attemptRoles: explorationTargets.flatMap((stage) =>
               stage.attemptRoles.map((role) => ({

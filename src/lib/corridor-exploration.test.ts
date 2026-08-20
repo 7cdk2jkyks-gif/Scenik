@@ -927,8 +927,16 @@ describe("budget-driven corridor exploration", () => {
     const baselineDurationSeconds = 3_600;
     let placesCalls = 0;
     let scenicRouteCalls = 0;
-    let activeFixture: "180" | "30" = "180";
+    let activeFixture:
+      | "180"
+      | "30"
+      | "recovery"
+      | "recovery-over"
+      | "recovery-under"
+      | "recovery-invalid"
+      | "recovery-provider-failure" = "180";
     const submittedWaypointCounts: number[] = [];
+    const submittedShapingWaypoints: Array<Array<{ lat: number; lng: number }>> = [];
     const returnedGeometryByDuration = new Map<number, string>();
     const safePlaceTypes = [
       "woods",
@@ -985,11 +993,11 @@ describe("budget-driven corridor exploration", () => {
         return safePlaceTypes.map((primaryType, index) => ({
           id: `fixture-evidence-${placesCalls}-${index}`,
           lat:
-            activeFixture === "30"
+            activeFixture !== "180"
               ? 51.04 + (index % 3) * 0.004
               : center.lat + (index - 2.5) * 0.002,
           lng:
-            activeFixture === "30"
+            activeFixture !== "180"
               ? index % 2 === 0
                 ? -0.5
                 : 0.5
@@ -1014,15 +1022,28 @@ describe("budget-driven corridor exploration", () => {
         const ordinal = scenicRouteCalls;
         const waypoints = input.waypoints ?? [];
         submittedWaypointCounts.push(waypoints.length - 1);
+        submittedShapingWaypoints.push(waypoints.slice(0, -1).map((waypoint) => ({ ...waypoint })));
         if (activeFixture === "180" && ordinal === 1) throw new Error("FICTIONAL_PROVIDER_FAILURE");
+        if (activeFixture === "recovery-provider-failure" && ordinal === 4)
+          throw new Error("FICTIONAL_RECOVERY_PROVIDER_FAILURE");
         const addedSecondsByOrdinal =
           activeFixture === "180"
             ? [0, 70 * 60 + 1, 145 * 60, 160 * 60 + 1]
-            : [38.7 * 60, 57.7 * 60, 79.6 * 60, 35 * 60, 27 * 60];
+            : activeFixture === "30"
+              ? [38.7 * 60, 57.7 * 60, 79.6 * 60, 35 * 60, 27 * 60]
+              : activeFixture === "recovery-over"
+                ? [40 * 60, 55.9 * 60, 91 * 60, 40 * 60, 27 * 60]
+                : activeFixture === "recovery-under"
+                  ? [40 * 60, 55.9 * 60, 91 * 60, 18 * 60, 27 * 60]
+                  : activeFixture === "recovery-invalid"
+                    ? [40 * 60, 55.9 * 60, 91 * 60, 45 * 60, 27 * 60]
+                    : [40 * 60, 55.9 * 60, 91 * 60, 27 * 60, 27 * 60];
         const addedSeconds =
           addedSecondsByOrdinal[Math.min(ordinal, addedSecondsByOrdinal.length) - 1];
         const requestedPoints =
-          activeFixture === "30" && ordinal >= 3
+          activeFixture !== "180" &&
+          ((activeFixture === "30" && ordinal >= 3) ||
+            (activeFixture.startsWith("recovery") && ordinal >= 4))
             ? [
                 start,
                 ...[...waypoints, { lat: 51.04, lng: -0.5 }, { lat: 51.04, lng: 0.5 }].sort(
@@ -1032,10 +1053,20 @@ describe("budget-driven corridor exploration", () => {
               ]
             : [start, ...waypoints, end];
         const returnedPoints =
-          (activeFixture === "180" && ordinal === 3 && waypoints.length >= 2) ||
-          (activeFixture === "30" && ordinal <= 2 && waypoints.length >= 2)
-            ? [start, waypoints[1], waypoints[0], ...waypoints.slice(2), end]
-            : requestedPoints;
+          activeFixture.startsWith("recovery") && ordinal === 1
+            ? [start, waypoints[0], start, ...waypoints.slice(1), end]
+            : activeFixture.startsWith("recovery") && ordinal === 2
+              ? [start, { lat: 51, lng: -0.7 }, { lat: 51, lng: -0.9 }, ...waypoints, end]
+              : activeFixture.startsWith("recovery") && ordinal === 3
+                ? [start, ...waypoints, waypoints[1] ?? waypoints[0], end]
+                : activeFixture === "recovery-invalid" && ordinal === 4
+                  ? [start, waypoints[0], start, ...waypoints.slice(1), end]
+                  : activeFixture === "recovery-invalid" && ordinal === 5
+                    ? [start, { lat: 51, lng: -0.7 }, { lat: 51, lng: -0.9 }, ...waypoints, end]
+                    : (activeFixture === "180" && ordinal === 3 && waypoints.length >= 2) ||
+                        (activeFixture === "30" && ordinal <= 2 && waypoints.length >= 2)
+                      ? [start, waypoints[1], waypoints[0], ...waypoints.slice(2), end]
+                      : requestedPoints;
         const directions = computed(
           returnedPoints,
           baselineDurationSeconds + addedSeconds,
@@ -1088,7 +1119,9 @@ describe("budget-driven corridor exploration", () => {
               intendedTargetMinutes: number | null;
               actualAddedMinutes: number | null;
               routeShapeEligible: boolean | null;
+              routeShapeRejectionReason: string | null;
               duplicateEligible: boolean | null;
+              budgetEligible: boolean | null;
               effectiveWaypointCount: number | null;
               effectiveWaypointForm: string | null;
               effectiveProgress: string | null;
@@ -1102,6 +1135,16 @@ describe("budget-driven corridor exploration", () => {
             }>;
             durationRefinement: {
               providerRequestsStarted: number;
+              stopReason: string;
+            } | null;
+            constructionRecovery: {
+              attempted: boolean;
+              seedsConsidered: number;
+              safeConstructionsProduced: number;
+              providerRequestsStarted: number;
+              providerResponsesReturned: number;
+              providerRequestsFailed: number;
+              responsesEvaluated: number;
               stopReason: string;
             } | null;
           };
@@ -1186,6 +1229,7 @@ describe("budget-driven corridor exploration", () => {
       placesCalls = 0;
       scenicRouteCalls = 0;
       submittedWaypointCounts.length = 0;
+      submittedShapingWaypoints.length = 0;
       returnedGeometryByDuration.clear();
       diagnosticLogs.length = 0;
       const downward = await (
@@ -1280,6 +1324,231 @@ describe("budget-driven corridor exploration", () => {
       assert.equal(downwardSummary.refinement.attemptsUsed, 2);
       assert.equal(downwardSummary.refinement.stopReason, "TARGET_REACHED");
       assert.equal(downwardSummary.selected.band, "target");
+      assert.equal(downward.routeGenerationDiagnostics.constructionRecovery ?? null, null);
+
+      activeFixture = "recovery";
+      placesCalls = 0;
+      scenicRouteCalls = 0;
+      submittedWaypointCounts.length = 0;
+      submittedShapingWaypoints.length = 0;
+      returnedGeometryByDuration.clear();
+      diagnosticLogs.length = 0;
+      const recovered = await (
+        planScenicRoute as unknown as (input: {
+          data: {
+            start_address: string;
+            end_address: string;
+            mood: string;
+            theme: string;
+            extra_minutes: number;
+            stops: string[];
+          };
+          context: { userId: string; supabase: object };
+        }) => Promise<typeof result>
+      )({
+        data: {
+          start_address: "Origin",
+          end_address: "Destination",
+          mood: "Peaceful",
+          theme: "Forest",
+          extra_minutes: 30,
+          stops: ["Stop"],
+        },
+        context: { userId: "00000000-0000-4000-8000-000000000000", supabase: {} },
+      });
+      assert.equal(scenicRouteCalls, 4);
+      assert.ok(placesCalls <= 15);
+      assert.equal(recovered.scoringDiagnostics.scenicRouteRequestsAttempted, 4);
+      assert.equal(recovered.selectedWinner, "scenik");
+      assert.equal(recovered.timeTargetOutcome, "TARGET_MET");
+      assert.equal(recovered.measuredExtraTimeSeconds, 27 * 60);
+      assert.deepEqual(
+        recovered.routeGenerationDiagnostics.candidateEligibility
+          .filter((candidate) => [40, 55.9, 91].includes(candidate.actualAddedMinutes ?? -1))
+          .map((candidate) => ({
+            added: candidate.actualAddedMinutes,
+            eligible: candidate.routeShapeEligible,
+            reason: candidate.routeShapeRejectionReason,
+            selected: candidate.selected,
+            scenicScore: candidate.scenicScore,
+            evidenceEligible: candidate.evidenceEligible,
+            completeEffectiveMetadata:
+              candidate.effectiveWaypointForm != null &&
+              candidate.effectiveProgress != null &&
+              candidate.effectiveOrientation != null,
+          })),
+        [
+          {
+            added: 40,
+            eligible: false,
+            reason: "WAYPOINT_SPUR",
+            selected: false,
+            scenicScore: null,
+            evidenceEligible: false,
+            completeEffectiveMetadata: true,
+          },
+          {
+            added: 55.9,
+            eligible: false,
+            reason: "MATERIAL_REVERSE_RETRACE",
+            selected: false,
+            scenicScore: null,
+            evidenceEligible: false,
+            completeEffectiveMetadata: true,
+          },
+          {
+            added: 91,
+            eligible: false,
+            reason: "WAYPOINT_SPUR",
+            selected: false,
+            scenicScore: null,
+            evidenceEligible: false,
+            completeEffectiveMetadata: true,
+          },
+        ],
+      );
+      const selectedRecovery = recovered.routeGenerationDiagnostics.candidateEligibility.find(
+        (candidate) => candidate.selected && candidate.actualAddedMinutes === 27,
+      );
+      assert.ok(selectedRecovery);
+      assert.equal(selectedRecovery.routeShapeEligible, true);
+      assert.equal(selectedRecovery.duplicateEligible, true);
+      assert.equal(selectedRecovery.budgetEligible, true);
+      assert.equal(selectedRecovery.evidenceEligible, true);
+      assert.equal(selectedRecovery.qualityEligible, true);
+      assert.equal(Number.isFinite(selectedRecovery.scenicScore), true);
+      assert.ok((selectedRecovery.scenicScore ?? 0) >= 60);
+      assert.equal(
+        recovered.measuredExtraTimeSeconds,
+        recovered.selectedRouteDurationSeconds - recovered.fastestRouteDurationSeconds,
+      );
+      assert.equal(recovered.measuredExtraTimeSeconds / (30 * 60), 0.9);
+      assert.deepEqual(recovered.routeGenerationDiagnostics.constructionRecovery, {
+        attempted: true,
+        seedsConsidered: 3,
+        safeConstructionsProduced: 1,
+        providerRequestsStarted: 1,
+        providerResponsesReturned: 1,
+        providerRequestsFailed: 0,
+        responsesEvaluated: 1,
+        stopReason: "TARGET_REACHED",
+      });
+      assert.equal(diagnosticLogs.length, 1);
+      const recoverySummary = JSON.parse(
+        diagnosticLogs[0].slice("scenik-route-summary-v3 ".length),
+      );
+      assert.deepEqual(
+        recoverySummary.recovery,
+        recovered.routeGenerationDiagnostics.constructionRecovery,
+      );
+      assert.equal(recoverySummary.selected.band, "target");
+
+      const runRecoveryVariantPlan = planScenicRoute as unknown as (input: {
+        data: {
+          start_address: string;
+          end_address: string;
+          mood: string;
+          theme: string;
+          extra_minutes: number;
+          stops: string[];
+        };
+        context: { userId: string; supabase: object };
+      }) => Promise<typeof result>;
+      const runRecoveryVariant = async (
+        fixture:
+          | "recovery-over"
+          | "recovery-under"
+          | "recovery-invalid"
+          | "recovery-provider-failure",
+      ) => {
+        activeFixture = fixture;
+        placesCalls = 0;
+        scenicRouteCalls = 0;
+        submittedWaypointCounts.length = 0;
+        submittedShapingWaypoints.length = 0;
+        returnedGeometryByDuration.clear();
+        diagnosticLogs.length = 0;
+        return (planScenicRoute as unknown as typeof runRecoveryVariantPlan)({
+          data: {
+            start_address: "Origin",
+            end_address: "Destination",
+            mood: "Peaceful",
+            theme: "Forest",
+            extra_minutes: 30,
+            stops: ["Stop"],
+          },
+          context: { userId: "00000000-0000-4000-8000-000000000000", supabase: {} },
+        });
+      };
+      const safeOver = await runRecoveryVariant("recovery-over");
+      assert.equal(scenicRouteCalls, 5);
+      assert.equal(safeOver.measuredExtraTimeSeconds, 27 * 60);
+      assert.equal(
+        safeOver.routeGenerationDiagnostics.constructionRecovery?.stopReason,
+        "SAFE_OBSERVATION_PRODUCED",
+      );
+      assert.equal(
+        safeOver.routeGenerationDiagnostics.durationRefinement?.stopReason,
+        "TARGET_REACHED",
+      );
+
+      const safeUnder = await runRecoveryVariant("recovery-under");
+      assert.equal(scenicRouteCalls, 5);
+      assert.equal(safeUnder.measuredExtraTimeSeconds, 27 * 60);
+      assert.equal(
+        safeUnder.routeGenerationDiagnostics.constructionRecovery?.stopReason,
+        "SAFE_OBSERVATION_PRODUCED",
+      );
+      assert.equal(
+        safeUnder.routeGenerationDiagnostics.durationRefinement?.stopReason,
+        "TARGET_REACHED",
+      );
+
+      const invalidRecovery = await runRecoveryVariant("recovery-invalid");
+      assert.equal(scenicRouteCalls, 5);
+      assert.equal(invalidRecovery.selectedWinner, "fastest");
+      assert.equal(
+        invalidRecovery.routeGenerationDiagnostics.constructionRecovery?.stopReason,
+        "RECOVERY_SHAPE_REJECTED",
+      );
+      const invalidRecoveryReasons = invalidRecovery.routeGenerationDiagnostics.candidateEligibility
+        .filter((candidate) => [45, 27].includes(candidate.actualAddedMinutes ?? -1))
+        .map((candidate) => candidate.routeShapeRejectionReason);
+      assert.equal(invalidRecoveryReasons.includes("WAYPOINT_SPUR"), true);
+      assert.equal(invalidRecoveryReasons.includes("MATERIAL_REVERSE_RETRACE"), true);
+      const { sphericalPointToSegmentDistanceMeters } =
+        await import("./route-evidence-association");
+      const firstRecoveryWaypoint = submittedShapingWaypoints[3]?.[0];
+      const secondRecoveryWaypoint = submittedShapingWaypoints[4]?.[0];
+      assert.ok(firstRecoveryWaypoint);
+      assert.ok(secondRecoveryWaypoint);
+      const firstRecoveryOffset = sphericalPointToSegmentDistanceMeters(
+        firstRecoveryWaypoint,
+        start,
+        requiredStop,
+      );
+      const secondRecoveryOffset = sphericalPointToSegmentDistanceMeters(
+        secondRecoveryWaypoint,
+        start,
+        requiredStop,
+      );
+      assert.ok(
+        Math.abs(secondRecoveryOffset / firstRecoveryOffset - (27 / 45) * 0.92 * 0.75) < 0.01,
+      );
+
+      const providerFailure = await runRecoveryVariant("recovery-provider-failure");
+      assert.equal(scenicRouteCalls, 4);
+      assert.equal(providerFailure.selectedWinner, "fastest");
+      assert.deepEqual(providerFailure.routeGenerationDiagnostics.constructionRecovery, {
+        attempted: true,
+        seedsConsidered: 3,
+        safeConstructionsProduced: 1,
+        providerRequestsStarted: 1,
+        providerResponsesReturned: 0,
+        providerRequestsFailed: 1,
+        responsesEvaluated: 0,
+        stopReason: "PROVIDER_REQUEST_FAILED",
+      });
     } finally {
       console.info = originalInfo;
       mock.restore();

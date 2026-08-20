@@ -4,8 +4,11 @@ import {
   DERIVED_MOVEMENT_NUMERICAL_EPSILON_METERS,
   MIN_DERIVED_WAYPOINT_SEPARATION_METERS,
   MAX_SCENIC_ROUTE_ATTEMPTS,
+  MIN_ANTIPODAL_CLEARANCE_RADIANS,
+  classifyConstructionRecoveryPreflight,
   MAX_DERIVED_WAYPOINT_DISPLACEMENT_FROM_SOURCE_METERS,
   createRequestLocalPlanFamily,
+  deriveShapeRecoveryPlan,
   deriveRouteShapingPlan,
   executeDerivedRouteRequest,
   effectiveConstructionMetadata,
@@ -17,10 +20,12 @@ import {
   recordRefinedProviderCandidate,
   runBoundedDurationRefinement,
   scoreAndSelectRouteCandidateCollection,
+  selectConstructionRecoverySeed,
   type DurationConstructionObservation,
   type RouteCandidateForFinalScoring,
 } from "./route-duration-refinement";
 import { haversineDistanceMeters } from "./scenic-waypoint";
+import { sphericalPointToSegmentDistanceMeters } from "./route-evidence-association";
 import { selectRouteCandidate } from "./route-selection";
 import type { ComputedDirections } from "./google-maps.server";
 
@@ -205,6 +210,516 @@ describe("bounded duration refinement", () => {
       ],
     );
     assert.ok(twoInward.waypoints.every((waypoint) => waypoint.lat > 0 && waypoint.lat < 0.01));
+  });
+
+  it("derives bounded spur and retrace recovery from the submitted construction", () => {
+    const anchors = [
+      { lat: 0, lng: 0 },
+      { lat: 0, lng: 1 },
+    ];
+    const spur = deriveShapeRecoveryPlan({
+      plan: sourcePlan,
+      anchors,
+      desiredAddedSeconds: 27 * 60,
+      observedAddedSeconds: 40 * 60,
+      rejectionReason: "WAYPOINT_SPUR",
+      affectedWaypointIndex: 0,
+      attemptNumber: 1,
+    });
+    assert.ok(spur);
+    assert.equal(spur.waypoints.length, 1);
+    assert.ok(spur.waypoints[0].lat > 0 && spur.waypoints[0].lat < sourcePlan.waypoints[0].lat);
+    assert.notEqual(spur.signature, sourcePlan.signature);
+
+    const retrace = deriveShapeRecoveryPlan({
+      plan: sourcePlan,
+      anchors,
+      desiredAddedSeconds: 27 * 60,
+      observedAddedSeconds: 55.9 * 60,
+      rejectionReason: "MATERIAL_REVERSE_RETRACE",
+      affectedWaypointIndex: null,
+      attemptNumber: 2,
+    });
+    assert.ok(retrace);
+    assert.ok(retrace.waypoints[0].lat < spur.waypoints[0].lat);
+  });
+
+  it("fails closed for invalid recovery indices, separation and construction inputs", () => {
+    const anchors = [
+      { lat: 0, lng: 0 },
+      { lat: 0, lng: 1 },
+    ];
+    assert.equal(
+      deriveShapeRecoveryPlan({
+        plan: sourcePlan,
+        anchors,
+        desiredAddedSeconds: 27 * 60,
+        observedAddedSeconds: 40 * 60,
+        rejectionReason: "WAYPOINT_SPUR",
+        affectedWaypointIndex: 1,
+        attemptNumber: 1,
+      }),
+      null,
+    );
+    const tooClose = {
+      ...sourcePlan,
+      waypoints: [
+        { ...sourcePlan.waypoints[0], id: "a", lng: 0.5 },
+        { ...sourcePlan.waypoints[0], id: "b", lng: 0.50001 },
+      ],
+    };
+    assert.equal(
+      deriveShapeRecoveryPlan({
+        plan: tooClose,
+        anchors,
+        desiredAddedSeconds: 27 * 60,
+        observedAddedSeconds: 55.9 * 60,
+        rejectionReason: "MATERIAL_REVERSE_RETRACE",
+        affectedWaypointIndex: null,
+        attemptNumber: 1,
+      }),
+      null,
+    );
+    assert.equal(
+      deriveShapeRecoveryPlan({
+        plan: sourcePlan,
+        anchors,
+        desiredAddedSeconds: Number.NaN,
+        observedAddedSeconds: 40 * 60,
+        rejectionReason: "WAYPOINT_SPUR",
+        affectedWaypointIndex: 0,
+        attemptNumber: 1,
+      }),
+      null,
+    );
+  });
+
+  it("truthfully reduces an unsafe two-waypoint spur recovery to one waypoint", () => {
+    const plan = {
+      ...sourcePlan,
+      waypoints: [
+        { ...sourcePlan.waypoints[0], id: "outer", lat: 0.02 },
+        { ...sourcePlan.waypoints[0], id: "inner", lat: 0.01 },
+      ],
+    };
+    const recovered = deriveShapeRecoveryPlan({
+      plan,
+      anchors: [
+        { lat: 0, lng: 0 },
+        { lat: 0, lng: 1 },
+      ],
+      desiredAddedSeconds: 27 * 60,
+      observedAddedSeconds: 40 * 60,
+      rejectionReason: "WAYPOINT_SPUR",
+      affectedWaypointIndex: 0,
+      attemptNumber: 1,
+    });
+    assert.ok(recovered);
+    assert.equal(recovered.waypoints.length, 1);
+    assert.equal(recovered.waypoints[0].id, "inner");
+    assert.equal(
+      effectiveConstructionMetadata(recovered, [
+        { lat: 0, lng: 0 },
+        { lat: 0, lng: 1 },
+      ])?.waypointForm,
+      "one-waypoint",
+    );
+  });
+
+  it("moves recovery waypoints inward on spherical arcs across global edge cases", () => {
+    const cases = [
+      {
+        name: "UK",
+        anchors: [
+          { lat: 51, lng: -1 },
+          { lat: 51, lng: 1 },
+        ],
+        point: { lat: 51.2, lng: 0 },
+      },
+      {
+        name: "eastbound antimeridian",
+        anchors: [
+          { lat: 10, lng: 179 },
+          { lat: 10, lng: -179 },
+        ],
+        point: { lat: 10.2, lng: 180 },
+      },
+      {
+        name: "westbound antimeridian",
+        anchors: [
+          { lat: 10, lng: -179 },
+          { lat: 10, lng: 179 },
+        ],
+        point: { lat: 9.8, lng: -180 },
+      },
+      {
+        name: "north",
+        anchors: [
+          { lat: 82, lng: -10 },
+          { lat: 82, lng: 10 },
+        ],
+        point: { lat: 81.7, lng: 0 },
+      },
+      {
+        name: "south",
+        anchors: [
+          { lat: -82, lng: -10 },
+          { lat: -82, lng: 10 },
+        ],
+        point: { lat: -81.7, lng: 0 },
+      },
+      {
+        name: "near pole",
+        anchors: [
+          { lat: 89, lng: -30 },
+          { lat: 89, lng: 30 },
+        ],
+        point: { lat: 88.8, lng: 0 },
+      },
+    ];
+    for (const { name, anchors, point } of cases) {
+      const plan = {
+        ...sourcePlan,
+        waypoints: [{ ...sourcePlan.waypoints[0], ...point }],
+      };
+      const recovered = deriveShapeRecoveryPlan({
+        plan,
+        anchors,
+        desiredAddedSeconds: 27 * 60,
+        observedAddedSeconds: 40 * 60,
+        rejectionReason: "WAYPOINT_SPUR",
+        affectedWaypointIndex: 0,
+        attemptNumber: 1,
+      });
+      assert.ok(recovered, name);
+      const before = sphericalPointToSegmentDistanceMeters(point, anchors[0], anchors[1]);
+      const after = sphericalPointToSegmentDistanceMeters(
+        recovered.waypoints[0],
+        anchors[0],
+        anchors[1],
+      );
+      assert.ok(Number.isFinite(after), name);
+      assert.ok(after < before, name);
+      assert.ok(recovered.waypoints[0].lng >= -180 && recovered.waypoints[0].lng <= 180, name);
+    }
+  });
+
+  it("fails spherical recovery closed for coincident, antipodal and invalid geometry", () => {
+    const recover = (
+      anchors: Array<{ lat: number; lng: number }>,
+      point: { lat: number; lng: number },
+    ) =>
+      deriveShapeRecoveryPlan({
+        plan: { ...sourcePlan, waypoints: [{ ...sourcePlan.waypoints[0], ...point }] },
+        anchors,
+        desiredAddedSeconds: 27 * 60,
+        observedAddedSeconds: 40 * 60,
+        rejectionReason: "WAYPOINT_SPUR",
+        affectedWaypointIndex: 0,
+        attemptNumber: 1,
+      });
+    assert.equal(
+      recover(
+        [
+          { lat: 0, lng: 0 },
+          { lat: 0, lng: 1 },
+        ],
+        { lat: 0, lng: 0.5 },
+      ),
+      null,
+    );
+    const degrees = (radians: number) => (radians * 180) / Math.PI;
+    const nearAntipodalLongitude = 179.999999;
+    for (const anchors of [
+      [
+        { lat: 0, lng: 0 },
+        { lat: 0, lng: nearAntipodalLongitude },
+      ],
+      [
+        { lat: 0, lng: nearAntipodalLongitude },
+        { lat: 0, lng: 0 },
+      ],
+    ])
+      assert.equal(recover(anchors, { lat: 1, lng: 90 }), null);
+    assert.equal(
+      recover(
+        [
+          { lat: 30, lng: 0 },
+          { lat: -30, lng: nearAntipodalLongitude },
+        ],
+        { lat: 1, lng: 90 },
+      ),
+      null,
+    );
+    for (const clearance of [
+      MIN_ANTIPODAL_CLEARANCE_RADIANS * 0.5,
+      MIN_ANTIPODAL_CLEARANCE_RADIANS,
+    ])
+      assert.equal(
+        recover(
+          [
+            { lat: 0, lng: 0 },
+            { lat: 0, lng: 180 - degrees(clearance) },
+          ],
+          { lat: 1, lng: 90 },
+        ),
+        null,
+      );
+    const outsideBoundary = recover(
+      [
+        { lat: 0, lng: 0 },
+        { lat: 0, lng: 180 - degrees(MIN_ANTIPODAL_CLEARANCE_RADIANS * 2) },
+      ],
+      { lat: 1, lng: 90 },
+    );
+    assert.ok(outsideBoundary);
+    assert.equal(
+      recover(
+        [
+          { lat: 0, lng: 0 },
+          { lat: 0, lng: 180 },
+        ],
+        { lat: 1, lng: 90 },
+      ),
+      null,
+    );
+    for (const point of [
+      { lat: 91, lng: 0 },
+      { lat: 0, lng: 181 },
+      { lat: Number.NaN, lng: 0 },
+      { lat: 0, lng: Number.POSITIVE_INFINITY },
+    ])
+      assert.equal(
+        recover(
+          [
+            { lat: 0, lng: 0 },
+            { lat: 0, lng: 1 },
+          ],
+          point,
+        ),
+        null,
+      );
+  });
+
+  it("uses both bounded spherical ratio extremes without moving outward", () => {
+    const anchors = [
+      { lat: 51, lng: -1 },
+      { lat: 51, lng: 1 },
+    ];
+    const point = { lat: 51.2, lng: 0 };
+    const plan = { ...sourcePlan, waypoints: [{ ...sourcePlan.waypoints[0], ...point }] };
+    const sourceDistance = sphericalPointToSegmentDistanceMeters(point, anchors[0], anchors[1]);
+    for (const [observedAddedSeconds, expectedRatio] of [
+      [10_000, 0.2],
+      [1_700, 0.8],
+    ] as const) {
+      const recovered = deriveShapeRecoveryPlan({
+        plan,
+        anchors,
+        desiredAddedSeconds: 1_620,
+        observedAddedSeconds,
+        rejectionReason: "WAYPOINT_SPUR",
+        affectedWaypointIndex: 0,
+        attemptNumber: 1,
+      });
+      assert.ok(recovered);
+      const recoveredDistance = sphericalPointToSegmentDistanceMeters(
+        recovered.waypoints[0],
+        anchors[0],
+        anchors[1],
+      );
+      assert.ok(Math.abs(recoveredDistance / sourceDistance - expectedRatio) < 0.001);
+    }
+  });
+
+  it("derives attempt two from the current plan, duration, reason and affected waypoint", () => {
+    const anchors = [
+      { lat: 0, lng: 0 },
+      { lat: 0, lng: 1 },
+    ];
+    const original = {
+      ...sourcePlan,
+      waypoints: [
+        { ...sourcePlan.waypoints[0], id: "first", lng: 0.25 },
+        { ...sourcePlan.waypoints[0], id: "second", lng: 0.75 },
+      ],
+    };
+    const responseOnePlan = deriveShapeRecoveryPlan({
+      plan: original,
+      anchors,
+      desiredAddedSeconds: 27 * 60,
+      observedAddedSeconds: 91 * 60,
+      rejectionReason: "WAYPOINT_SPUR",
+      affectedWaypointIndex: 0,
+      attemptNumber: 1,
+    });
+    assert.ok(responseOnePlan);
+    const responseTwoPlan = deriveShapeRecoveryPlan({
+      plan: responseOnePlan,
+      anchors,
+      desiredAddedSeconds: 27 * 60,
+      observedAddedSeconds: 45 * 60,
+      rejectionReason: "WAYPOINT_SPUR",
+      affectedWaypointIndex: 1,
+      attemptNumber: 2,
+    });
+    assert.ok(responseTwoPlan);
+    assert.deepEqual(responseTwoPlan.waypoints[0], responseOnePlan.waypoints[0]);
+    assert.notDeepEqual(responseTwoPlan.waypoints[1], responseOnePlan.waypoints[1]);
+
+    const retraceTransition = deriveShapeRecoveryPlan({
+      plan: responseOnePlan,
+      anchors,
+      desiredAddedSeconds: 27 * 60,
+      observedAddedSeconds: 45 * 60,
+      rejectionReason: "MATERIAL_REVERSE_RETRACE",
+      affectedWaypointIndex: null,
+      attemptNumber: 2,
+    });
+    assert.ok(retraceTransition);
+    assert.notDeepEqual(retraceTransition.waypoints[0], responseOnePlan.waypoints[0]);
+    assert.notDeepEqual(retraceTransition.waypoints[1], responseOnePlan.waypoints[1]);
+  });
+
+  it("continues recovery truthfully after a two-to-one topology reduction", () => {
+    const anchors = [
+      { lat: 0, lng: 0 },
+      { lat: 0, lng: 1 },
+    ];
+    const reduced = deriveShapeRecoveryPlan({
+      plan: {
+        ...sourcePlan,
+        waypoints: [
+          { ...sourcePlan.waypoints[0], id: "outer", lat: 0.02 },
+          { ...sourcePlan.waypoints[0], id: "inner", lat: 0.01 },
+        ],
+      },
+      anchors,
+      desiredAddedSeconds: 27 * 60,
+      observedAddedSeconds: 40 * 60,
+      rejectionReason: "WAYPOINT_SPUR",
+      affectedWaypointIndex: 0,
+      attemptNumber: 1,
+    });
+    assert.ok(reduced);
+    assert.equal(reduced.waypoints.length, 1);
+    const continued = deriveShapeRecoveryPlan({
+      plan: reduced,
+      anchors,
+      desiredAddedSeconds: 27 * 60,
+      observedAddedSeconds: 45 * 60,
+      rejectionReason: "WAYPOINT_SPUR",
+      affectedWaypointIndex: 0,
+      attemptNumber: 2,
+    });
+    assert.ok(continued);
+    assert.equal(continued.waypoints.length, 1);
+    assert.equal(continued.waypoints[0].id, "inner");
+  });
+
+  it("selects the same recovery seed when ordinary observations are permuted", () => {
+    const seeds = [
+      {
+        candidateId: "candidate-3",
+        plan: sourcePlan,
+        actualAddedSeconds: 91 * 60,
+        rejectionReason: "WAYPOINT_SPUR" as const,
+        affectedWaypointIndex: 0,
+        effectiveConstruction: effectiveConstructionMetadata(sourcePlan, [
+          { lat: 0, lng: 0 },
+          { lat: 0, lng: 1 },
+        ])!,
+        familyId: "family-3",
+        rootSeedCandidateId: "candidate-3",
+        parentCandidateId: null,
+        lineageDepth: 0 as const,
+      },
+      {
+        candidateId: "candidate-1",
+        plan: sourcePlan,
+        actualAddedSeconds: 40 * 60,
+        rejectionReason: "WAYPOINT_SPUR" as const,
+        affectedWaypointIndex: 0,
+        effectiveConstruction: effectiveConstructionMetadata(sourcePlan, [
+          { lat: 0, lng: 0 },
+          { lat: 0, lng: 1 },
+        ])!,
+        familyId: "family-1",
+        rootSeedCandidateId: "candidate-1",
+        parentCandidateId: null,
+        lineageDepth: 0 as const,
+      },
+      {
+        candidateId: "candidate-2",
+        plan: sourcePlan,
+        actualAddedSeconds: 55.9 * 60,
+        rejectionReason: "MATERIAL_REVERSE_RETRACE" as const,
+        affectedWaypointIndex: null,
+        effectiveConstruction: effectiveConstructionMetadata(sourcePlan, [
+          { lat: 0, lng: 0 },
+          { lat: 0, lng: 1 },
+        ])!,
+        familyId: "family-2",
+        rootSeedCandidateId: "candidate-2",
+        parentCandidateId: null,
+        lineageDepth: 0 as const,
+      },
+    ];
+    assert.equal(selectConstructionRecoverySeed(seeds, 27 * 60)?.candidateId, "candidate-1");
+    assert.equal(
+      selectConstructionRecoverySeed([...seeds].reverse(), 27 * 60)?.candidateId,
+      "candidate-1",
+    );
+    assert.equal(selectConstructionRecoverySeed([], 27 * 60), null);
+  });
+
+  it("rejects recovery collisions and exhausted shared request capacity before Routes", () => {
+    assert.equal(
+      classifyConstructionRecoveryPreflight({
+        plan: sourcePlan,
+        attemptedSignatures: new Set([sourcePlan.signature]),
+        attemptsAlreadyUsed: 3,
+      }),
+      "NO_DISTINCT_RECOVERY_CONSTRUCTION",
+    );
+    assert.equal(
+      classifyConstructionRecoveryPreflight({
+        plan: sourcePlan,
+        attemptedSignatures: new Set(),
+        attemptsAlreadyUsed: MAX_SCENIC_ROUTE_ATTEMPTS,
+      }),
+      "RECOVERY_CAPACITY_EXHAUSTED",
+    );
+  });
+
+  it("rejects a near-antipodal recovery before the provider preflight can start a request", () => {
+    const clearanceDegrees = (MIN_ANTIPODAL_CLEARANCE_RADIANS * 180) / Math.PI;
+    const plan = {
+      ...sourcePlan,
+      waypoints: [{ ...sourcePlan.waypoints[0], lat: 1, lng: 90 }],
+    };
+    const recovered = deriveShapeRecoveryPlan({
+      plan,
+      anchors: [
+        { lat: 0, lng: 0 },
+        { lat: 0, lng: 180 - clearanceDegrees / 2 },
+      ],
+      desiredAddedSeconds: 27 * 60,
+      observedAddedSeconds: 40 * 60,
+      rejectionReason: "WAYPOINT_SPUR",
+      affectedWaypointIndex: 0,
+      attemptNumber: 1,
+    });
+    let providerCalls = 0;
+    const preflight = classifyConstructionRecoveryPreflight({
+      plan: recovered,
+      attemptedSignatures: new Set(),
+      attemptsAlreadyUsed: 3,
+    });
+    if (preflight === "READY") providerCalls += 1;
+    assert.equal(recovered, null);
+    assert.equal(preflight, "NO_DISTINCT_RECOVERY_CONSTRUCTION");
+    assert.equal(providerCalls, 0);
   });
 
   it("derives coordinate-free effective form, progress and orientation from the selected plan", () => {

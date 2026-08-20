@@ -83,6 +83,81 @@ export type EffectiveConstructionMetadata = {
   orientation: "left" | "right" | "alternating-mixed";
 };
 
+export type RecoverableRouteShapeReason = "WAYPOINT_SPUR" | "MATERIAL_REVERSE_RETRACE";
+
+export type ConstructionRecoveryStopReason =
+  | "TARGET_REACHED"
+  | "SAFE_OBSERVATION_PRODUCED"
+  | "NO_RECOVERABLE_SHAPE_SEED"
+  | "NO_DISTINCT_RECOVERY_CONSTRUCTION"
+  | "RECOVERY_SHAPE_REJECTED"
+  | "RECOVERY_CAPACITY_EXHAUSTED"
+  | "PROVIDER_REQUEST_FAILED";
+
+export type ConstructionRecoveryStateCounts = {
+  attempted: boolean;
+  seedsConsidered: number;
+  safeConstructionsProduced: number;
+  providerRequestsStarted: number;
+  providerResponsesReturned: number;
+  providerRequestsFailed: number;
+  responsesEvaluated: number;
+  stopReason: ConstructionRecoveryStopReason;
+};
+
+export type ConstructionRecoverySeed = {
+  candidateId: string;
+  plan: ScenicCorridorPlan;
+  actualAddedSeconds: number;
+  rejectionReason: RecoverableRouteShapeReason;
+  affectedWaypointIndex: number | null;
+  effectiveConstruction: EffectiveConstructionMetadata;
+  familyId: string;
+  rootSeedCandidateId: string;
+  parentCandidateId: string | null;
+  lineageDepth: 0 | 1;
+};
+
+export function classifyConstructionRecoveryPreflight(input: {
+  plan: ScenicCorridorPlan | null;
+  attemptedSignatures: ReadonlySet<string>;
+  attemptsAlreadyUsed: number;
+}): "READY" | "NO_DISTINCT_RECOVERY_CONSTRUCTION" | "RECOVERY_CAPACITY_EXHAUSTED" {
+  if (input.attemptsAlreadyUsed >= MAX_SCENIC_ROUTE_ATTEMPTS) return "RECOVERY_CAPACITY_EXHAUSTED";
+  if (!input.plan || input.attemptedSignatures.has(input.plan.signature))
+    return "NO_DISTINCT_RECOVERY_CONSTRUCTION";
+  return "READY";
+}
+
+export function selectConstructionRecoverySeed(
+  seeds: ConstructionRecoverySeed[],
+  desiredAddedSeconds: number,
+): ConstructionRecoverySeed | null {
+  if (!Number.isFinite(desiredAddedSeconds) || desiredAddedSeconds <= 0) return null;
+  const projectedDistance = (seed: ConstructionRecoverySeed) => {
+    if (!Number.isFinite(seed.actualAddedSeconds) || seed.actualAddedSeconds <= desiredAddedSeconds)
+      return Number.POSITIVE_INFINITY;
+    const ratio = Math.max(
+      0.2,
+      Math.min(0.8, (desiredAddedSeconds / seed.actualAddedSeconds) * 0.92),
+    );
+    return (
+      Math.round(Math.abs(seed.actualAddedSeconds * ratio - desiredAddedSeconds) * 1_000) / 1_000
+    );
+  };
+  return (
+    seeds
+      .filter((seed) => Number.isFinite(projectedDistance(seed)))
+      .sort(
+        (a, b) =>
+          projectedDistance(a) - projectedDistance(b) ||
+          Number(b.rejectionReason === "WAYPOINT_SPUR" && b.affectedWaypointIndex != null) -
+            Number(a.rejectionReason === "WAYPOINT_SPUR" && a.affectedWaypointIndex != null) ||
+          a.candidateId.localeCompare(b.candidateId),
+      )[0] ?? null
+  );
+}
+
 export type RequestLocalPlanFamily = {
   familyId: string;
   structuralKey: string;
@@ -205,6 +280,212 @@ function waypointDisplacement(waypoint: ScenicWaypointPlan, anchors: LatLng[]): 
   if (!start || !end) return null;
   const projection = corridorProjection(start, end, waypoint);
   return projection ? Math.abs(projection.signedOffsetMeters) : null;
+}
+
+type UnitVector = readonly [number, number, number];
+const RECOVERY_EARTH_RADIUS_METERS = 6_371_000;
+const SPHERICAL_NUMERICAL_EPSILON = 1e-12;
+/** Great-circle planes become numerically ill-conditioned as their endpoints
+ * approach antipodes. Production driving corridors are vastly shorter; this
+ * conservative clearance rejects only ambiguous global-scale segments. */
+export const MIN_ANTIPODAL_CLEARANCE_RADIANS = 1e-6;
+/** Covers degree/radian and acos reconstruction error at the inclusive policy boundary. */
+const ANTIPODAL_CLEARANCE_COMPARISON_EPSILON_RADIANS = 1e-10;
+
+function unitVector(point: LatLng): UnitVector {
+  const latitude = (point.lat * Math.PI) / 180;
+  const longitude = (point.lng * Math.PI) / 180;
+  const latitudeCosine = Math.cos(latitude);
+  return [
+    latitudeCosine * Math.cos(longitude),
+    latitudeCosine * Math.sin(longitude),
+    Math.sin(latitude),
+  ];
+}
+
+function vectorDot(a: UnitVector, b: UnitVector): number {
+  return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+}
+
+function vectorCross(a: UnitVector, b: UnitVector): UnitVector {
+  return [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+}
+
+function normalisedVector(vector: UnitVector): UnitVector | null {
+  const length = Math.hypot(...vector);
+  return Number.isFinite(length) && length > SPHERICAL_NUMERICAL_EPSILON
+    ? [vector[0] / length, vector[1] / length, vector[2] / length]
+    : null;
+}
+
+function centralAngle(a: UnitVector, b: UnitVector): number {
+  return Math.acos(Math.max(-1, Math.min(1, vectorDot(a, b))));
+}
+
+function coordinateFromUnitVector(vector: UnitVector): LatLng | null {
+  const normalised = normalisedVector(vector);
+  if (!normalised) return null;
+  const coordinate = {
+    lat: (Math.asin(Math.max(-1, Math.min(1, normalised[2]))) * 180) / Math.PI,
+    lng: normaliseLongitude((Math.atan2(normalised[1], normalised[0]) * 180) / Math.PI),
+  };
+  return finiteCoordinate(coordinate) ? coordinate : null;
+}
+
+function sphericalCorridorProjection(
+  segmentStart: LatLng,
+  segmentEnd: LatLng,
+  point: LatLng,
+): { projected: LatLng; projectedVector: UnitVector; pointVector: UnitVector } | null {
+  if (![segmentStart, segmentEnd, point].every(finiteCoordinate)) return null;
+  const start = unitVector(segmentStart);
+  const end = unitVector(segmentEnd);
+  const target = unitVector(point);
+  const segmentAngle = centralAngle(start, end);
+  if (
+    !Number.isFinite(segmentAngle) ||
+    segmentAngle * RECOVERY_EARTH_RADIUS_METERS < 100 ||
+    Math.PI - segmentAngle <=
+      MIN_ANTIPODAL_CLEARANCE_RADIANS + ANTIPODAL_CLEARANCE_COMPARISON_EPSILON_RADIANS
+  )
+    return null;
+  const normal = normalisedVector(vectorCross(start, end));
+  if (!normal) return null;
+  const targetNormalComponent = vectorDot(target, normal);
+  let projected = normalisedVector([
+    target[0] - normal[0] * targetNormalComponent,
+    target[1] - normal[1] * targetNormalComponent,
+    target[2] - normal[2] * targetNormalComponent,
+  ]);
+  if (!projected) return null;
+  if (vectorDot(projected, target) < 0) projected = [-projected[0], -projected[1], -projected[2]];
+  const startToProjection = centralAngle(start, projected);
+  const projectionToEnd = centralAngle(projected, end);
+  const progress = startToProjection / segmentAngle;
+  if (
+    !Number.isFinite(progress) ||
+    progress < MIN_SEGMENT_PROGRESS ||
+    progress > MAX_SEGMENT_PROGRESS ||
+    Math.abs(startToProjection + projectionToEnd - segmentAngle) > 1e-8
+  )
+    return null;
+  const offsetAngle = centralAngle(projected, target);
+  if (
+    !Number.isFinite(offsetAngle) ||
+    offsetAngle * RECOVERY_EARTH_RADIUS_METERS < MIN_UNAMBIGUOUS_CORRIDOR_OFFSET_METERS ||
+    Math.PI - offsetAngle <= SPHERICAL_NUMERICAL_EPSILON
+  )
+    return null;
+  const coordinate = coordinateFromUnitVector(projected);
+  return coordinate
+    ? { projected: coordinate, projectedVector: projected, pointVector: target }
+    : null;
+}
+
+function interpolateSphericalMinorArc(
+  start: UnitVector,
+  end: UnitVector,
+  fraction: number,
+): LatLng | null {
+  if (!Number.isFinite(fraction) || fraction < 0 || fraction > 1) return null;
+  const angle = centralAngle(start, end);
+  if (!Number.isFinite(angle) || angle <= SPHERICAL_NUMERICAL_EPSILON) return null;
+  const sine = Math.sin(angle);
+  if (Math.abs(sine) <= SPHERICAL_NUMERICAL_EPSILON) return null;
+  const startWeight = Math.sin((1 - fraction) * angle) / sine;
+  const endWeight = Math.sin(fraction * angle) / sine;
+  return coordinateFromUnitVector([
+    start[0] * startWeight + end[0] * endWeight,
+    start[1] * startWeight + end[1] * endWeight,
+    start[2] * startWeight + end[2] * endWeight,
+  ]);
+}
+
+/** Derives a new request construction from a rejected submitted plan. The
+ * provider response supplies only the duration ratio and bounded rejection
+ * class; no returned geometry participates in construction. */
+export function deriveShapeRecoveryPlan(input: {
+  plan: ScenicCorridorPlan;
+  anchors: LatLng[];
+  desiredAddedSeconds: number;
+  observedAddedSeconds: number;
+  rejectionReason: RecoverableRouteShapeReason;
+  affectedWaypointIndex: number | null;
+  attemptNumber: number;
+}): ScenicCorridorPlan | null {
+  if (
+    !finitePositive(input.desiredAddedSeconds) ||
+    !finitePositive(input.observedAddedSeconds) ||
+    input.observedAddedSeconds <= input.desiredAddedSeconds ||
+    !Number.isInteger(input.attemptNumber) ||
+    input.attemptNumber < 1 ||
+    input.attemptNumber > 2 ||
+    effectiveConstructionMetadata(input.plan, input.anchors) == null
+  )
+    return null;
+  if (
+    input.rejectionReason === "WAYPOINT_SPUR" &&
+    (input.affectedWaypointIndex == null ||
+      !Number.isInteger(input.affectedWaypointIndex) ||
+      input.affectedWaypointIndex < 0 ||
+      input.affectedWaypointIndex >= input.plan.waypoints.length)
+  )
+    return null;
+  const baseRatio = Math.max(
+    0.2,
+    Math.min(0.8, (input.desiredAddedSeconds / input.observedAddedSeconds) * 0.92),
+  );
+  const ratio = Math.max(0.15, baseRatio * 0.75 ** (input.attemptNumber - 1));
+  const moved = input.plan.waypoints.map((waypoint, index) => {
+    const shouldMove =
+      input.rejectionReason === "MATERIAL_REVERSE_RETRACE" || index === input.affectedWaypointIndex;
+    if (!shouldMove) return { ...waypoint };
+    const start = input.anchors[waypoint.insertionIndex];
+    const end = input.anchors[waypoint.insertionIndex + 1];
+    if (!start || !end) return null;
+    const projection = sphericalCorridorProjection(start, end, waypoint);
+    if (!projection) return null;
+    const coordinate = interpolateSphericalMinorArc(
+      projection.projectedVector,
+      projection.pointVector,
+      ratio,
+    );
+    if (
+      !coordinate ||
+      haversineDistanceMeters(waypoint, coordinate) < 50 ||
+      haversineDistanceMeters(projection.projected, coordinate) >=
+        haversineDistanceMeters(projection.projected, waypoint)
+    )
+      return null;
+    return { ...waypoint, ...coordinate };
+  });
+  const build = (waypoints: ScenicWaypointPlan[]) => {
+    if (!hasSafeDerivedWaypointSeparation(waypoints)) return null;
+    const recovered = {
+      ...input.plan,
+      waypoints,
+      estimatedDetourMeters: Math.max(1, input.plan.estimatedDetourMeters * ratio),
+      signature: "",
+    };
+    if (effectiveConstructionMetadata(recovered, input.anchors) == null) return null;
+    recovered.signature = effectiveRoutePlanSignature(recovered, input.anchors);
+    return recovered;
+  };
+  if (!moved.some((waypoint) => waypoint == null)) {
+    const recovered = build(moved as ScenicWaypointPlan[]);
+    if (recovered) return recovered;
+  }
+  if (
+    input.rejectionReason === "WAYPOINT_SPUR" &&
+    input.plan.waypoints.length === 2 &&
+    input.affectedWaypointIndex != null
+  )
+    return build(
+      input.plan.waypoints
+        .filter((_, index) => index !== input.affectedWaypointIndex)
+        .map((waypoint) => ({ ...waypoint })),
+    );
+  return null;
 }
 
 export function effectiveConstructionMetadata(
