@@ -1322,15 +1322,8 @@ export const planScenicRoute = createServerFn({ method: "POST" })
                       ),
                     ) + MAX_DERIVED_WAYPOINT_DISPLACEMENT_FROM_SOURCE_METERS,
                   );
-                  const orchestration = await orchestrateDurationRefinement({
+                  const provisionalSelection = scoreAndSelectRouteCandidateCollection({
                     candidates: rawCandidates,
-                    relatedCandidates: constructionObservations.flatMap(
-                      ({ observation, family }) =>
-                        family ? [{ candidateId: observation.candidateId, family }] : [],
-                    ),
-                    existingObservations: constructionObservations.map(
-                      ({ observation }) => observation,
-                    ),
                     evidencePlaces,
                     start,
                     end,
@@ -1338,67 +1331,89 @@ export const planScenicRoute = createServerFn({ method: "POST" })
                     theme: themeIn,
                     requestedExtraMinutes: data.extra_minutes,
                     requiredStopCount: waypoints.length,
-                    attemptsAlreadyUsed: scenicRouteRequestsAttempted,
-                    maximumConstructionValue,
-                    explorationStage: stageIndex,
-                    isEffectiveCollision: (plan) => attemptedSignatures.has(plan.signature),
-                    request: (plan, family) => {
-                      if (scenicRouteRequestsAttempted >= MAX_SCENIC_ROUTE_ATTEMPTS)
+                  }).selection;
+                  // A lower-quality, fully eligible 75–100% fallback has met the duration
+                  // commitment, so refining it would be speculative quality-only work. Meaningful
+                  // (<75%) fallbacks keep using the bounded controller while capacity remains.
+                  if (!provisionalSelection.timeCommitmentTargetSatisfied) {
+                    const orchestration = await orchestrateDurationRefinement({
+                      candidates: rawCandidates,
+                      relatedCandidates: constructionObservations.flatMap(
+                        ({ observation, family }) =>
+                          family ? [{ candidateId: observation.candidateId, family }] : [],
+                      ),
+                      existingObservations: constructionObservations.map(
+                        ({ observation }) => observation,
+                      ),
+                      evidencePlaces,
+                      start,
+                      end,
+                      mood: moodIn,
+                      theme: themeIn,
+                      requestedExtraMinutes: data.extra_minutes,
+                      requiredStopCount: waypoints.length,
+                      attemptsAlreadyUsed: scenicRouteRequestsAttempted,
+                      maximumConstructionValue,
+                      explorationStage: stageIndex,
+                      isEffectiveCollision: (plan) => attemptedSignatures.has(plan.signature),
+                      request: (plan, family) => {
+                        if (scenicRouteRequestsAttempted >= MAX_SCENIC_ROUTE_ATTEMPTS)
+                          return {
+                            candidateId: "duration-refinement-capacity-exhausted",
+                            response: Promise.reject(new Error("ATTEMPT_CAPACITY_EXHAUSTED")),
+                          };
+                        const requested = requestCandidate(plan, "duration-refinement", family);
+                        if (requested.family)
+                          constructionFamilies.set(requested.candidateId, requested.family);
                         return {
-                          candidateId: "duration-refinement-capacity-exhausted",
-                          response: Promise.reject(new Error("ATTEMPT_CAPACITY_EXHAUSTED")),
+                          candidateId: requested.candidateId,
+                          response: requested.request,
+                          expectedAnchors: requested.expectedAnchors,
                         };
-                      const requested = requestCandidate(plan, "duration-refinement", family);
-                      if (requested.family)
-                        constructionFamilies.set(requested.candidateId, requested.family);
-                      return {
-                        candidateId: requested.candidateId,
-                        response: requested.request,
-                        expectedAnchors: requested.expectedAnchors,
-                      };
-                    },
-                    onProviderRejected: ({ plan, candidateId, refinement }) => {
-                      recordCandidateResult(
-                        plan,
-                        { status: "rejected", reason: null },
-                        refinement.intendedTargetMinutes,
-                        refinement.adaptiveTargetMinutes,
-                        candidateId,
-                        refinement,
-                        undefined,
-                        [
-                          routeInput.origin,
-                          ...corridorWaypointsWithRequiredStops(
-                            requiredCoordinates,
-                            planningAnchors,
-                            plan,
-                          ),
-                          routeInput.destination,
-                        ],
-                      );
-                    },
-                    onRecorded: ({ plan, result, candidateId, refinement, recording }) => {
-                      recordCandidateResult(
-                        plan,
-                        result,
-                        refinement.intendedTargetMinutes,
-                        refinement.adaptiveTargetMinutes,
-                        candidateId,
-                        refinement,
-                        recording ?? undefined,
-                        [
-                          routeInput.origin,
-                          ...corridorWaypointsWithRequiredStops(
-                            requiredCoordinates,
-                            planningAnchors,
-                            plan,
-                          ),
-                          routeInput.destination,
-                        ],
-                      );
-                    },
-                  });
-                  durationRefinementResult = orchestration.controller;
+                      },
+                      onProviderRejected: ({ plan, candidateId, refinement }) => {
+                        recordCandidateResult(
+                          plan,
+                          { status: "rejected", reason: null },
+                          refinement.intendedTargetMinutes,
+                          refinement.adaptiveTargetMinutes,
+                          candidateId,
+                          refinement,
+                          undefined,
+                          [
+                            routeInput.origin,
+                            ...corridorWaypointsWithRequiredStops(
+                              requiredCoordinates,
+                              planningAnchors,
+                              plan,
+                            ),
+                            routeInput.destination,
+                          ],
+                        );
+                      },
+                      onRecorded: ({ plan, result, candidateId, refinement, recording }) => {
+                        recordCandidateResult(
+                          plan,
+                          result,
+                          refinement.intendedTargetMinutes,
+                          refinement.adaptiveTargetMinutes,
+                          candidateId,
+                          refinement,
+                          recording ?? undefined,
+                          [
+                            routeInput.origin,
+                            ...corridorWaypointsWithRequiredStops(
+                              requiredCoordinates,
+                              planningAnchors,
+                              plan,
+                            ),
+                            routeInput.destination,
+                          ],
+                        );
+                      },
+                    });
+                    durationRefinementResult = orchestration.controller;
+                  }
                 }
                 const qualityEquivalent = exploredCandidateQuality.filter(
                   (candidate) => bestExploredScore - candidate.score <= 3,
@@ -1662,10 +1677,16 @@ export const planScenicRoute = createServerFn({ method: "POST" })
               qualityEligible:
                 diagnostic == null
                   ? null
-                  : diagnostic.score >= 60 &&
+                  : diagnostic.score != null &&
+                    diagnostic.score >= 60 &&
                     diagnostic.rejectionReason !== "EVIDENCE_FREE_ROUTE" &&
                     diagnostic.rejectionReason !== "BELOW_ABSOLUTE_QUALITY_FLOOR" &&
                     diagnostic.rejectionReason !== "BELOW_WEAK_QUALITY_GUARDRAIL",
+              preferredQualityEligible: diagnostic?.preferredQualityEligible ?? null,
+              timeCommitmentEligible: diagnostic?.timeCommitmentEligible ?? null,
+              baselineScoreImprovement: diagnostic?.baselineScoreImprovement ?? null,
+              provisionalTimeCommitmentCandidate:
+                diagnostic?.provisionalTimeCommitmentCandidate ?? null,
               scenicScore: diagnostic?.score ?? null,
               scoreBreakdown: breakdown
                 ? {
@@ -1681,6 +1702,7 @@ export const planScenicRoute = createServerFn({ method: "POST" })
               evidenceEligible: diagnostic?.evidenceAssociation?.status === "ANALYSED",
               targetBandEligible:
                 diagnostic != null &&
+                diagnostic.score != null &&
                 diagnostic.eligible &&
                 diagnostic.score >= 60 &&
                 diagnostic.allowanceUtilisation >= 0.75,
@@ -1802,7 +1824,9 @@ export const planScenicRoute = createServerFn({ method: "POST" })
               Math.round((selection.measuredExtraTimeSeconds / 60) * 10) / 10,
             outcomeClassification: selection.timeTargetOutcome,
             candidateEligibility,
-            candidateScenicScores: candidateDiagnostics.map((candidate) => candidate.score),
+            candidateScenicScores: candidateDiagnostics.flatMap((candidate) =>
+              candidate.score == null ? [] : [candidate.score],
+            ),
             finalSelectionReason,
             totalServerProcessingDurationMs: Date.now() - requestStartedAt,
             durationRefinement: durationRefinementResult

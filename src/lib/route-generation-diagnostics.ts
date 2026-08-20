@@ -67,6 +67,10 @@ type SafeAttemptDiagnostic = {
   duplicateEligible: boolean | null;
   budgetEligible: boolean | null;
   qualityEligible: boolean | null;
+  preferredQualityEligible?: boolean | null;
+  timeCommitmentEligible?: boolean | null;
+  baselineScoreImprovement?: number | null;
+  provisionalTimeCommitmentCandidate?: boolean | null;
   scenicScore: number | null;
   scoreBreakdown?: {
     naturalBeauty: number;
@@ -134,6 +138,27 @@ function safeNonNegativeNumber(value: unknown, integer = false): number | null {
     : null;
 }
 
+function safeBoolean(value: unknown): boolean | null {
+  return typeof value === "boolean" ? value : null;
+}
+
+/** Scenic Scores and score deltas are bounded by the public 0–100 scoring scale. */
+function safeScoreDifference(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) && value >= -100 && value <= 100
+    ? Object.is(value, -0)
+      ? 0
+      : value
+    : null;
+}
+
+function safeScenicScore(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 100
+    ? Object.is(value, -0)
+      ? 0
+      : value
+    : null;
+}
+
 function safeRefinementCount(value: unknown): number | null {
   const count = safeNonNegativeNumber(value, true);
   return count != null && count <= 2 ? count : null;
@@ -173,6 +198,21 @@ const SAFE_RECOVERY_STOP_REASONS = new Set([
   "RECOVERY_CAPACITY_EXHAUSTED",
   "PROVIDER_REQUEST_FAILED",
 ]);
+const SAFE_FINAL_SELECTION_REASONS = new Set([
+  "ZERO_MINUTE_BUDGET",
+  "ONLY_ELIGIBLE_ROUTE",
+  "TARGET_BAND_HIGHEST_SCENIC_QUALITY",
+  "TIME_COMMITMENT_TARGET_FALLBACK",
+  "MEANINGFUL_FALLBACK_HIGHEST_UTILISATION",
+  "TIME_COMMITMENT_MEANINGFUL_FALLBACK",
+  "WEAK_ROUTE_BEST_BALANCE",
+  "BASELINE_FALLBACK",
+  "BELOW_TARGET_BEST_BALANCE",
+]);
+
+function safeFinalSelectionReason(value: unknown): string | null {
+  return typeof value === "string" && SAFE_FINAL_SELECTION_REASONS.has(value) ? value : null;
+}
 
 function safeCandidateId(value: unknown): string | null {
   return typeof value === "string" && /^[a-z0-9-]{1,64}$/i.test(value) ? value : null;
@@ -273,7 +313,11 @@ export function buildRouteGenerationDiagnostic(input: {
       duplicateEligible: candidate.duplicateEligible,
       budgetEligible: candidate.budgetEligible,
       qualityEligible: candidate.qualityEligible,
-      scenicScore: candidate.scenicScore,
+      preferredQualityEligible: safeBoolean(candidate.preferredQualityEligible),
+      timeCommitmentEligible: safeBoolean(candidate.timeCommitmentEligible),
+      baselineScoreImprovement: safeScoreDifference(candidate.baselineScoreImprovement),
+      provisionalTimeCommitmentCandidate: safeBoolean(candidate.provisionalTimeCommitmentCandidate),
+      scenicScore: safeScenicScore(candidate.scenicScore),
       scoreBreakdown: candidate.scoreBreakdown
         ? {
             naturalBeauty: candidate.scoreBreakdown.naturalBeauty,
@@ -289,7 +333,9 @@ export function buildRouteGenerationDiagnostic(input: {
       targetBandEligible: candidate.targetBandEligible ?? null,
       selected: candidate.selected ?? false,
       rejectionReason: candidate.rejectionReason ?? null,
-      finalSelectionReason: candidate.selected ? (candidate.finalSelectionReason ?? null) : null,
+      finalSelectionReason: candidate.selected
+        ? safeFinalSelectionReason(candidate.finalSelectionReason)
+        : null,
       geometryDistanceMeters: safeNonNegativeNumber(candidate.geometryDistanceMeters, true),
       evidenceSampleCount: safeNonNegativeNumber(candidate.evidenceSampleCount, true),
       evidenceConsidered: safeNonNegativeNumber(candidate.evidenceConsidered, true),
@@ -346,8 +392,10 @@ export function buildRouteGenerationDiagnostic(input: {
           }
         : {}),
     })),
-    candidateScenicScores: [...input.candidateScenicScores],
-    finalSelectionReason: input.finalSelectionReason,
+    candidateScenicScores: input.candidateScenicScores
+      .map(safeScenicScore)
+      .filter((score): score is number => score != null),
+    finalSelectionReason: safeFinalSelectionReason(input.finalSelectionReason),
     totalServerProcessingDurationMs: input.totalServerProcessingDurationMs,
     ...(input.durationRefinement
       ? {

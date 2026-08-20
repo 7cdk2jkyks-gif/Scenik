@@ -119,6 +119,15 @@ describe("selected route presentation", () => {
       meaningfulCopy,
     );
     assert.equal(timeBudgetExplanation(179, 4, true, "TARGET_MET").explanation, targetCopy);
+    assert.deepEqual(
+      timeBudgetExplanation(135 * 60, 165, true, "TIME_COMMITMENT_TARGET_FALLBACK"),
+      {
+        usedMinutes: 135,
+        allowanceMinutes: 165,
+        utilisation: 135 / 165,
+        explanation: targetCopy,
+      },
+    );
     assert.equal(
       timeBudgetExplanation(Number.NaN, Number.NaN).explanation,
       "Fastest route selected.",

@@ -116,7 +116,9 @@ export function timeBudgetExplanation(
   timeTargetOutcome?:
     | "ZERO_TARGET"
     | "TARGET_MET"
+    | "TIME_COMMITMENT_TARGET_FALLBACK"
     | "MEANINGFUL_FALLBACK"
+    | "TIME_COMMITMENT_MEANINGFUL_FALLBACK"
     | "WEAK_ROUTE_SELECTED"
     | "BASELINE_FALLBACK"
     | "LONGER_WEAKENED_QUALITY"
@@ -140,7 +142,10 @@ export function timeBudgetExplanation(
   if (timeTargetOutcome === "ZERO_TARGET") {
     return { usedMinutes, allowanceMinutes, utilisation, explanation: "Fastest route selected." };
   }
-  if (timeTargetOutcome === "TARGET_MET") {
+  if (
+    timeTargetOutcome === "TARGET_MET" ||
+    timeTargetOutcome === "TIME_COMMITMENT_TARGET_FALLBACK"
+  ) {
     return {
       usedMinutes,
       allowanceMinutes,
@@ -155,6 +160,14 @@ export function timeBudgetExplanation(
       utilisation,
       explanation:
         "This useful longer route safely uses part of your allowance; no suitable route used more.",
+    };
+  }
+  if (timeTargetOutcome === "TIME_COMMITMENT_MEANINGFUL_FALLBACK") {
+    return {
+      usedMinutes,
+      allowanceMinutes,
+      utilisation,
+      explanation: "Your larger allowance unlocked this route.",
     };
   }
   if (timeTargetOutcome === "WEAK_ROUTE_SELECTED") {

@@ -7,6 +7,8 @@ import {
   candidateSelectionDiagnostics,
   candidateBudgetUtilisation,
   MIN_ACCEPTABLE_TARGET_SCORE,
+  MIN_TIME_COMMITMENT_SCORE,
+  MIN_TIME_COMMITMENT_SCORE_IMPROVEMENT,
   maximumAllowedDurationSeconds,
   routesAreMeaningfullyDifferent,
   selectRouteCandidate,
@@ -33,6 +35,178 @@ function candidate(
 }
 
 describe("selectRouteCandidate", () => {
+  it("selects the captured safe +135 score-50 time commitment over a score-31 baseline", () => {
+    const baselineSeconds = 24_307;
+    const evidence = {
+      natural: 6,
+      historic: 0,
+      cultural: 0,
+      coastal: 0,
+      viewpoint: 0,
+      wildlife: 0,
+      food: 0,
+      otherPoi: 0,
+    };
+    const baseline = { ...candidate(0, baselineSeconds, 31), candidateId: "baseline" };
+    const safeTarget = {
+      ...candidate(3, baselineSeconds + 135 * 60, 50),
+      candidateId: "safe-target",
+      source: "scenik" as const,
+      evidence,
+      routeShapeEligible: true,
+    };
+    const selection = selectRouteCandidate([baseline, safeTarget], 165);
+    const diagnostic = candidateSelectionDiagnostics([baseline, safeTarget], selection, 165)[1];
+
+    assert.equal(MIN_TIME_COMMITMENT_SCORE, 40);
+    assert.equal(MIN_TIME_COMMITMENT_SCORE_IMPROVEMENT, 6);
+    assert.equal(selection.selected.candidateId, "safe-target");
+    assert.equal(selection.timeTargetOutcome, "TIME_COMMITMENT_TARGET_FALLBACK");
+    assert.equal(selection.measuredExtraTimeSeconds, 135 * 60);
+    assert.equal(diagnostic.preferredQualityEligible, false);
+    assert.equal(diagnostic.timeCommitmentEligible, true);
+    assert.equal(diagnostic.baselineScoreImprovement, 19);
+    assert.equal(diagnostic.provisionalTimeCommitmentCandidate, true);
+    assert.equal(diagnostic.selectionReason, "TIME_COMMITMENT_TARGET_FALLBACK");
+  });
+
+  it("keeps time commitment fallback bounded by score, improvement, evidence, shape and budget", () => {
+    const baselineSeconds = 24_307;
+    const evidence = {
+      natural: 1,
+      historic: 0,
+      cultural: 0,
+      coastal: 0,
+      viewpoint: 0,
+      wildlife: 0,
+      food: 0,
+      otherPoi: 0,
+    };
+    const baseline = candidate(0, baselineSeconds, 31);
+    const scenic = (index: number, addedMinutes: number, score: number) => ({
+      ...candidate(index, baselineSeconds + addedMinutes * 60, score),
+      source: "scenik" as const,
+      evidence,
+      routeShapeEligible: true,
+    });
+
+    for (const rejected of [
+      scenic(1, 135, 39),
+      { ...scenic(2, 135, 36) },
+      { ...scenic(3, 135, 70), evidence: { ...evidence, natural: 0 } },
+      { ...scenic(4, 135, 90), routeShapeEligible: false },
+      scenic(5, 166, 90),
+    ]) {
+      assert.equal(selectRouteCandidate([baseline, rejected], 165).selected.originalIndex, 0);
+    }
+  });
+
+  it("enforces every exact time-commitment boundary using authoritative seconds", () => {
+    const baselineSeconds = 10_000;
+    const evidence = {
+      natural: 1,
+      historic: 0,
+      cultural: 0,
+      coastal: 0,
+      viewpoint: 0,
+      wildlife: 0,
+      food: 0,
+      otherPoi: 0,
+    };
+    const baseline = candidate(0, baselineSeconds, 34);
+    const scenic = (index: number, addedSeconds: number, score: number) => ({
+      ...candidate(index, baselineSeconds + addedSeconds, score),
+      source: "scenik" as const,
+      evidence,
+      routeShapeEligible: true,
+    });
+    const outcome = (route: ReturnType<typeof scenic>, allowance = 100) =>
+      selectRouteCandidate([baseline, route], allowance).timeTargetOutcome;
+
+    assert.equal(outcome(scenic(1, 2_099, 40)), "BASELINE_FALLBACK");
+    assert.equal(outcome(scenic(2, 2_100, 40)), "TIME_COMMITMENT_MEANINGFUL_FALLBACK");
+    assert.equal(outcome(scenic(3, 4_499, 40)), "TIME_COMMITMENT_MEANINGFUL_FALLBACK");
+    assert.equal(outcome(scenic(4, 4_500, 40)), "TIME_COMMITMENT_TARGET_FALLBACK");
+    assert.equal(outcome(scenic(5, 6_000, 40)), "TIME_COMMITMENT_TARGET_FALLBACK");
+    assert.equal(outcome(scenic(6, 6_001, 90)), "BASELINE_FALLBACK");
+    assert.equal(outcome(scenic(7, 4_500, 39.999)), "BASELINE_FALLBACK");
+    assert.equal(outcome(scenic(8, 4_500, 40)), "TIME_COMMITMENT_TARGET_FALLBACK");
+
+    const improvementBaseline = candidate(0, baselineSeconds, 34.001);
+    assert.equal(
+      selectRouteCandidate([improvementBaseline, scenic(9, 4_500, 40)], 100).timeTargetOutcome,
+      "BASELINE_FALLBACK",
+    );
+    assert.equal(
+      selectRouteCandidate([baseline, scenic(10, 4_500, 40)], 100).timeTargetOutcome,
+      "TIME_COMMITMENT_TARGET_FALLBACK",
+    );
+
+    for (const score of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+      const selection = selectRouteCandidate([baseline, scenic(11, 4_500, score)], 100);
+      assert.equal(selection.selected.originalIndex, 0);
+      assert.equal(
+        candidateSelectionDiagnostics([baseline, scenic(11, 4_500, score)], selection, 100)[1]
+          .score,
+        null,
+      );
+    }
+    const missingScore = { ...scenic(12, 4_500, 40), score: undefined } as unknown as ReturnType<
+      typeof scenic
+    >;
+    assert.equal(selectRouteCandidate([baseline, missingScore], 100).selected.originalIndex, 0);
+    assert.equal(outcome(scenic(13, 4_500, 0)), "BASELINE_FALLBACK");
+
+    for (const baselineScore of [Number.NaN, Infinity, -Infinity, undefined]) {
+      const malformedBaseline = {
+        ...baseline,
+        score: baselineScore,
+      } as unknown as typeof baseline;
+      const selection = selectRouteCandidate([malformedBaseline, scenic(14, 4_500, 40)], 100);
+      assert.equal(selection.selected.originalIndex, 0);
+      assert.equal(
+        candidateSelectionDiagnostics([malformedBaseline, scenic(14, 4_500, 40)], selection, 100)[1]
+          .baselineScoreImprovement,
+        null,
+      );
+    }
+
+    for (const allowance of [0, -1, Number.NaN, Infinity]) {
+      assert.equal(
+        selectRouteCandidate([baseline, scenic(15, 4_500, 90)], allowance).selected,
+        baseline,
+      );
+    }
+    assert.equal(outcome(scenic(16, 4_500, 40), 100), "TIME_COMMITMENT_TARGET_FALLBACK");
+  });
+
+  it("reports explicit target satisfaction without suppressing meaningful refinement", () => {
+    const baseline = candidate(0, 10_000, 34);
+    const target = candidate(1, 10_000 + 135 * 60, 50);
+    const meaningful = candidate(2, 10_000 + 60 * 60, 50);
+
+    assert.equal(selectRouteCandidate([baseline, target], 165).timeCommitmentTargetSatisfied, true);
+    assert.equal(
+      selectRouteCandidate([baseline, meaningful], 165).timeCommitmentTargetSatisfied,
+      false,
+    );
+  });
+
+  it("prefers later score-60 quality and keeps time-commitment ties deterministic", () => {
+    const baselineSeconds = 24_307;
+    const baseline = candidate(0, baselineSeconds, 31);
+    const provisional = candidate(3, baselineSeconds + 135 * 60, 50);
+    const preferred = candidate(5, baselineSeconds + 130 * 60, 65);
+    assert.equal(
+      selectRouteCandidate([baseline, provisional, preferred], 165).selected.originalIndex,
+      5,
+    );
+
+    const first = candidate(7, baselineSeconds + 135 * 60, 50, 40_000);
+    const second = candidate(4, baselineSeconds + 135 * 60, 50, 40_000);
+    assert.equal(selectRouteCandidate([baseline, first, second], 165).selected.originalIndex, 4);
+    assert.equal(selectRouteCandidate([second, first, baseline], 165).selected.originalIndex, 4);
+  });
   it("keeps the Production +18.1 fallback until a qualifying refined target exists", () => {
     const baselineSeconds = 22_064;
     const ordinary = [

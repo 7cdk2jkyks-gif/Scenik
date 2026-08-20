@@ -843,6 +843,31 @@ describe("budget-driven corridor exploration", () => {
     );
   });
 
+  it("does not stop remaining ordinary attempts for a provisional score-50 target", () => {
+    assert.equal(
+      explorationShouldStop({
+        bestScore: 50,
+        bestHighUtilisationScore: 50,
+        bestQualityEquivalentUtilisation: 135 / 165,
+        requestedExtraMinutes: 165,
+        stagesExplored: 3,
+        stagesRemaining: 1,
+      }),
+      false,
+    );
+    assert.equal(
+      explorationShouldStop({
+        bestScore: 65,
+        bestHighUtilisationScore: 65,
+        bestQualityEquivalentUtilisation: 130 / 165,
+        requestedExtraMinutes: 165,
+        stagesExplored: 3,
+        stagesRemaining: 1,
+      }),
+      true,
+    );
+  });
+
   it("only claims a full allowance search after successful complete exploration", () => {
     const complete = {
       explorationExhausted: true,
@@ -929,6 +954,8 @@ describe("budget-driven corridor exploration", () => {
     let scenicRouteCalls = 0;
     let activeFixture:
       | "180"
+      | "165"
+      | "165-meaningful"
       | "30"
       | "recovery"
       | "recovery-over"
@@ -990,6 +1017,80 @@ describe("budget-driven corridor exploration", () => {
       searchNearbyScenicPlaces: async ({ center }: { center: { lat: number; lng: number } }) => {
         placesCalls += 1;
         if (activeFixture === "180" && placesCalls <= 7) return [fixedCollisionPlace];
+        if (activeFixture.startsWith("165"))
+          return [
+            {
+              id: "commitment-woods-west",
+              lat: 51.04,
+              lng: -0.5,
+              primaryType: "woods",
+              types: ["woods", "nature_preserve"],
+              displayName: "Fictional western woodland",
+              rating: 4.8,
+              userRatingCount: 100,
+            },
+            {
+              id: "commitment-woods-east",
+              lat: 51.04,
+              lng: 0.5,
+              primaryType: "woods",
+              types: ["woods", "nature_preserve"],
+              displayName: "Fictional eastern woodland",
+              rating: 4.7,
+              userRatingCount: 90,
+            },
+            {
+              id: "commitment-history",
+              lat: 50.6,
+              lng: -0.4,
+              primaryType: "historical_place",
+              types: ["historical_place"],
+              displayName: "Fictional history",
+              rating: 4.3,
+              userRatingCount: 40,
+            },
+            {
+              id: "commitment-view",
+              lat: 50.6,
+              lng: 0,
+              primaryType:
+                placesCalls >= 13 && placesCalls <= 14 ? "scenic_spot" : "farmers_market",
+              types: [placesCalls >= 13 && placesCalls <= 14 ? "scenic_spot" : "farmers_market"],
+              displayName: "Fictional viewpoint",
+              rating: 4.2,
+              userRatingCount: 30,
+            },
+            {
+              id: "commitment-coast",
+              lat: 50.6,
+              lng: 0.4,
+              primaryType: "beach",
+              types: ["beach"],
+              displayName: "Fictional coast",
+              rating: 4.1,
+              userRatingCount: 20,
+            },
+            {
+              id: `commitment-distinct-${placesCalls}`,
+              lat: center.lat,
+              lng: center.lng,
+              primaryType: "scenic_spot",
+              types: ["scenic_spot"],
+              displayName: `Fictional distinct point ${placesCalls}`,
+              rating: 3.5,
+              userRatingCount: 5,
+            },
+            {
+              id: `commitment-distinct-history-${placesCalls}`,
+              lat: center.lat - 0.5,
+              lng: center.lng,
+              primaryType: "historical_place",
+              types: ["historical_place"],
+              displayName: `Fictional distinct history ${placesCalls}`,
+              rating: 3.4,
+              userRatingCount: 4,
+            },
+          ];
         return safePlaceTypes.map((primaryType, index) => ({
           id: `fixture-evidence-${placesCalls}-${index}`,
           lat:
@@ -1016,7 +1117,13 @@ describe("budget-driven corridor exploration", () => {
       }) => {
         if (scenicRouteCalls === 0 && (input.waypoints?.length ?? 0) === 1) {
           scenicRouteCalls = -1;
-          return computed([start, requiredStop, end], baselineDurationSeconds, 140_000);
+          const fastest = computed([start, requiredStop, end], baselineDurationSeconds, 140_000);
+          return activeFixture.startsWith("165")
+            ? {
+                ...fastest,
+                steps: fastest.steps.map((step) => ({ ...step, distanceMeters: 500 })),
+              }
+            : fastest;
         }
         scenicRouteCalls = Math.max(0, scenicRouteCalls) + 1;
         const ordinal = scenicRouteCalls;
@@ -1029,15 +1136,19 @@ describe("budget-driven corridor exploration", () => {
         const addedSecondsByOrdinal =
           activeFixture === "180"
             ? [0, 70 * 60 + 1, 145 * 60, 160 * 60 + 1]
-            : activeFixture === "30"
-              ? [38.7 * 60, 57.7 * 60, 79.6 * 60, 35 * 60, 27 * 60]
-              : activeFixture === "recovery-over"
-                ? [40 * 60, 55.9 * 60, 91 * 60, 40 * 60, 27 * 60]
-                : activeFixture === "recovery-under"
-                  ? [40 * 60, 55.9 * 60, 91 * 60, 18 * 60, 27 * 60]
-                  : activeFixture === "recovery-invalid"
-                    ? [40 * 60, 55.9 * 60, 91 * 60, 45 * 60, 27 * 60]
-                    : [40 * 60, 55.9 * 60, 91 * 60, 27 * 60, 27 * 60];
+            : activeFixture === "165"
+              ? [32.1 * 60, 103 * 60, 135 * 60, 120 * 60, 125 * 60]
+              : activeFixture === "165-meaningful"
+                ? [32.1 * 60, 103 * 60, 60 * 60, 180 * 60, 125 * 60, 135 * 60]
+                : activeFixture === "30"
+                  ? [38.7 * 60, 57.7 * 60, 79.6 * 60, 35 * 60, 27 * 60]
+                  : activeFixture === "recovery-over"
+                    ? [40 * 60, 55.9 * 60, 91 * 60, 40 * 60, 27 * 60]
+                    : activeFixture === "recovery-under"
+                      ? [40 * 60, 55.9 * 60, 91 * 60, 18 * 60, 27 * 60]
+                      : activeFixture === "recovery-invalid"
+                        ? [40 * 60, 55.9 * 60, 91 * 60, 45 * 60, 27 * 60]
+                        : [40 * 60, 55.9 * 60, 91 * 60, 27 * 60, 27 * 60];
         const addedSeconds =
           addedSecondsByOrdinal[Math.min(ordinal, addedSecondsByOrdinal.length) - 1];
         const requestedPoints =
@@ -1053,24 +1164,46 @@ describe("budget-driven corridor exploration", () => {
               ]
             : [start, ...waypoints, end];
         const returnedPoints =
-          activeFixture.startsWith("recovery") && ordinal === 1
+          activeFixture.startsWith("165") &&
+          (ordinal <= 2 ||
+            (ordinal >= 4 &&
+              !(activeFixture === "165-meaningful" && (ordinal === 4 || ordinal === 6))))
             ? [start, waypoints[0], start, ...waypoints.slice(1), end]
-            : activeFixture.startsWith("recovery") && ordinal === 2
-              ? [start, { lat: 51, lng: -0.7 }, { lat: 51, lng: -0.9 }, ...waypoints, end]
-              : activeFixture.startsWith("recovery") && ordinal === 3
-                ? [start, ...waypoints, waypoints[1] ?? waypoints[0], end]
-                : activeFixture === "recovery-invalid" && ordinal === 4
-                  ? [start, waypoints[0], start, ...waypoints.slice(1), end]
-                  : activeFixture === "recovery-invalid" && ordinal === 5
-                    ? [start, { lat: 51, lng: -0.7 }, { lat: 51, lng: -0.9 }, ...waypoints, end]
-                    : (activeFixture === "180" && ordinal === 3 && waypoints.length >= 2) ||
-                        (activeFixture === "30" && ordinal <= 2 && waypoints.length >= 2)
-                      ? [start, waypoints[1], waypoints[0], ...waypoints.slice(2), end]
-                      : requestedPoints;
+            : activeFixture.startsWith("165") && (ordinal === 3 || ordinal === 6)
+              ? [
+                  start,
+                  ...[
+                    ...waypoints,
+                    { lat: 51.04, lng: -0.5 },
+                    { lat: 51.04, lng: 0.5 },
+                    ...(activeFixture === "165-meaningful" && ordinal === 6
+                      ? [
+                          { lat: 50.6, lng: -0.4 },
+                          { lat: 50.6, lng: 0 },
+                          { lat: 50.6, lng: 0.4 },
+                        ]
+                      : []),
+                  ].sort((a, b) => a.lng - b.lng),
+                  end,
+                ]
+              : activeFixture.startsWith("recovery") && ordinal === 1
+                ? [start, waypoints[0], start, ...waypoints.slice(1), end]
+                : activeFixture.startsWith("recovery") && ordinal === 2
+                  ? [start, { lat: 51, lng: -0.7 }, { lat: 51, lng: -0.9 }, ...waypoints, end]
+                  : activeFixture.startsWith("recovery") && ordinal === 3
+                    ? [start, ...waypoints, waypoints[1] ?? waypoints[0], end]
+                    : activeFixture === "recovery-invalid" && ordinal === 4
+                      ? [start, waypoints[0], start, ...waypoints.slice(1), end]
+                      : activeFixture === "recovery-invalid" && ordinal === 5
+                        ? [start, { lat: 51, lng: -0.7 }, { lat: 51, lng: -0.9 }, ...waypoints, end]
+                        : (activeFixture === "180" && ordinal === 3 && waypoints.length >= 2) ||
+                            (activeFixture === "30" && ordinal <= 2 && waypoints.length >= 2)
+                          ? [start, waypoints[1], waypoints[0], ...waypoints.slice(2), end]
+                          : requestedPoints;
         const directions = computed(
           returnedPoints,
           baselineDurationSeconds + addedSeconds,
-          150_000 + ordinal * 10_000,
+          activeFixture.startsWith("165") ? 140_000 : 150_000 + ordinal * 10_000,
         );
         returnedGeometryByDuration.set(directions.durationSeconds, directions.encodedPolyline);
         return directions;
@@ -1115,6 +1248,10 @@ describe("budget-driven corridor exploration", () => {
           timeTargetOutcome: string;
           narrative: string;
           routeGenerationDiagnostics: {
+            attemptsPlanned: number;
+            attemptsCompleted: number;
+            processedTargetMinutes: number[];
+            finalSelectionReason: string | null;
             candidateEligibility: Array<{
               intendedTargetMinutes: number | null;
               actualAddedMinutes: number | null;
@@ -1131,6 +1268,11 @@ describe("budget-driven corridor exploration", () => {
               selected: boolean;
               evidenceEligible: boolean | null;
               qualityEligible: boolean | null;
+              preferredQualityEligible: boolean | null;
+              timeCommitmentEligible: boolean | null;
+              baselineScoreImprovement: number | null;
+              provisionalTimeCommitmentCandidate: boolean | null;
+              finalSelectionReason: string | null;
               scenicScore: number | null;
             }>;
             durationRefinement: {
@@ -1224,6 +1366,145 @@ describe("budget-driven corridor exploration", () => {
       assert.equal(summary.refinement.stopReason, "TARGET_REACHED");
       assert.equal(summary.selected.band, "target");
       assert.ok(Math.abs(summary.selected.addedSeconds - result.measuredExtraTimeSeconds) < 6);
+
+      activeFixture = "165";
+      placesCalls = 0;
+      scenicRouteCalls = 0;
+      submittedWaypointCounts.length = 0;
+      submittedShapingWaypoints.length = 0;
+      returnedGeometryByDuration.clear();
+      diagnosticLogs.length = 0;
+      const commitment = await (
+        planScenicRoute as unknown as (input: {
+          data: {
+            start_address: string;
+            end_address: string;
+            mood: string;
+            theme: string;
+            extra_minutes: number;
+            stops: string[];
+          };
+          context: { userId: string; supabase: object };
+        }) => Promise<typeof result>
+      )({
+        data: {
+          start_address: "Origin",
+          end_address: "Destination",
+          mood: "Peaceful",
+          theme: "Wildlife",
+          extra_minutes: 165,
+          stops: ["Stop"],
+        },
+        context: { userId: "00000000-0000-4000-8000-000000000000", supabase: {} },
+      });
+      assert.deepEqual(
+        commitment.scoringDiagnostics.explorationTargets.flatMap(
+          (stage: { targetExtraMinutes: number[] }) => stage.targetExtraMinutes,
+        ),
+        [30, 60, 70, 125, 150],
+      );
+      assert.deepEqual(
+        commitment.routeGenerationDiagnostics.processedTargetMinutes,
+        [30, 60, 70, 125, 150],
+      );
+      assert.equal(commitment.routeGenerationDiagnostics.attemptsPlanned, 5);
+      assert.equal(commitment.routeGenerationDiagnostics.attemptsCompleted, 5);
+      assert.equal(scenicRouteCalls, 5);
+      assert.equal(commitment.scoringDiagnostics.scenicRouteRequestsAttempted, 5);
+      assert.ok(placesCalls <= 15);
+      const commitmentCandidate = commitment.routeGenerationDiagnostics.candidateEligibility.find(
+        (candidate) => candidate.actualAddedMinutes === 135,
+      );
+      assert.ok(commitmentCandidate);
+      assert.equal(commitmentCandidate.routeShapeEligible, true);
+      assert.equal(commitmentCandidate.duplicateEligible, true);
+      assert.equal(commitmentCandidate.budgetEligible, true);
+      assert.equal(commitmentCandidate.evidenceEligible, true);
+      assert.equal(commitmentCandidate.preferredQualityEligible, false);
+      assert.equal(commitmentCandidate.timeCommitmentEligible, true);
+      assert.equal(commitmentCandidate.provisionalTimeCommitmentCandidate, true);
+      assert.equal(commitmentCandidate.selected, true);
+      assert.equal(commitmentCandidate.finalSelectionReason, "TIME_COMMITMENT_TARGET_FALLBACK");
+      assert.equal(commitmentCandidate.scenicScore, 50);
+      assert.equal(commitmentCandidate.baselineScoreImprovement, 19);
+      assert.equal(commitment.selectedWinner, "scenik");
+      assert.equal(commitment.scenic_score, 50);
+      assert.equal(commitment.measuredExtraTimeSeconds, 135 * 60);
+      assert.equal(commitment.measuredExtraTimeSeconds / (165 * 60), 135 / 165);
+      assert.equal(commitment.timeTargetOutcome, "TIME_COMMITMENT_TARGET_FALLBACK");
+      assert.equal(commitment.directions.durationSeconds, commitment.selectedRouteDurationSeconds);
+      assert.equal(
+        returnedGeometryByDuration.get(commitment.selectedRouteDurationSeconds),
+        commitment.directions.encodedPolyline,
+      );
+      assert.deepEqual(
+        timeBudgetExplanation(
+          commitment.measuredExtraTimeSeconds,
+          165,
+          true,
+          "TIME_COMMITMENT_TARGET_FALLBACK",
+        ),
+        {
+          usedMinutes: 135,
+          allowanceMinutes: 165,
+          utilisation: 135 / 165,
+          explanation: "Your larger allowance unlocked this route.",
+        },
+      );
+      assert.equal(diagnosticLogs.length, 1);
+      const commitmentSummary = JSON.parse(
+        diagnosticLogs[0].slice("scenik-route-summary-v3 ".length),
+      );
+      assert.deepEqual(commitmentSummary.plannedTargets, [30, 60, 70, 125, 150]);
+      assert.deepEqual(commitmentSummary.processedTargets, [30, 60, 70, 125, 150]);
+      assert.equal(commitmentSummary.selected.band, "target");
+
+      activeFixture = "165-meaningful";
+      placesCalls = 0;
+      scenicRouteCalls = 0;
+      submittedWaypointCounts.length = 0;
+      submittedShapingWaypoints.length = 0;
+      returnedGeometryByDuration.clear();
+      diagnosticLogs.length = 0;
+      const refinedCommitment = await (
+        planScenicRoute as unknown as (input: {
+          data: {
+            start_address: string;
+            end_address: string;
+            mood: string;
+            theme: string;
+            extra_minutes: number;
+            stops: string[];
+          };
+          context: { userId: string; supabase: object };
+        }) => Promise<typeof result>
+      )({
+        data: {
+          start_address: "Origin",
+          end_address: "Destination",
+          mood: "Peaceful",
+          theme: "Wildlife",
+          extra_minutes: 165,
+          stops: ["Stop"],
+        },
+        context: { userId: "00000000-0000-4000-8000-000000000000", supabase: {} },
+      });
+      assert.equal(
+        scenicRouteCalls,
+        6,
+        JSON.stringify(refinedCommitment.routeGenerationDiagnostics),
+      );
+      assert.equal(refinedCommitment.scoringDiagnostics.scenicRouteRequestsAttempted, 6);
+      assert.equal(
+        refinedCommitment.routeGenerationDiagnostics.durationRefinement?.providerRequestsStarted,
+        1,
+      );
+      assert.equal(
+        refinedCommitment.measuredExtraTimeSeconds,
+        135 * 60,
+        JSON.stringify(refinedCommitment.routeGenerationDiagnostics),
+      );
+      assert.equal(refinedCommitment.timeTargetOutcome, "TIME_COMMITMENT_TARGET_FALLBACK");
 
       activeFixture = "30";
       placesCalls = 0;

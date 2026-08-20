@@ -227,6 +227,10 @@ describe("route-generation diagnostic log", () => {
       duplicateEligible: null,
       budgetEligible: null,
       qualityEligible: null,
+      preferredQualityEligible: null,
+      timeCommitmentEligible: null,
+      baselineScoreImprovement: null,
+      provisionalTimeCommitmentCandidate: null,
       scenicScore: null,
       scoreBreakdown: {
         naturalBeauty: 7,
@@ -612,6 +616,117 @@ describe("route-generation diagnostic log", () => {
     for (const output of outputs)
       for (const forbidden of Object.values(sensitive).flat())
         assert.equal(output.includes(String(forbidden)), false);
+  });
+
+  it("runtime-sanitises hostile time-commitment diagnostic fields", () => {
+    const hostileValues: unknown[] = ["true", 1, 0, {}, [], Number.NaN, Infinity, -Infinity];
+    for (const hostile of hostileValues) {
+      const diagnostic = buildRouteGenerationDiagnostic({
+        correlationId: "hostile-time-commitment",
+        requestedExtraMinutes: 165,
+        baselineDurationSeconds: 10_000,
+        plannedExplorationStages: [],
+        attemptsPlanned: 1,
+        attemptsCompleted: 1,
+        intendedTargetMinutes: [135],
+        adaptiveTargetMinutes: [],
+        actualAddedMinutesReturned: 135,
+        outcomeClassification: "TARGET_MET",
+        candidateEligibility: [
+          {
+            candidateId: "scenic-stage-1",
+            candidateSource: "scenik",
+            explorationStage: 1,
+            intendedTargetMinutes: 135,
+            adaptiveTargetMinutes: 135,
+            actualAddedMinutes: 135,
+            outcomeClassification: "ELIGIBLE",
+            duplicateEligible: true,
+            budgetEligible: true,
+            qualityEligible: false,
+            preferredQualityEligible: hostile,
+            timeCommitmentEligible: hostile,
+            baselineScoreImprovement: hostile,
+            provisionalTimeCommitmentCandidate: hostile,
+            scenicScore: hostile,
+          } as never,
+        ],
+        candidateScenicScores: [],
+        finalSelectionReason: "UNKNOWN_REASON",
+        totalServerProcessingDurationMs: 1,
+      });
+      const validNumericImpostor = typeof hostile === "number" && Number.isFinite(hostile);
+      assert.deepEqual(
+        {
+          preferredQualityEligible: diagnostic.candidateEligibility[0].preferredQualityEligible,
+          timeCommitmentEligible: diagnostic.candidateEligibility[0].timeCommitmentEligible,
+          baselineScoreImprovement: diagnostic.candidateEligibility[0].baselineScoreImprovement,
+          provisionalTimeCommitmentCandidate:
+            diagnostic.candidateEligibility[0].provisionalTimeCommitmentCandidate,
+          scenicScore: diagnostic.candidateEligibility[0].scenicScore,
+          finalSelectionReason: diagnostic.finalSelectionReason,
+        },
+        {
+          preferredQualityEligible: null,
+          timeCommitmentEligible: null,
+          baselineScoreImprovement: validNumericImpostor ? hostile : null,
+          provisionalTimeCommitmentCandidate: null,
+          scenicScore: validNumericImpostor ? hostile : null,
+          finalSelectionReason: null,
+        },
+      );
+      assert.doesNotThrow(() => JSON.stringify(diagnostic));
+    }
+
+    const bounded = buildRouteGenerationDiagnostic({
+      correlationId: "bounded-time-commitment",
+      requestedExtraMinutes: 165,
+      baselineDurationSeconds: 10_000,
+      plannedExplorationStages: [],
+      attemptsPlanned: 1,
+      attemptsCompleted: 1,
+      intendedTargetMinutes: [135],
+      adaptiveTargetMinutes: [],
+      actualAddedMinutesReturned: 135,
+      outcomeClassification: "TARGET_MET",
+      candidateEligibility: [
+        {
+          candidateId: "scenic-stage-1",
+          candidateSource: "scenik",
+          explorationStage: 1,
+          intendedTargetMinutes: 135,
+          adaptiveTargetMinutes: 135,
+          actualAddedMinutes: 135,
+          outcomeClassification: "ELIGIBLE",
+          duplicateEligible: true,
+          budgetEligible: true,
+          qualityEligible: false,
+          preferredQualityEligible: false,
+          timeCommitmentEligible: true,
+          baselineScoreImprovement: -0,
+          provisionalTimeCommitmentCandidate: true,
+          scenicScore: 50,
+        },
+      ],
+      candidateScenicScores: [50],
+      finalSelectionReason: "TIME_COMMITMENT_TARGET_FALLBACK",
+      totalServerProcessingDurationMs: 1,
+    });
+    assert.equal(bounded.candidateEligibility[0].baselineScoreImprovement, 0);
+    assert.equal(bounded.candidateEligibility[0].timeCommitmentEligible, true);
+
+    for (const huge of [101, -101, Number.MAX_VALUE]) {
+      const projected = buildRouteGenerationDiagnostic({
+        ...bounded,
+        candidateEligibility: [
+          {
+            ...bounded.candidateEligibility[0],
+            baselineScoreImprovement: huge,
+          } as never,
+        ],
+      });
+      assert.equal(projected.candidateEligibility[0].baselineScoreImprovement, null);
+    }
   });
 
   it("joins scored association details into final diagnostics only by request-local candidate ID", () => {

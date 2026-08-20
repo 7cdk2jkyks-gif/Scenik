@@ -6,7 +6,7 @@ import {
   type ScenicPlace,
   type ScenicWaypointPlan,
 } from "./scenic-waypoint";
-import { MIN_TARGET_UTILISATION } from "./route-selection";
+import { MIN_ACCEPTABLE_TARGET_SCORE, MIN_TARGET_UTILISATION } from "./route-selection";
 
 export type ScenicCorridorKind =
   | "forest"
@@ -925,6 +925,7 @@ export function explorationShouldStop(input: {
   if (input.requestedExtraMinutes > 30 && input.bestQualityEquivalentUtilisation < 0.5)
     return false;
   const hasStrongQualityEquivalentCandidate =
+    input.bestHighUtilisationScore >= MIN_ACCEPTABLE_TARGET_SCORE &&
     input.bestHighUtilisationScore >= input.bestScore - EXPLORATION_SCORE_IMPROVEMENT_THRESHOLD;
   if (hasStrongQualityEquivalentCandidate && input.stagesExplored >= 2) return true;
   const threshold = input.scoreImprovementThreshold ?? EXPLORATION_SCORE_IMPROVEMENT_THRESHOLD;
