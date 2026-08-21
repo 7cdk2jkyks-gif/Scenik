@@ -790,7 +790,9 @@ export const planScenicRoute = createServerFn({ method: "POST" })
                     ? evaluateRefinedProviderCandidate({
                         baseline,
                         directions: scenikDirections,
-                        priorDirections: rawCandidates.map((candidate) => candidate.directions),
+                        priorDirections: rawCandidates
+                          .filter((candidate) => candidate.candidateId !== candidateId)
+                          .map((candidate) => candidate.directions),
                         shapingPlan: corridorPlan,
                         evidencePlaces,
                         start,
@@ -847,8 +849,7 @@ export const planScenicRoute = createServerFn({ method: "POST" })
                   const orchestrationFacts = classifyProviderResultForOrchestration({
                     authoritativeAddedSeconds: actualAddedSeconds,
                     overBudget: !withinBudget,
-                    submittedConstructionValid:
-                      candidateFamily != null && isSafeRefinementCorridorPlan(effectivePlan),
+                    submittedConstructionValid: isSafeRefinementCorridorPlan(effectivePlan),
                     effectiveConstruction,
                     effectiveWaypointCount: effectivePlan.waypoints.length,
                     routeShapeEligible: routeShape.routeShapeEligible,
@@ -892,7 +893,7 @@ export const planScenicRoute = createServerFn({ method: "POST" })
                     refinedRecording?.observation ??
                     ({
                       candidateId,
-                      relatedPlanKey: candidateFamily?.familyId ?? `unrelated-${candidateId}`,
+                      relatedPlanKey: candidateFamily?.familyId ?? `submitted-${candidateId}`,
                       actualAddedSeconds,
                       constructionValue:
                         candidateFamily?.currentDisplacementMeters ??
@@ -926,7 +927,6 @@ export const planScenicRoute = createServerFn({ method: "POST" })
                     recoverySeedLineage !== false &&
                     orchestrationFacts.recoveryEligible &&
                     effectiveConstruction != null &&
-                    candidateFamily != null &&
                     (routeShape.routeShapeRejectionReason === "WAYPOINT_SPUR" ||
                       routeShape.routeShapeRejectionReason === "MATERIAL_REVERSE_RETRACE")
                   )
@@ -937,7 +937,7 @@ export const planScenicRoute = createServerFn({ method: "POST" })
                       rejectionReason: routeShape.routeShapeRejectionReason,
                       affectedWaypointIndex: routeShape.affectedWaypointIndex,
                       effectiveConstruction,
-                      familyId: candidateFamily.familyId,
+                      familyId: constructionObservation.relatedPlanKey,
                       rootSeedCandidateId: recoverySeedLineage?.rootSeedCandidateId ?? candidateId,
                       parentCandidateId: recoverySeedLineage?.parentCandidateId ?? null,
                       lineageDepth: recoverySeedLineage?.lineageDepth ?? 0,
