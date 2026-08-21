@@ -6,7 +6,6 @@ import { useServerFn } from "@tanstack/react-start";
 import {
   planScenicRoute,
   saveRoute,
-  recomputeDirections,
   fetchSpeedLimit,
   reverseGeocode,
   recommendThemesFn,
@@ -58,6 +57,8 @@ import {
   type StepProgress,
   type RoadReportMarker,
 } from "@/components/ScenicMap";
+import { ActiveNavigationMap } from "@/components/ActiveNavigationMap";
+import { useTrafficOverlay } from "@/hooks/useTrafficOverlay";
 import { AddressAutocomplete } from "@/components/AddressAutocomplete";
 import { supabase } from "@/integrations/supabase/client";
 import { toast } from "sonner";
@@ -156,35 +157,20 @@ import {
 } from "@/lib/scenic-narration";
 import {
   activateNavigationLifecycle,
-  acceptCurrentNavigationAlternate,
   applyNavigationReplacementTransition,
   applyTerminalNavigationTransition,
-  awaitCoordinatedNavigationRouteReplacement,
   beginNavigationSession,
-  beginCoordinatedNavigationReplacement,
-  beginNavigationAlternateCalculation,
-  clearNavigationAlternateForCalculation,
   createBrowserSpeechBoundary,
   createNavigationAsyncCoordinator,
   createNavigationSessionGuard,
   deactivateNavigationAsyncLifecycle,
-  finishCoordinatedNavigationReplacement,
-  finishNavigationAlternateCalculation,
-  isCurrentNavigationReplacement,
   navigationSessionCanSpeak,
-  publishNavigationAlternate,
   speakDuringActiveNavigation,
   type LocalSpeechBoundary,
   type NavigationSpeechEndReason,
 } from "@/lib/local-speech";
 
 type Rating = "excellent" | "average" | "poor";
-type TrafficAlternateOffer = {
-  encodedPolyline: string;
-  savedSeconds: number;
-  durationSeconds: number;
-  distanceMeters: number;
-};
 const MISSING_OPTIONS = [
   "Better scenery",
   "Less traffic",
@@ -639,7 +625,7 @@ function scoreBarClass(percentage: number) {
   return "bg-red-700";
 }
 
-function PlanPage() {
+export function PlanPage() {
   const navigate = useNavigate();
   const qc = useQueryClient();
   const units = useUnits();
@@ -648,7 +634,6 @@ function PlanPage() {
   const planFn = useServerFn(planScenicRoute);
 
   const saveFn = useServerFn(saveRoute);
-  const recomputeFn = useServerFn(recomputeDirections);
   const fetchSpeedFn = useServerFn(fetchSpeedLimit);
   const reverseGeocodeFn = useServerFn(reverseGeocode);
   const saveSearchFn = useServerFn(saveSearch);
@@ -751,16 +736,11 @@ function PlanPage() {
   const [narrationPreferences, setNarrationPreferences] = useState<NarrationPreferences>(() =>
     loadNarrationPreferences(typeof window === "undefined" ? null : window.localStorage),
   );
-  const [rerouting, setRerouting] = useState(false);
-  const [showTraffic, setShowTraffic] = useState(true);
+  const { showTraffic, toggleTraffic } = useTrafficOverlay();
   const [reportTarget, setReportTarget] = useState<{ lat: number; lng: number } | null>(null);
   const [userId, setUserId] = useState<string | null>(null);
   const [speedKmh, setSpeedKmh] = useState<number | null>(null);
-  const [altOffer, setAltOffer] = useState<TrafficAlternateOffer | null>(null);
   const [clearSearchesOpen, setClearSearchesOpen] = useState(false);
-  // After user chooses "Keep current route", suppress further offers unless a
-  // materially better alternative appears (i.e. new traffic further along the route).
-  const [dismissedSavingsSec, setDismissedSavingsSec] = useState<number | null>(null);
   const [navLocGateDismissed, setNavLocGateDismissed] = useState(false);
   const [locRetryKey, setLocRetryKey] = useState(0);
   const [locationDisclosureOpen, setLocationDisclosureOpen] = useState(false);
@@ -841,10 +821,7 @@ function PlanPage() {
   const lastStepIdxRef = useRef<number>(-1);
   const speechBoundaryRef = useRef<LocalSpeechBoundary | null>(null);
   const navigationSessionRef = useRef(createNavigationSessionGuard());
-  const navigationAsyncRef = useRef(
-    createNavigationAsyncCoordinator<TrafficAlternateOffer>(navigationSessionRef.current),
-  );
-  const altCheckingRef = useRef(false);
+  const navigationAsyncRef = useRef(createNavigationAsyncCoordinator(navigationSessionRef.current));
   const resultRef = useRef<HTMLDivElement | null>(null);
   const [routeCompleted, setRouteCompleted] = useState(false);
   const [completionSummary, setCompletionSummary] = useState<JourneySummary | null>(null);
@@ -855,7 +832,6 @@ function PlanPage() {
   useEffect(() => {
     setProgress(null);
     setStepProgress(null);
-    setAltOffer(null);
     setRouteCompleted(false);
     setCompletionSummary(null);
     setUnlockedAchievements([]);
@@ -1638,11 +1614,7 @@ function PlanPage() {
       applyNavigationReplacementTransition(
         speechBoundaryRef.current,
         navigationAsyncRef.current,
-        () => {
-          setRerouting(false);
-          altCheckingRef.current = false;
-          setAltOffer(null);
-        },
+        () => {},
         commit,
       );
       return;
@@ -1655,11 +1627,7 @@ function PlanPage() {
       speechBoundaryRef.current,
       navigationAsyncRef.current,
       transition,
-      () => {
-        setRerouting(false);
-        altCheckingRef.current = false;
-        setAltOffer(null);
-      },
+      () => {},
       commit,
     );
   }
@@ -1679,171 +1647,11 @@ function PlanPage() {
     });
   }
 
-  async function handleReroute(pos: { lat: number; lng: number }) {
-    if (!result || rerouting) return;
-    const replacementToken = beginCoordinatedNavigationReplacement(navigationAsyncRef.current);
-    if (!replacementToken) return;
-    setRerouting(true);
-    toast("Rerouting…", { icon: <RefreshCw className="h-4 w-4 animate-spin" /> });
-    try {
-      const replacement = await awaitCoordinatedNavigationRouteReplacement(
-        speechBoundaryRef.current,
-        navigationAsyncRef.current,
-        replacementToken,
-        () =>
-          recomputeFn({
-            data: {
-              origin: pos,
-              destination: { lat: result.end.lat, lng: result.end.lng },
-              waypoints: [],
-            },
-          }),
-        () => {
-          setRerouting(false);
-          altCheckingRef.current = false;
-          setAltOffer(null);
-        },
-        (replacement) => {
-          setResult({
-            ...result,
-            directions: replacement,
-            selectedRouteDurationSeconds: replacement.durationSeconds,
-            journeyTimeline: [],
-            narrationEvents: [],
-          });
-        },
-      );
-      if (replacement.status === "stale") return;
-      const fresh = replacement.replacement;
-      setRouteSummary({ distance: fresh.distance, duration: fresh.duration, steps: fresh.steps });
-      spokenRef.current = new Set();
-      lastStepIdxRef.current = -1;
-      capture(AnalyticsEvent.NavigationRerouted, {
-        route_id: result?.title,
-        new_distance_meters: fresh.distanceMeters,
-        new_duration_seconds: fresh.durationSeconds,
-      });
-      speak("Route updated.");
-    } catch {
-      if (!isCurrentNavigationReplacement(navigationSessionRef.current, replacementToken)) return;
-      capture(AnalyticsEvent.NavigationRerouteFailed, { route_title: result?.title });
-      toast.error("Couldn't reroute. Continuing on current route.");
-    } finally {
-      if (finishCoordinatedNavigationReplacement(navigationAsyncRef.current, replacementToken))
-        setRerouting(false);
-    }
-  }
-
-  async function onLocationTick(pos: { lat: number; lng: number }) {
+  function onLocationTick(pos: { lat: number; lng: number }) {
     // Speed limit (fire-and-forget)
     fetchSpeedFn({ data: pos })
       .then((r) => setSpeedKmh(r.kmh))
       .catch(() => setSpeedKmh(null));
-
-    // Traffic-aware alternates — only while navigating, on route, not currently rerouting
-    if (!result || !navOpen || rerouting || altCheckingRef.current) return;
-    if (!progress?.onRoute) return;
-    const altCheckRequest = beginNavigationAlternateCalculation(navigationAsyncRef.current);
-    if (!altCheckRequest) return;
-    altCheckingRef.current = true;
-    try {
-      const fresh = await recomputeFn({
-        data: {
-          origin: pos,
-          destination: { lat: result.end.lat, lng: result.end.lng },
-          waypoints: [],
-          alternatives: true,
-        },
-      });
-      const remainingSec = mapRemainingDurationSeconds(
-        selectedRoute?.durationSeconds ?? 0,
-        progress,
-      );
-      const candidates = [
-        {
-          encodedPolyline: fresh.encodedPolyline,
-          durationSeconds: fresh.durationSeconds,
-          distanceMeters: fresh.distanceMeters,
-        },
-        ...(fresh.alternatives ?? []),
-      ];
-      const best = candidates
-        .map((c) => ({ ...c, savedSeconds: remainingSec - c.durationSeconds }))
-        .filter((c) => c.savedSeconds > 120) // > 2 min faster
-        .sort((a, b) => b.savedSeconds - a.savedSeconds)[0];
-      // Require new alternate to save at least 2 min beyond what was previously dismissed.
-      // This means we only re-prompt when fresh traffic further along makes a materially
-      // better route available — not for the same offer the user already declined.
-      const minSavings = 120 + (dismissedSavingsSec ?? 0);
-      if (best && best.savedSeconds > minSavings) {
-        if (publishNavigationAlternate(navigationAsyncRef.current, altCheckRequest, best))
-          setAltOffer(best);
-      } else if (!best) {
-        if (clearNavigationAlternateForCalculation(navigationAsyncRef.current, altCheckRequest))
-          setAltOffer(null);
-      }
-    } catch {
-      /* noop */
-    } finally {
-      if (finishNavigationAlternateCalculation(navigationAsyncRef.current, altCheckRequest)) {
-        altCheckingRef.current = false;
-      }
-    }
-  }
-
-  function acceptAlternate() {
-    if (!altOffer || !result) return;
-    const fresh = {
-      encodedPolyline: altOffer.encodedPolyline,
-      distanceMeters: altOffer.distanceMeters,
-      durationSeconds: altOffer.durationSeconds,
-      distance: `${(altOffer.distanceMeters / 1000).toFixed(1)} km`,
-      duration: `${Math.round(altOffer.durationSeconds / 60)} min`,
-      steps: result.directions?.steps ?? [],
-    };
-    const accepted = acceptCurrentNavigationAlternate(
-      speechBoundaryRef.current,
-      navigationAsyncRef.current,
-      altOffer,
-      () => {
-        setRerouting(false);
-        altCheckingRef.current = false;
-        setAltOffer(null);
-      },
-      () => {
-        setResult({
-          ...result,
-          directions: fresh,
-          selectedRouteDurationSeconds: fresh.durationSeconds,
-          journeyTimeline: [],
-          narrationEvents: [],
-        });
-      },
-    );
-    if (!accepted) {
-      setAltOffer(null);
-      return;
-    }
-    setRouteSummary({ distance: fresh.distance, duration: fresh.duration, steps: fresh.steps });
-    spokenRef.current = new Set();
-    lastStepIdxRef.current = -1;
-    capture(AnalyticsEvent.TrafficAlternateAccepted, {
-      saved_seconds: altOffer.savedSeconds,
-      new_distance_meters: altOffer.distanceMeters,
-      new_duration_seconds: altOffer.durationSeconds,
-    });
-    setAltOffer(null);
-    speak("Switching to the no traffic route.");
-  }
-
-  function dismissAlternate() {
-    if (altOffer) {
-      capture(AnalyticsEvent.TrafficAlternateDismissed, {
-        saved_seconds: altOffer.savedSeconds,
-      });
-      setDismissedSavingsSec(altOffer.savedSeconds ?? 0);
-    }
-    setAltOffer(null);
   }
 
   // Turn-by-turn voice cues
@@ -1889,7 +1697,6 @@ function PlanPage() {
       lastNarrationAtSeconds: lastNarrationAtRef.current,
       manoeuvreImminent: !!stepProgress && stepProgress.distanceToManeuverMeters <= 700,
       navigationSpeaking: speechBoundaryRef.current?.isSpeaking() ?? false,
-      rerouting,
       navigationCertain: progress.onRoute,
     });
     decision.skippedEventIds.forEach((id) => narrationSpokenRef.current.add(id));
@@ -1908,7 +1715,6 @@ function PlanPage() {
     effectiveNarrationMode,
     navOpen,
     progress,
-    rerouting,
     result,
     selectedRoute?.durationSeconds,
     stepProgress,
@@ -1932,11 +1738,7 @@ function PlanPage() {
       speechBoundaryRef.current,
       navigationAsyncRef.current,
       "completed",
-      () => {
-        setRerouting(false);
-        altCheckingRef.current = false;
-        setAltOffer(null);
-      },
+      () => {},
       () => {
         saveAchievementProgress(userId, achievementResult.progress);
         setCompletionSummary(summary);
@@ -1978,11 +1780,9 @@ function PlanPage() {
     }
   }, [navOpen, progress, result, routeCompleted]);
 
-  // Reset traffic alternate + speed when nav closes
+  // Reset the live speed display when navigation closes.
   useEffect(() => {
     if (!navOpen) {
-      setAltOffer(null);
-      setDismissedSavingsSec(null);
       setSpeedKmh(null);
     }
   }, [navOpen]);
@@ -2819,8 +2619,8 @@ function PlanPage() {
                 </button>
                 <button
                   type="button"
-                  onClick={() => setShowTraffic((v) => !v)}
-                  title={showTraffic ? "Hide traffic" : "Show traffic"}
+                  onClick={toggleTraffic}
+                  title={showTraffic ? "Hide traffic overlay" : "Show traffic overlay"}
                   className={`absolute left-2 top-2 inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1.5 text-xs font-medium shadow-paper transition sm:left-auto sm:right-4 sm:top-14 sm:px-3 ${
                     showTraffic
                       ? "border-red-900 bg-red-900 text-white"
@@ -2828,7 +2628,7 @@ function PlanPage() {
                   }`}
                 >
                   <TrafficCone className="h-3.5 w-3.5" />
-                  <span className="hidden xs:inline sm:inline">Traffic</span>
+                  <span className="hidden xs:inline sm:inline">Traffic map</span>
                 </button>
 
                 <div className="absolute left-2 top-2 hidden max-w-[55%] rounded-md border border-border bg-background/95 px-3 py-1.5 text-[10px] text-muted-foreground shadow-paper sm:block">
@@ -3091,12 +2891,6 @@ function PlanPage() {
                       </div>
                     </div>
                   )}
-                  {rerouting && (
-                    <div className="mb-2 flex shrink-0 items-center gap-2 rounded-md border border-border bg-amber-50 px-3 py-2 text-xs text-amber-800">
-                      <RefreshCw className="h-3.5 w-3.5 animate-spin" /> Rerouting from your current
-                      position…
-                    </div>
-                  )}
                   {waypointFact && (
                     <div className="mb-2 flex shrink-0 items-start gap-3 rounded-xl border border-primary/30 bg-primary/5 px-4 py-3">
                       <MapPin className="mt-0.5 h-5 w-5 shrink-0 text-primary" />
@@ -3134,8 +2928,9 @@ function PlanPage() {
                         </Button>
                       </div>
                     ) : (
-                      <ScenicMap
+                      <ActiveNavigationMap
                         key={`navigation-${selectedRoute?.identityFingerprint ?? "empty"}`}
+                        journeyIdentity={selectedRoute?.identityFingerprint ?? "empty"}
                         points={points}
                         encodedPolyline={selectedRoute?.encodedPolyline}
                         routeDistanceMeters={selectedRoute?.distanceMeters}
@@ -3151,7 +2946,6 @@ function PlanPage() {
                         navMode
                         steps={result?.directions?.steps}
                         onStepChange={setStepProgress}
-                        onReroute={handleReroute}
                         showTraffic={showTraffic}
                         locationRetryKey={locRetryKey}
                         offline={offlineActive}
@@ -3159,12 +2953,6 @@ function PlanPage() {
                         onMapClick={(p) => setReportTarget(p)}
                         onReportDelete={(id) => deleteReportMut.mutate(id)}
                         onLocationTick={onLocationTick}
-                        alternateRoutes={
-                          altOffer
-                            ? [{ id: "faster", encodedPolyline: altOffer.encodedPolyline }]
-                            : []
-                        }
-                        onAlternateClick={() => acceptAlternate()}
                       />
                     )}
                     {/* Location permission gate */}
@@ -3178,9 +2966,8 @@ function PlanPage() {
                             Scenik needs your location to provide navigation
                           </h3>
                           <p className="mt-2 text-sm text-muted-foreground">
-                            Turn-by-turn guidance, live progress, and automatic rerouting all rely
-                            on your GPS. You can still view the route on the map if you prefer not
-                            to share it.
+                            Turn-by-turn guidance and live progress rely on your GPS. You can still
+                            view the route on the map if you prefer not to share it.
                           </p>
                           <div className="mt-5 flex flex-col gap-2">
                             <Button
@@ -3218,43 +3005,6 @@ function PlanPage() {
                             >
                               Go back
                             </Button>
-                          </div>
-                        </div>
-                      </div>
-                    )}
-                    {/* Traffic alternate banner */}
-                    {altOffer && (
-                      <div
-                        style={{ top: "calc(max(1rem, env(safe-area-inset-top)) + 3rem)" }}
-                        className="absolute left-4 right-4 sm:right-auto sm:max-w-sm rounded-xl border border-amber-300 bg-amber-50/95 p-3 shadow-paper z-10"
-                      >
-                        <div className="flex items-start gap-2">
-                          <RouteIcon className="mt-0.5 h-4 w-4 text-amber-700" />
-                          <div className="min-w-0 flex-1">
-                            <div className="text-xs font-semibold text-amber-900">
-                              No traffic route — saves {Math.round(altOffer.savedSeconds / 60)} min
-                            </div>
-                            <div className="mt-0.5 text-[11px] text-amber-800">
-                              New ETA {formatEta(altOffer.durationSeconds)} ·{" "}
-                              {formatKm(altOffer.distanceMeters)} · avoids traffic
-                            </div>
-                            <div className="mt-2 flex gap-2">
-                              <Button
-                                size="sm"
-                                className="h-7 px-3 text-xs"
-                                onClick={acceptAlternate}
-                              >
-                                Switch route
-                              </Button>
-                              <Button
-                                size="sm"
-                                variant="outline"
-                                className="h-7 px-3 text-xs"
-                                onClick={dismissAlternate}
-                              >
-                                Keep current
-                              </Button>
-                            </div>
                           </div>
                         </div>
                       </div>
@@ -3303,7 +3053,8 @@ function PlanPage() {
                     </button>
                     <button
                       type="button"
-                      onClick={() => setShowTraffic((v) => !v)}
+                      onClick={toggleTraffic}
+                      title={showTraffic ? "Hide traffic overlay" : "Show traffic overlay"}
                       style={{ top: "max(1rem, env(safe-area-inset-top))" }}
                       className={`absolute left-4 inline-flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs font-medium shadow-paper ${
                         showTraffic
@@ -3311,7 +3062,7 @@ function PlanPage() {
                           : "border-border bg-background/95 text-ink"
                       }`}
                     >
-                      <TrafficCone className="h-3.5 w-3.5" /> Traffic
+                      <TrafficCone className="h-3.5 w-3.5" /> Traffic map
                     </button>
                   </div>
                 </div>

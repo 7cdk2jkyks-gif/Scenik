@@ -1,7 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
   activateNavigationLifecycle,
-  acceptCurrentNavigationAlternate,
   applyNavigationLifecycleTransition,
   applyNavigationReplacementTransition,
   applyTerminalNavigationTransition,
@@ -10,8 +9,6 @@ import {
   awaitNavigationRouteReplacement,
   beginNavigationSession,
   beginCoordinatedNavigationReplacement,
-  beginNavigationAlternateCalculation,
-  clearNavigationAlternateForCalculation,
   captureNavigationSession,
   captureNavigationReplacement,
   completeCurrentNavigationSession,
@@ -23,13 +20,10 @@ import {
   deactivateNavigationAsyncLifecycle,
   deactivateNavigationLifecycle,
   finishCoordinatedNavigationReplacement,
-  finishNavigationAlternateCalculation,
   invalidateNavigationSession,
   isCurrentNavigationSession,
   isLatestNavigationReplacement,
   navigationSessionCanSpeak,
-  publishNavigationAlternate,
-  consumeCurrentNavigationAlternate,
   shutdownNavigationSpeech,
   speakDuringActiveNavigation,
 } from "./local-speech";
@@ -468,8 +462,8 @@ describe("local speech boundary", () => {
     expect(state.spoken).toHaveLength(1);
   });
 
-  test("route upgrade, reroute and traffic alternate replace after cancellation and permit new speech", () => {
-    for (const replacement of ["upgrade", "reroute", "traffic-alternate"]) {
+  test("route replacement cancels old speech and permits new speech", () => {
+    for (const replacement of ["upgrade", "replacement"]) {
       const state = setup();
       const order: string[] = [];
       let route = "old";
@@ -495,7 +489,7 @@ describe("local speech boundary", () => {
     }
   });
 
-  test("failed reroute preserves route and does not run successful replacement lifecycle", async () => {
+  test("failed replacement preserves route and does not run successful replacement lifecycle", async () => {
     const state = setup();
     let route = "old";
     await expect(
@@ -570,7 +564,7 @@ describe("local speech boundary", () => {
     }
   });
 
-  test("discards a reroute that resolves after completion without success effects", async () => {
+  test("discards a replacement that resolves after completion without success effects", async () => {
     const state = setup();
     const guard = createNavigationSessionGuard();
     beginNavigationSession(guard);
@@ -596,7 +590,7 @@ describe("local speech boundary", () => {
     expect(guard.completed).toBe(true);
   });
 
-  test("discards a reroute after explicit end and cannot restore navigation", async () => {
+  test("discards a replacement after explicit end and cannot restore navigation", async () => {
     const state = setup();
     const guard = createNavigationSessionGuard();
     beginNavigationSession(guard);
@@ -622,7 +616,7 @@ describe("local speech boundary", () => {
     expect(navigationSessionCanSpeak(guard)).toBe(false);
   });
 
-  test("journey B is isolated from journey A's pending reroute", async () => {
+  test("journey B is isolated from journey A's pending replacement", async () => {
     const state = setup();
     const guard = createNavigationSessionGuard();
     beginNavigationSession(guard);
@@ -650,7 +644,7 @@ describe("local speech boundary", () => {
     expect(navigationSessionCanSpeak(guard)).toBe(true);
   });
 
-  test("only the newest overlapping reroute commits and owns loading cleanup", async () => {
+  test("only the newest overlapping replacement commits and owns loading cleanup", async () => {
     const state = setup();
     const guard = createNavigationSessionGuard();
     beginNavigationSession(guard);
@@ -684,7 +678,7 @@ describe("local speech boundary", () => {
     expect(isLatestNavigationReplacement(guard, tokenB)).toBe(true);
   });
 
-  test("active reroute cancels before install and permits new-route speech", async () => {
+  test("active replacement cancels before install and permits new-route speech", async () => {
     const state = setup();
     const guard = createNavigationSessionGuard();
     beginNavigationSession(guard);
@@ -711,7 +705,7 @@ describe("local speech boundary", () => {
     ).toBe(true);
   });
 
-  test("failed current reroute preserves the old route and success effects", async () => {
+  test("failed current replacement preserves the old route and success effects", async () => {
     const state = setup();
     const guard = createNavigationSessionGuard();
     beginNavigationSession(guard);
@@ -760,126 +754,9 @@ describe("local speech boundary", () => {
     ).toBe(false);
   });
 
-  test("Production terminal transaction clears pending loading and offers before completion", async () => {
-    const state = setup();
-    const guard = createNavigationSessionGuard();
-    const coordinator = createNavigationAsyncCoordinator<string>(guard);
-    beginNavigationSession(guard);
-    const replacement = beginCoordinatedNavigationReplacement(coordinator)!;
-    const alternate = beginNavigationAlternateCalculation(coordinator)!;
-    expect(publishNavigationAlternate(coordinator, alternate, "offer-a")).not.toBeNull();
-    let resolve!: (value: string) => void;
-    const provider = new Promise<string>((done) => (resolve = done));
-    const effects: string[] = [];
-    let rerouting = true;
-    let alternateLoading = true;
-    let offer: string | null = "offer-a";
-    const pending = awaitCurrentNavigationRouteReplacement(
-      state.boundary,
-      guard,
-      replacement,
-      () => provider,
-      () => effects.push("install"),
-    );
-
-    expect(
-      applyTerminalNavigationTransition(
-        state.boundary,
-        coordinator,
-        "completed",
-        () => {
-          effects.push("cleanup");
-          rerouting = false;
-          alternateLoading = false;
-          offer = null;
-        },
-        () => effects.push("complete"),
-      ),
-    ).toBe(true);
-    expect([rerouting, alternateLoading, offer]).toEqual([false, false, null]);
-    expect(effects).toEqual(["cleanup", "complete"]);
-    expect(coordinator.rerouteOwner).toBeNull();
-    expect(coordinator.alternateOwner).toBeNull();
-    expect(coordinator.alternateOffer).toBeNull();
-    expect(consumeCurrentNavigationAlternate(coordinator, "offer-a")).toBe(false);
-
-    resolve("stale-route");
-    expect(await pending).toEqual({ status: "stale" });
-    expect(finishCoordinatedNavigationReplacement(coordinator, replacement)).toBe(false);
-    expect(effects).toEqual(["cleanup", "complete"]);
-  });
-
-  test("Journey A alternate cannot publish or be accepted during Journey B", () => {
-    const guard = createNavigationSessionGuard();
-    const coordinator = createNavigationAsyncCoordinator<string>(guard);
-    beginNavigationSession(guard);
-    const calculationA = beginNavigationAlternateCalculation(coordinator)!;
-    invalidateNavigationSession(guard);
-    coordinator.alternateOwner = null;
-    beginNavigationSession(guard);
-
-    expect(publishNavigationAlternate(coordinator, calculationA, "offer-a")).toBeNull();
-    expect(consumeCurrentNavigationAlternate(coordinator, "offer-a")).toBe(false);
-    expect(navigationSessionCanSpeak(guard)).toBe(true);
-  });
-
-  test("an older alternate calculation cannot clear a newer published offer", () => {
-    const guard = createNavigationSessionGuard();
-    const coordinator = createNavigationAsyncCoordinator<string>(guard);
-    beginNavigationSession(guard);
-    const calculationA = beginNavigationAlternateCalculation(coordinator)!;
-    const calculationB = beginNavigationAlternateCalculation(coordinator)!;
-    expect(publishNavigationAlternate(coordinator, calculationB, "offer-b")).not.toBeNull();
-    expect(clearNavigationAlternateForCalculation(coordinator, calculationA)).toBe(false);
-    expect(coordinator.alternateOffer?.value).toBe("offer-b");
-  });
-
-  test("valid current alternate accepts once and preserves replacement ordering", () => {
-    const state = setup();
-    const guard = createNavigationSessionGuard();
-    const coordinator = createNavigationAsyncCoordinator<string>(guard);
-    beginNavigationSession(guard);
-    const calculation = beginNavigationAlternateCalculation(coordinator)!;
-    expect(publishNavigationAlternate(coordinator, calculation, "offer-current")).not.toBeNull();
-    expect(finishNavigationAlternateCalculation(coordinator, calculation)).toBe(true);
-    const originalSession = guard.current;
-    const order: string[] = [];
-    const originalCancel = state.boundary.cancel;
-    state.boundary.cancel = () => {
-      order.push("cancel");
-      originalCancel();
-    };
-    let renderedOffer: string | null = "offer-current";
-    const accept = () =>
-      acceptCurrentNavigationAlternate(
-        state.boundary,
-        coordinator,
-        "offer-current",
-        () => {
-          renderedOffer = null;
-          order.push("cleanup");
-        },
-        () => order.push("install"),
-      );
-    expect(accept()).toBe(true);
-    expect(order).toEqual(["cleanup", "cancel", "install"]);
-    expect(guard.current).not.toBe(originalSession);
-    expect(renderedOffer).toBeNull();
-    expect(coordinator.alternateOffer).toBeNull();
-    expect(accept()).toBe(false);
-    expect(order).toEqual(["cleanup", "cancel", "install"]);
-    expect(
-      speakDuringActiveNavigation(state.boundary, !navigationSessionCanSpeak(guard), {
-        text: "New route instruction",
-        kind: "navigation",
-        profile: "default",
-      }),
-    ).toBe(true);
-  });
-
   test("loading ownership survives overlap and terminal cleanup owns the final clear", () => {
     const guard = createNavigationSessionGuard();
-    const coordinator = createNavigationAsyncCoordinator<string>(guard);
+    const coordinator = createNavigationAsyncCoordinator(guard);
     beginNavigationSession(guard);
     const requestA = beginCoordinatedNavigationReplacement(coordinator)!;
     const requestB = beginCoordinatedNavigationReplacement(coordinator)!;
@@ -933,7 +810,7 @@ describe("local speech boundary", () => {
   test("true unmount makes a pending Production replacement stale", async () => {
     const state = setup();
     const guard = createNavigationSessionGuard();
-    const coordinator = createNavigationAsyncCoordinator<string>(guard);
+    const coordinator = createNavigationAsyncCoordinator(guard);
     const lifecycle = activateNavigationLifecycle(guard);
     beginNavigationSession(guard);
     const token = beginCoordinatedNavigationReplacement(coordinator)!;
@@ -954,83 +831,14 @@ describe("local speech boundary", () => {
     expect(effects).toEqual([]);
   });
 
-  test("manual reroute and route upgrade start with synchronously clean alternate state", () => {
-    for (const replacement of ["manual-reroute", "route-upgrade"]) {
-      const state = setup();
-      const guard = createNavigationSessionGuard();
-      const coordinator = createNavigationAsyncCoordinator<string>(guard);
-      beginNavigationSession(guard);
-      const oldSession = guard.current;
-      const alternate = beginNavigationAlternateCalculation(coordinator)!;
-      expect(publishNavigationAlternate(coordinator, alternate, "old-offer")).not.toBeNull();
-      let renderedOffer: string | null = "old-offer";
-      let alternateLoading = true;
-      const order: string[] = [];
-      const originalCancel = state.boundary.cancel;
-      state.boundary.cancel = () => {
-        order.push("cancel");
-        originalCancel();
-      };
-
-      applyNavigationReplacementTransition(
-        state.boundary,
-        coordinator,
-        () => {
-          renderedOffer = null;
-          alternateLoading = false;
-          order.push("cleanup");
-        },
-        () => order.push(`install-${replacement}`),
-      );
-
-      expect(order).toEqual(["cleanup", "cancel", `install-${replacement}`]);
-      expect(renderedOffer).toBeNull();
-      expect(alternateLoading).toBe(false);
-      expect(coordinator.alternateOwner).toBeNull();
-      expect(coordinator.alternateOffer).toBeNull();
-      expect(guard.current).not.toBe(oldSession);
-      expect(publishNavigationAlternate(coordinator, alternate, "stale-offer")).toBeNull();
-    }
-  });
-
-  test("failed coordinated reroute preserves a valid current alternate offer", async () => {
-    const state = setup();
-    const guard = createNavigationSessionGuard();
-    const coordinator = createNavigationAsyncCoordinator<string>(guard);
-    beginNavigationSession(guard);
-    const alternate = beginNavigationAlternateCalculation(coordinator)!;
-    expect(publishNavigationAlternate(coordinator, alternate, "current-offer")).not.toBeNull();
-    const replacement = beginCoordinatedNavigationReplacement(coordinator)!;
-    let cleanupCount = 0;
-    await expect(
-      awaitCoordinatedNavigationRouteReplacement(
-        state.boundary,
-        coordinator,
-        replacement,
-        () => Promise.reject(new Error("provider unavailable")),
-        () => cleanupCount++,
-        () => {
-          throw new Error("must not install");
-        },
-      ),
-    ).rejects.toThrow("provider unavailable");
-    expect(cleanupCount).toBe(0);
-    expect(coordinator.alternateOffer?.value).toBe("current-offer");
-    expect(navigationSessionCanSpeak(guard)).toBe(true);
-  });
-
   test("journeys A and B each complete exactly once after reset", () => {
     const state = setup();
     const guard = createNavigationSessionGuard();
-    const coordinator = createNavigationAsyncCoordinator<string>(guard);
+    const coordinator = createNavigationAsyncCoordinator(guard);
     let commits = 0;
-    let rerouting = false;
-    let alternateLoading = false;
-    let renderedOffer: string | null = null;
+    let replacementPending = false;
     const cleanup = () => {
-      rerouting = false;
-      alternateLoading = false;
-      renderedOffer = null;
+      replacementPending = false;
     };
     const complete = () =>
       applyTerminalNavigationTransition(
@@ -1042,17 +850,11 @@ describe("local speech boundary", () => {
       );
 
     beginNavigationSession(guard);
-    rerouting = true;
+    replacementPending = true;
     expect(beginCoordinatedNavigationReplacement(coordinator)).not.toBeNull();
-    const alternateA = beginNavigationAlternateCalculation(coordinator)!;
-    expect(publishNavigationAlternate(coordinator, alternateA, "offer-a")).not.toBeNull();
-    alternateLoading = true;
-    renderedOffer = "offer-a";
     expect(complete()).toBe(true);
-    expect([rerouting, alternateLoading, renderedOffer]).toEqual([false, false, null]);
-    expect(coordinator.rerouteOwner).toBeNull();
-    expect(coordinator.alternateOwner).toBeNull();
-    expect(coordinator.alternateOffer).toBeNull();
+    expect(replacementPending).toBe(false);
+    expect(coordinator.replacementOwner).toBeNull();
     expect(complete()).toBe(false);
 
     expect(
@@ -1060,7 +862,7 @@ describe("local speech boundary", () => {
     ).toBe(true);
     beginNavigationSession(guard);
     expect(navigationSessionCanSpeak(guard)).toBe(true);
-    expect([rerouting, alternateLoading, renderedOffer]).toEqual([false, false, null]);
+    expect(replacementPending).toBe(false);
     expect(beginCoordinatedNavigationReplacement(coordinator)).not.toBeNull();
     expect(
       speakDuringActiveNavigation(state.boundary, !navigationSessionCanSpeak(guard), {
@@ -1069,13 +871,9 @@ describe("local speech boundary", () => {
         profile: "default",
       }),
     ).toBe(true);
-    const alternateB = beginNavigationAlternateCalculation(coordinator)!;
-    expect(publishNavigationAlternate(coordinator, alternateB, "offer-b")).not.toBeNull();
-    alternateLoading = true;
-    renderedOffer = "offer-b";
     expect(complete()).toBe(true);
     expect(complete()).toBe(false);
-    expect([rerouting, alternateLoading, renderedOffer]).toEqual([false, false, null]);
+    expect(replacementPending).toBe(false);
     expect(commits).toBe(2);
     expect(state.cancelCount()).toBe(2);
   });

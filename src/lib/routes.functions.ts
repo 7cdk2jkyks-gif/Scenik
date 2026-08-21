@@ -2136,26 +2136,6 @@ export const deleteRoute = createServerFn({ method: "POST" })
     return { ok: true };
   });
 
-const RecomputeInput = z.object({
-  origin: z.object({ lat: z.number(), lng: z.number() }),
-  destination: z.object({ lat: z.number(), lng: z.number() }),
-  waypoints: z.array(z.object({ lat: z.number(), lng: z.number() })).default([]),
-  alternatives: z.boolean().optional(),
-});
-
-export const recomputeDirections = createServerFn({ method: "POST" })
-  .middleware([requireSupabaseAuth])
-  .inputValidator((input: unknown) => RecomputeInput.parse(input))
-  .handler(async ({ data }) => {
-    const { computeDirections } = await import("./google-maps.server");
-    return await computeDirections({
-      origin: data.origin,
-      destination: data.destination,
-      waypoints: data.waypoints,
-      alternatives: data.alternatives,
-    });
-  });
-
 export const fetchSpeedLimit = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
   .inputValidator((input: unknown) => z.object({ lat: z.number(), lng: z.number() }).parse(input))

@@ -344,7 +344,7 @@ function PrivacySection() {
         detailed location history or track your movements after navigation ends.
       </p>
       <ul className="mt-3 list-disc space-y-1 pl-5 text-xs text-muted-foreground">
-        <li>Live GPS is used in-session for turn-by-turn guidance and rerouting.</li>
+        <li>Live GPS is used in-session for turn-by-turn guidance and route progress.</li>
         <li>We do not persist raw GPS coordinates after navigation ends.</li>
         <li>No continuous GPS tracks or background location history are collected.</li>
         <li>

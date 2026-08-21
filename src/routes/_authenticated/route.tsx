@@ -2,12 +2,13 @@ import { createFileRoute, Outlet, redirect, Link, useNavigate } from "@tanstack/
 import { useEffect } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
-import { LogOut, Map, Users, Settings, Crown, Navigation } from "lucide-react";
+import { LogOut, Crown } from "lucide-react";
 
 import { Logo } from "@/components/Logo";
 import { useQueryClient } from "@tanstack/react-query";
 import { useSubscription } from "@/hooks/useSubscription";
 import { TermsGate } from "@/components/TermsGate";
+import { AuthenticatedBottomNavigation } from "@/components/AuthenticatedBottomNavigation";
 import { capture } from "@/lib/analytics/client";
 import { AnalyticsEvent } from "@/lib/analytics/events";
 import { isNativePlatform } from "@/lib/native";
@@ -143,65 +144,7 @@ function AuthedLayout() {
       )}
       <Outlet />
       {!isGuest && <TermsGate />}
-      <nav
-        aria-label="Primary"
-        className="fixed inset-x-0 bottom-0 z-40 border-t border-border bg-card/95 backdrop-blur"
-      >
-        <div className="mx-auto grid max-w-lg grid-cols-4 items-center gap-1 px-2 pb-[max(0.35rem,env(safe-area-inset-bottom))] pt-1.5 sm:px-6">
-          <Link to="/plan" className="flex-1">
-            {({ isActive }) => (
-              <Button
-                variant={isActive ? "secondary" : "ghost"}
-                size="sm"
-                className="h-auto w-full flex-col gap-0.5 rounded-xl px-2 py-1.5 text-[10px] sm:flex-row sm:gap-1.5 sm:text-xs"
-                aria-label="Plan"
-              >
-                <Navigation className="h-4 w-4 sm:mr-1.5" />
-                <span>Plan</span>
-              </Button>
-            )}
-          </Link>
-          <Link to="/routes" className="flex-1">
-            {({ isActive }) => (
-              <Button
-                variant={isActive ? "secondary" : "ghost"}
-                size="sm"
-                className="h-auto w-full flex-col gap-0.5 rounded-xl px-2 py-1.5 text-[10px] sm:flex-row sm:gap-1.5 sm:text-xs"
-                aria-label="My routes"
-              >
-                <Map className="h-4 w-4" />
-                <span>Routes</span>
-              </Button>
-            )}
-          </Link>
-          <Link to="/community" className="flex-1">
-            {({ isActive }) => (
-              <Button
-                variant={isActive ? "secondary" : "ghost"}
-                size="sm"
-                className="h-auto w-full flex-col gap-0.5 rounded-xl px-2 py-1.5 text-[10px] sm:flex-row sm:gap-1.5 sm:text-xs"
-                aria-label="Explore community routes"
-              >
-                <Users className="h-4 w-4" />
-                <span>Explore</span>
-              </Button>
-            )}
-          </Link>
-          <Link to="/settings" className="flex-1">
-            {({ isActive }) => (
-              <Button
-                variant={isActive ? "secondary" : "ghost"}
-                size="sm"
-                className="h-auto w-full flex-col gap-0.5 rounded-xl px-2 py-1.5 text-[10px] sm:flex-row sm:gap-1.5 sm:text-xs"
-                aria-label="Settings"
-              >
-                <Settings className="h-4 w-4" />
-                <span>Settings</span>
-              </Button>
-            )}
-          </Link>
-        </div>
-      </nav>
+      <AuthenticatedBottomNavigation />
     </div>
   );
 }

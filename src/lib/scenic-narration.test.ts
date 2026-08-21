@@ -16,7 +16,6 @@ const base = {
   lastNarrationAtSeconds: null,
   manoeuvreImminent: false,
   navigationSpeaking: false,
-  rerouting: false,
   navigationCertain: true,
 };
 

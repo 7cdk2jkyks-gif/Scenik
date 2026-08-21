@@ -122,13 +122,10 @@ export function ScenicMap({
   navMode = false,
   steps,
   onStepChange,
-  onReroute,
   showTraffic = false,
   reports = [],
   onMapClick,
   onReportDelete,
-  alternateRoutes = [],
-  onAlternateClick,
   onLocationTick,
   initialUserLocation,
   onUserLocationChange,
@@ -147,13 +144,10 @@ export function ScenicMap({
   navMode?: boolean;
   steps?: NavStepInput[];
   onStepChange?: (s: StepProgress | null) => void;
-  onReroute?: (pos: LatLngLiteral) => void;
   showTraffic?: boolean;
   reports?: RoadReportMarker[];
   onMapClick?: (p: LatLngLiteral) => void;
   onReportDelete?: (id: string) => void;
-  alternateRoutes?: Array<{ id: string; encodedPolyline: string }>;
-  onAlternateClick?: (id: string) => void;
   onLocationTick?: (p: LatLngLiteral) => void;
   initialUserLocation?: LatLngLiteral | null;
   onUserLocationChange?: (p: LatLngLiteral) => void;
@@ -181,8 +175,6 @@ export function ScenicMap({
   onProgressRef.current = onProgress;
   const onStepChangeRef = useRef(onStepChange);
   onStepChangeRef.current = onStepChange;
-  const onRerouteRef = useRef(onReroute);
-  onRerouteRef.current = onReroute;
   const stepCumRef = useRef<number[]>([]);
   const stepsRef = useRef<NavStepInput[] | undefined>(steps);
   stepsRef.current = steps;
@@ -190,8 +182,6 @@ export function ScenicMap({
   routeDistanceMetersRef.current = routeDistanceMeters;
   const routeDurationSecondsRef = useRef(routeDurationSeconds);
   routeDurationSecondsRef.current = routeDurationSeconds;
-  const offRouteSinceRef = useRef<number | null>(null);
-  const lastRerouteAtRef = useRef<number>(0);
   const navModeRef = useRef(navMode);
   navModeRef.current = navMode;
   const cameraInitRef = useRef(false);
@@ -210,8 +200,6 @@ export function ScenicMap({
   pointsRef.current = points;
   const reportsRef = useRef(reports);
   reportsRef.current = reports;
-  const alternateRoutesRef = useRef(alternateRoutes);
-  alternateRoutesRef.current = alternateRoutes;
   const lastTickAtRef = useRef<number>(0);
   // GPS smoothing state
   const smoothedRef = useRef<{ lat: number; lng: number; accuracy: number; t: number } | null>(
@@ -381,7 +369,6 @@ export function ScenicMap({
           // In nav mode, stay locked on the user — do not fit the whole route bounds.
           if (!navModeRef.current) map.fitBounds(bounds, 60);
         }
-
         setMapReady(true);
       })
       .catch((err) => {
@@ -593,26 +580,6 @@ export function ScenicMap({
             distanceToManeuverMeters: dist,
             step: stepArr[idx],
           });
-        }
-
-        // Off-route → trigger reroute (smoothed accuracy + faster reaction)
-        if (navModeRef.current && onRerouteRef.current) {
-          const now = Date.now();
-          const acc = smoothedRef.current?.accuracy ?? rawAccuracy;
-          const farOff = snap.distanceMeters > Math.max(60, acc + 40);
-          if (farOff) {
-            if (offRouteSinceRef.current === null) offRouteSinceRef.current = now;
-            const offFor = now - (offRouteSinceRef.current ?? now);
-            const sinceLast = now - lastRerouteAtRef.current;
-            // React after ~5s sustained off-route, with a 20s cooldown between recomputes
-            if (offFor > 5000 && sinceLast > 20000) {
-              lastRerouteAtRef.current = now;
-              offRouteSinceRef.current = null;
-              onRerouteRef.current(pt);
-            }
-          } else {
-            offRouteSinceRef.current = null;
-          }
         }
       }
     };
@@ -912,49 +879,6 @@ export function ScenicMap({
       }
     };
   }, [mapReady, reportsKey, onReportDelete]);
-
-  // Alternate routes (drawn as dashed grey lines under main route)
-  const altKey = alternateRoutes.map((a) => a.id).join("|");
-  useEffect(() => {
-    if (!mapReady || !mapRef.current || !window.google?.maps.geometry?.encoding) return;
-    const g = window.google;
-    const map = mapRef.current;
-    const lines: Array<{ setMap: (m: unknown | null) => void }> = [];
-    alternateRoutesRef.current.forEach((alt) => {
-      try {
-        const path = g.maps.geometry!.encoding.decodePath(alt.encodedPolyline);
-        const latLngs = path.map((p) => ({ lat: p.lat(), lng: p.lng() }));
-        // Dashed grey alternate
-        const line = new g.maps.Polyline({
-          map,
-          path: latLngs,
-          strokeColor: "#1f2937",
-          strokeWeight: 5,
-          strokeOpacity: 0,
-          geodesic: true,
-          clickable: !!onAlternateClick,
-          zIndex: 45,
-          icons: [
-            {
-              icon: { path: "M 0,-1 0,1", strokeOpacity: 0.7, strokeWeight: 4, scale: 3 },
-              offset: "0",
-              repeat: "14px",
-            },
-          ],
-        }) as {
-          setMap: (m: unknown | null) => void;
-          addListener?: (ev: string, cb: () => void) => void;
-        };
-        line.addListener?.("click", () => onAlternateClick?.(alt.id));
-        lines.push(line);
-      } catch {
-        /* noop */
-      }
-    });
-    return () => {
-      lines.forEach((l) => l.setMap(null));
-    };
-  }, [mapReady, altKey, onAlternateClick]);
 
   if (offline) {
     return (

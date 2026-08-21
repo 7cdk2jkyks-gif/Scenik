@@ -135,114 +135,40 @@ export function isCurrentNavigationSession(guard: NavigationSessionGuard, sessio
   return session != null && navigationSessionCanSpeak(guard) && guard.current === session;
 }
 
-export type NavigationAsyncCoordinator<T> = {
+export type NavigationAsyncCoordinator = {
   guard: NavigationSessionGuard;
-  rerouteOwner: object | null;
-  alternateOwner: object | null;
-  alternateOffer: { session: object; identity: object; value: T } | null;
+  replacementOwner: object | null;
 };
 
-export type NavigationAlternateToken = { session: object; request: object };
-
-export function createNavigationAsyncCoordinator<T>(guard: NavigationSessionGuard) {
+export function createNavigationAsyncCoordinator(guard: NavigationSessionGuard) {
   return {
     guard,
-    rerouteOwner: null,
-    alternateOwner: null,
-    alternateOffer: null,
-  } satisfies NavigationAsyncCoordinator<T>;
+    replacementOwner: null,
+  } satisfies NavigationAsyncCoordinator;
 }
 
-export function beginCoordinatedNavigationReplacement<T>(
-  coordinator: NavigationAsyncCoordinator<T>,
-) {
+export function beginCoordinatedNavigationReplacement(coordinator: NavigationAsyncCoordinator) {
   const token = captureNavigationReplacement(coordinator.guard);
-  if (token) coordinator.rerouteOwner = token.request;
+  if (token) coordinator.replacementOwner = token.request;
   return token;
 }
 
-export function finishCoordinatedNavigationReplacement<T>(
-  coordinator: NavigationAsyncCoordinator<T>,
+export function finishCoordinatedNavigationReplacement(
+  coordinator: NavigationAsyncCoordinator,
   token: NavigationReplacementToken,
 ) {
-  if (coordinator.rerouteOwner !== token.request) return false;
-  coordinator.rerouteOwner = null;
+  if (coordinator.replacementOwner !== token.request) return false;
+  coordinator.replacementOwner = null;
   return true;
 }
 
-export function beginNavigationAlternateCalculation<T>(
-  coordinator: NavigationAsyncCoordinator<T>,
-): NavigationAlternateToken | null {
-  const session = captureNavigationSession(coordinator.guard);
-  if (!session) return null;
-  const token = { session, request: {} };
-  coordinator.alternateOwner = token.request;
-  return token;
+export function clearNavigationAsyncOwnership(coordinator: NavigationAsyncCoordinator) {
+  coordinator.replacementOwner = null;
 }
 
-export function publishNavigationAlternate<T>(
-  coordinator: NavigationAsyncCoordinator<T>,
-  token: NavigationAlternateToken,
-  value: T,
-) {
-  if (
-    coordinator.alternateOwner !== token.request ||
-    !isCurrentNavigationSession(coordinator.guard, token.session)
-  )
-    return null;
-  const offer = { session: token.session, identity: {}, value };
-  coordinator.alternateOffer = offer;
-  return offer;
-}
-
-export function clearNavigationAlternateForCalculation<T>(
-  coordinator: NavigationAsyncCoordinator<T>,
-  token: NavigationAlternateToken,
-) {
-  if (
-    coordinator.alternateOwner !== token.request ||
-    !isCurrentNavigationSession(coordinator.guard, token.session)
-  )
-    return false;
-  coordinator.alternateOffer = null;
-  return true;
-}
-
-export function finishNavigationAlternateCalculation<T>(
-  coordinator: NavigationAsyncCoordinator<T>,
-  token: NavigationAlternateToken,
-) {
-  if (coordinator.alternateOwner !== token.request) return false;
-  coordinator.alternateOwner = null;
-  return true;
-}
-
-export function consumeCurrentNavigationAlternate<T>(
-  coordinator: NavigationAsyncCoordinator<T>,
-  value: T,
-) {
-  const offer = coordinator.alternateOffer;
-  if (
-    !offer ||
-    offer.value !== value ||
-    !isCurrentNavigationSession(coordinator.guard, offer.session)
-  ) {
-    coordinator.alternateOffer = null;
-    return false;
-  }
-  coordinator.alternateOffer = null;
-  return true;
-}
-
-export function clearNavigationAsyncOwnership<T>(coordinator: NavigationAsyncCoordinator<T>) {
-  coordinator.rerouteOwner = null;
-  coordinator.alternateOwner = null;
-  coordinator.alternateOffer = null;
-}
-
-export function applyNavigationReplacementTransition<T>(
+export function applyNavigationReplacementTransition(
   boundary: LocalSpeechBoundary | null,
-  coordinator: NavigationAsyncCoordinator<T>,
+  coordinator: NavigationAsyncCoordinator,
   cleanup: () => void,
   commit: () => void,
 ) {
@@ -252,20 +178,8 @@ export function applyNavigationReplacementTransition<T>(
   applyNavigationLifecycleTransition(boundary, "replaced", commit);
 }
 
-export function acceptCurrentNavigationAlternate<T>(
-  boundary: LocalSpeechBoundary | null,
-  coordinator: NavigationAsyncCoordinator<T>,
-  value: T,
-  cleanup: () => void,
-  commit: () => void,
-) {
-  if (!consumeCurrentNavigationAlternate(coordinator, value)) return false;
-  applyNavigationReplacementTransition(boundary, coordinator, cleanup, commit);
-  return true;
-}
-
-export function deactivateNavigationAsyncLifecycle<T>(
-  coordinator: NavigationAsyncCoordinator<T>,
+export function deactivateNavigationAsyncLifecycle(
+  coordinator: NavigationAsyncCoordinator,
   lifecycle: object,
 ) {
   if (!deactivateNavigationLifecycle(coordinator.guard, lifecycle)) return false;
@@ -313,9 +227,9 @@ export function completeCurrentNavigationSession(
   return true;
 }
 
-export function applyTerminalNavigationTransition<T>(
+export function applyTerminalNavigationTransition(
   boundary: LocalSpeechBoundary | null,
-  coordinator: NavigationAsyncCoordinator<T>,
+  coordinator: NavigationAsyncCoordinator,
   reason: Exclude<NavigationSpeechEndReason, "replaced">,
   cleanup: () => void,
   commit: () => void,
@@ -357,9 +271,9 @@ export async function awaitCurrentNavigationRouteReplacement<T>(
   return { status: "applied", replacement };
 }
 
-export async function awaitCoordinatedNavigationRouteReplacement<T, TOffer>(
+export async function awaitCoordinatedNavigationRouteReplacement<T>(
   boundary: LocalSpeechBoundary | null,
-  coordinator: NavigationAsyncCoordinator<TOffer>,
+  coordinator: NavigationAsyncCoordinator,
   token: NavigationReplacementToken,
   loadReplacement: () => Promise<T>,
   cleanup: () => void,

@@ -115,7 +115,6 @@ export function selectNarrationEvent(input: {
   lastNarrationAtSeconds: number | null;
   manoeuvreImminent: boolean;
   navigationSpeaking: boolean;
-  rerouting: boolean;
   navigationCertain: boolean;
 }): NarrationDecision {
   if (input.mode === "off")
@@ -134,12 +133,7 @@ export function selectNarrationEvent(input: {
     return input.elapsedSeconds >= triggerAt ? [{ event, id, index }] : [];
   });
 
-  if (
-    input.manoeuvreImminent ||
-    input.navigationSpeaking ||
-    input.rerouting ||
-    !input.navigationCertain
-  ) {
+  if (input.manoeuvreImminent || input.navigationSpeaking || !input.navigationCertain) {
     return { event: null, eventId: null, skippedEventIds, reason: "blocked" };
   }
 

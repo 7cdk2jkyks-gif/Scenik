@@ -19,6 +19,10 @@ import { Logo } from "@/components/Logo";
 import { capture } from "@/lib/analytics/client";
 import { AnalyticsEvent } from "@/lib/analytics/events";
 import { CommunityFeedFooter, CommunitySortControls } from "@/components/CommunityControls";
+import {
+  AUTHENTICATED_PAGE_BOTTOM_PADDING,
+  CommunityBottomNavigation,
+} from "@/components/AuthenticatedBottomNavigation";
 
 export const Route = createFileRoute("/community")({
   ssr: false,
@@ -125,7 +129,10 @@ function CommunityPage() {
   });
 
   return (
-    <div className="app-screen">
+    <div
+      className="app-screen"
+      style={userId ? { paddingBottom: AUTHENTICATED_PAGE_BOTTOM_PADDING } : undefined}
+    >
       <header className="border-b border-border bg-card/70 backdrop-blur">
         <div className="mx-auto flex max-w-5xl items-center justify-between gap-3 px-4 py-3 sm:px-6 sm:py-4">
           <Link to="/" className="flex items-center gap-2">
@@ -289,6 +296,7 @@ function CommunityPage() {
           })}
         </div>
       </div>
+      <CommunityBottomNavigation authenticated={Boolean(userId)} />
     </div>
   );
 }

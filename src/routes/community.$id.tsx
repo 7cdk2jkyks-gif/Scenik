@@ -21,6 +21,10 @@ import { ScenicMap } from "@/components/ScenicMap";
 import { capture } from "@/lib/analytics/client";
 import { AnalyticsEvent } from "@/lib/analytics/events";
 import { CommunityLikeButton } from "@/components/CommunityControls";
+import {
+  AUTHENTICATED_PAGE_BOTTOM_PADDING,
+  CommunityBottomNavigation,
+} from "@/components/AuthenticatedBottomNavigation";
 
 export const Route = createFileRoute("/community/$id")({
   ssr: false,
@@ -138,7 +142,10 @@ function CommunityRoutePage() {
     : [];
 
   return (
-    <div className="min-h-screen">
+    <div
+      className="min-h-screen"
+      style={userId ? { paddingBottom: AUTHENTICATED_PAGE_BOTTOM_PADDING } : undefined}
+    >
       <header className="border-b border-border bg-card/70 backdrop-blur">
         <div className="mx-auto flex max-w-4xl items-center justify-between px-4 py-3 sm:px-6 sm:py-4">
           <Link
@@ -289,6 +296,7 @@ function CommunityRoutePage() {
           </>
         )}
       </div>
+      <CommunityBottomNavigation authenticated={Boolean(userId)} />
     </div>
   );
 }

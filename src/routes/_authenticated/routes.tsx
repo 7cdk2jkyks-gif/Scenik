@@ -24,6 +24,38 @@ export const Route = createFileRoute("/_authenticated/routes")({
 
 type SavedRoute = Awaited<ReturnType<typeof listMyRoutes>>[number];
 
+export function SavedRouteDeleteButton({
+  disabled,
+  pending,
+  onDelete,
+  confirmDelete = () => window.confirm("Delete this saved route? This cannot be undone."),
+}: {
+  disabled: boolean;
+  pending: boolean;
+  onDelete(): void;
+  confirmDelete?: () => boolean;
+}) {
+  return (
+    <Button
+      type="button"
+      variant="ghost"
+      size="icon"
+      aria-label="Delete route"
+      title={disabled ? "Make this route private before deleting" : "Delete route"}
+      disabled={disabled || pending}
+      className="h-11 w-11 shrink-0 text-muted-foreground hover:text-destructive disabled:opacity-50"
+      onClick={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        if (pending || disabled || !confirmDelete()) return;
+        onDelete();
+      }}
+    >
+      <Trash2 className="h-4 w-4" aria-hidden="true" />
+    </Button>
+  );
+}
+
 function RoutesPage() {
   const listFn = useServerFn(listMyRoutes);
   const deleteFn = useServerFn(deleteRoute);
@@ -173,16 +205,11 @@ function RoutesPage() {
               </div>
 
               <div className="mt-3 flex justify-end">
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => del.mutate(r.id)}
-                  disabled={del.isPending || isPublic}
-                  title={isPublic ? "Make this route private before deleting" : undefined}
-                  className="text-muted-foreground hover:text-destructive disabled:opacity-50"
-                >
-                  <Trash2 className="mr-1.5 h-4 w-4" /> Delete
-                </Button>
+                <SavedRouteDeleteButton
+                  disabled={isPublic}
+                  pending={del.isPending}
+                  onDelete={() => del.mutate(r.id)}
+                />
               </div>
             </Card>
           );

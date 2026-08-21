@@ -17,10 +17,6 @@ export const AnalyticsEvent = {
   NavigationStarted: "route_started",
   RouteCompleted: "route_completed",
   RouteAbandoned: "route_abandoned",
-  NavigationRerouted: "navigation_rerouted",
-  NavigationRerouteFailed: "navigation_reroute_failed",
-  TrafficAlternateAccepted: "traffic_alternate_accepted",
-  TrafficAlternateDismissed: "traffic_alternate_dismissed",
   LocationError: "location_error",
 
   // Route CRUD & sharing
