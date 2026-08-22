@@ -1117,7 +1117,7 @@ describe("route-generation diagnostic log", () => {
   });
 
   it("allow-lists bounded recovery aggregates without construction or provider data", () => {
-    const diagnostic = buildRouteGenerationDiagnostic({
+    const input = {
       correlationId: "recovery-aggregate",
       requestedExtraMinutes: 30,
       baselineDurationSeconds: 3_600,
@@ -1140,13 +1140,14 @@ describe("route-generation diagnostic log", () => {
         providerResponsesReturned: 1,
         providerRequestsFailed: 0,
         responsesEvaluated: 1,
-        stopReason: "TARGET_REACHED",
+        stopReason: "RECOVERY_ATTEMPT_LIMIT_REACHED",
         coordinates: [{ lat: 51, lng: -1 }],
         signature: "private-signature",
         providerPayload: "private-provider-payload",
       } as Parameters<typeof buildRouteGenerationDiagnostic>[0]["constructionRecovery"] &
         Record<string, unknown>,
-    });
+    } satisfies Parameters<typeof buildRouteGenerationDiagnostic>[0];
+    const diagnostic = buildRouteGenerationDiagnostic(input);
     assert.deepEqual(diagnostic.constructionRecovery, {
       attempted: true,
       seedsConsidered: 3,
@@ -1155,11 +1156,19 @@ describe("route-generation diagnostic log", () => {
       providerResponsesReturned: 1,
       providerRequestsFailed: 0,
       responsesEvaluated: 1,
-      stopReason: "TARGET_REACHED",
+      stopReason: "RECOVERY_ATTEMPT_LIMIT_REACHED",
     });
     const serialized = serializeRouteGenerationDiagnostic(diagnostic);
     assert.equal(serialized.includes("private-signature"), false);
     assert.equal(serialized.includes("private-provider-payload"), false);
     assert.equal(serialized.includes('"lat"'), false);
+    const obsolete = buildRouteGenerationDiagnostic({
+      ...input,
+      constructionRecovery: {
+        ...input.constructionRecovery,
+        stopReason: "SAFE_OBSERVATION_PRODUCED",
+      } as Parameters<typeof buildRouteGenerationDiagnostic>[0]["constructionRecovery"],
+    });
+    assert.equal(obsolete.constructionRecovery?.stopReason, "NO_RECOVERABLE_SHAPE_SEED");
   });
 });

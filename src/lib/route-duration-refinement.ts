@@ -91,11 +91,14 @@ export type RecoverableRouteShapeReason = "WAYPOINT_SPUR" | "MATERIAL_REVERSE_RE
 
 export type ConstructionRecoveryStopReason =
   | "TARGET_REACHED"
-  | "SAFE_OBSERVATION_PRODUCED"
+  | "SAFE_RESPONSE_DEFERRED_TO_REFINEMENT"
+  | "RECOVERY_RESPONSE_RECORDED"
+  | "RECOVERY_ATTEMPT_LIMIT_REACHED"
+  | "NO_UNUSED_RECOVERABLE_SEED"
   | "NO_RECOVERABLE_SHAPE_SEED"
   | "NO_DISTINCT_RECOVERY_CONSTRUCTION"
   | "RECOVERY_SHAPE_REJECTED"
-  | "RECOVERY_CAPACITY_EXHAUSTED"
+  | "SHARED_CAPACITY_EXHAUSTED"
   | "PROVIDER_REQUEST_FAILED";
 
 export type ConstructionRecoveryStateCounts = {
@@ -166,7 +169,6 @@ export function classifyProviderResultForOrchestration(input: ProviderResultOrch
       commonEligible && input.routeShapeEligible && input.routeShapeRejectionReason == null,
     recoveryEligible:
       commonEligible &&
-      input.overBudget &&
       !input.routeShapeEligible &&
       ((input.routeShapeRejectionReason === "WAYPOINT_SPUR" && hasValidAffectedWaypointIndex) ||
         input.routeShapeRejectionReason === "MATERIAL_REVERSE_RETRACE"),
@@ -177,11 +179,39 @@ export function classifyConstructionRecoveryPreflight(input: {
   plan: ScenicCorridorPlan | null;
   attemptedSignatures: ReadonlySet<string>;
   attemptsAlreadyUsed: number;
-}): "READY" | "NO_DISTINCT_RECOVERY_CONSTRUCTION" | "RECOVERY_CAPACITY_EXHAUSTED" {
-  if (input.attemptsAlreadyUsed >= MAX_SCENIC_ROUTE_ATTEMPTS) return "RECOVERY_CAPACITY_EXHAUSTED";
+}): "READY" | "NO_DISTINCT_RECOVERY_CONSTRUCTION" | "SHARED_CAPACITY_EXHAUSTED" {
+  if (input.attemptsAlreadyUsed >= MAX_SCENIC_ROUTE_ATTEMPTS) return "SHARED_CAPACITY_EXHAUSTED";
   if (!input.plan || input.attemptedSignatures.has(input.plan.signature))
     return "NO_DISTINCT_RECOVERY_CONSTRUCTION";
   return "READY";
+}
+
+export function classifyRecoveryContinuationStop(input: {
+  totalScenicRequestsStarted: number;
+  recoveryRequestsStarted: number;
+  hasUnusedRecoverableSeed: boolean;
+}): ConstructionRecoveryStopReason | null {
+  if (input.totalScenicRequestsStarted >= MAX_SCENIC_ROUTE_ATTEMPTS)
+    return "SHARED_CAPACITY_EXHAUSTED";
+  if (input.recoveryRequestsStarted >= 2) return "RECOVERY_ATTEMPT_LIMIT_REACHED";
+  if (!input.hasUnusedRecoverableSeed) return "NO_UNUSED_RECOVERABLE_SEED";
+  return null;
+}
+
+export function classifyRecoveryRefinementOutcome(input: {
+  refinementProviderRequestsStarted: number;
+  hasValidSameFamilyBracket: boolean;
+  totalScenicRequestsStarted: number;
+  recoveryRequestsStarted: number;
+  priorRecoveryStopReason: ConstructionRecoveryStopReason;
+}): ConstructionRecoveryStopReason {
+  if (input.refinementProviderRequestsStarted > 0 && input.hasValidSameFamilyBracket)
+    return "SAFE_RESPONSE_DEFERRED_TO_REFINEMENT";
+  if (input.totalScenicRequestsStarted >= MAX_SCENIC_ROUTE_ATTEMPTS)
+    return "SHARED_CAPACITY_EXHAUSTED";
+  if (input.recoveryRequestsStarted >= 2) return "RECOVERY_ATTEMPT_LIMIT_REACHED";
+  if (input.refinementProviderRequestsStarted > 0) return input.priorRecoveryStopReason;
+  return "NO_DISTINCT_RECOVERY_CONSTRUCTION";
 }
 
 export function selectConstructionRecoverySeed(
@@ -190,7 +220,7 @@ export function selectConstructionRecoverySeed(
 ): ConstructionRecoverySeed | null {
   if (!Number.isFinite(desiredAddedSeconds) || desiredAddedSeconds <= 0) return null;
   const projectedDistance = (seed: ConstructionRecoverySeed) => {
-    if (!Number.isFinite(seed.actualAddedSeconds) || seed.actualAddedSeconds <= desiredAddedSeconds)
+    if (!Number.isFinite(seed.actualAddedSeconds) || seed.actualAddedSeconds <= 0)
       return Number.POSITIVE_INFINITY;
     const ratio = Math.max(
       0.2,
@@ -206,6 +236,8 @@ export function selectConstructionRecoverySeed(
       .sort(
         (a, b) =>
           projectedDistance(a) - projectedDistance(b) ||
+          Number(b.effectiveConstruction.waypointForm === "two-waypoint-arc") -
+            Number(a.effectiveConstruction.waypointForm === "two-waypoint-arc") ||
           Number(b.rejectionReason === "WAYPOINT_SPUR" && b.affectedWaypointIndex != null) -
             Number(a.rejectionReason === "WAYPOINT_SPUR" && a.affectedWaypointIndex != null) ||
           a.candidateId.localeCompare(b.candidateId),
@@ -492,7 +524,6 @@ export function deriveShapeRecoveryPlan(input: {
   if (
     !finitePositive(input.desiredAddedSeconds) ||
     !finitePositive(input.observedAddedSeconds) ||
-    input.observedAddedSeconds <= input.desiredAddedSeconds ||
     !Number.isInteger(input.attemptNumber) ||
     input.attemptNumber < 1 ||
     input.attemptNumber > 2 ||

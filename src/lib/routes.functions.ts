@@ -1188,6 +1188,7 @@ export const planScenicRoute = createServerFn({ method: "POST" })
                     ({ observation }) =>
                       observation.calibrationSafe && observation.routeShapeEligible,
                   );
+                  let recoveryAwaitingRefinement = false;
                   const runConstructionRecovery = async () => {
                     const recoveryCounts = {
                       attempted: false,
@@ -1203,6 +1204,7 @@ export const planScenicRoute = createServerFn({ method: "POST" })
                     if (recoverableShapeSeeds.length === 0) return recoveryCounts;
                     const {
                       classifyConstructionRecoveryPreflight,
+                      classifyRecoveryContinuationStop,
                       deriveShapeRecoveryPlan,
                       selectConstructionRecoverySeed,
                     } = await import("./route-duration-refinement");
@@ -1224,6 +1226,7 @@ export const planScenicRoute = createServerFn({ method: "POST" })
                       if (usedSeedCandidateIds.has(seed.candidateId)) break;
                       usedSeedCandidateIds.add(seed.candidateId);
                       const activeSeed = seed;
+                      const lineageAttemptNumber = activeSeed.lineageDepth + 1;
                       const recoveredPlan = deriveShapeRecoveryPlan({
                         plan: activeSeed.plan,
                         anchors: planningAnchors,
@@ -1231,18 +1234,33 @@ export const planScenicRoute = createServerFn({ method: "POST" })
                         observedAddedSeconds: activeSeed.actualAddedSeconds,
                         rejectionReason: activeSeed.rejectionReason,
                         affectedWaypointIndex: activeSeed.affectedWaypointIndex,
-                        attemptNumber: recoveryAttempt,
+                        attemptNumber: lineageAttemptNumber,
                       });
                       const preflight = classifyConstructionRecoveryPreflight({
                         plan: recoveredPlan,
                         attemptedSignatures,
                         attemptsAlreadyUsed: scenicRouteRequestsAttempted,
                       });
-                      if (preflight === "RECOVERY_CAPACITY_EXHAUSTED") {
+                      if (preflight === "SHARED_CAPACITY_EXHAUSTED") {
                         recoveryCounts.stopReason = preflight;
                         break;
                       }
-                      if (preflight === "NO_DISTINCT_RECOVERY_CONSTRUCTION") continue;
+                      if (preflight === "NO_DISTINCT_RECOVERY_CONSTRUCTION") {
+                        seed = selectConstructionRecoverySeed(
+                          recoverableShapeSeeds.filter(
+                            (candidate) =>
+                              candidate.lineageDepth === 0 &&
+                              !usedSeedCandidateIds.has(candidate.candidateId),
+                          ),
+                          desiredAddedSeconds,
+                        );
+                        if (!seed) {
+                          recoveryCounts.stopReason = "NO_DISTINCT_RECOVERY_CONSTRUCTION";
+                          break;
+                        }
+                        recoveryAttempt -= 1;
+                        continue;
+                      }
                       if (!recoveredPlan) continue;
                       recoveryCounts.safeConstructionsProduced += 1;
                       const requested = requestCandidate(recoveredPlan, "construction-recovery");
@@ -1279,7 +1297,7 @@ export const planScenicRoute = createServerFn({ method: "POST" })
                           undefined,
                           requested.expectedAnchors,
                           null,
-                          recoveryAttempt === 1
+                          activeSeed.lineageDepth === 0
                             ? {
                                 rootSeedCandidateId: activeSeed.rootSeedCandidateId,
                                 parentCandidateId: activeSeed.candidateId,
@@ -1296,12 +1314,54 @@ export const planScenicRoute = createServerFn({ method: "POST" })
                         requested.candidateId,
                       );
                       if (observation?.routeShapeEligible && !observation.duplicate) {
-                        recoveryCounts.stopReason =
-                          observation.withinBudget &&
-                          observation.actualAddedSeconds >= data.extra_minutes * 60 * 0.75
-                            ? "TARGET_REACHED"
-                            : "SAFE_OBSERVATION_PRODUCED";
-                        break;
+                        const finalPass = scoreAndSelectRouteCandidateCollection({
+                          candidates: rawCandidates,
+                          evidencePlaces,
+                          start,
+                          end,
+                          mood: moodIn,
+                          theme: themeIn,
+                          requestedExtraMinutes: data.extra_minutes,
+                          requiredStopCount: waypoints.length,
+                        });
+                        const selectedRecovery =
+                          finalPass.selection.selected.candidateId === requested.candidateId;
+                        const targetReached =
+                          selectedRecovery &&
+                          (finalPass.selection.timeTargetOutcome === "TARGET_MET" ||
+                            finalPass.selection.timeTargetOutcome ===
+                              "TIME_COMMITMENT_TARGET_FALLBACK");
+                        if (targetReached) {
+                          recoveryCounts.stopReason = "TARGET_REACHED";
+                          break;
+                        }
+                        const genuineSafeUpper =
+                          observation.calibrationSafe &&
+                          observation.actualAddedSeconds > data.extra_minutes * 60;
+                        if (selectedRecovery || genuineSafeUpper) {
+                          recoveryCounts.stopReason =
+                            scenicRouteRequestsAttempted >= MAX_SCENIC_ROUTE_ATTEMPTS
+                              ? "SHARED_CAPACITY_EXHAUSTED"
+                              : "RECOVERY_RESPONSE_RECORDED";
+                          recoveryAwaitingRefinement =
+                            scenicRouteRequestsAttempted < MAX_SCENIC_ROUTE_ATTEMPTS;
+                          break;
+                        }
+                        seed = selectConstructionRecoverySeed(
+                          recoverableShapeSeeds.filter(
+                            (candidate) =>
+                              candidate.lineageDepth === 0 &&
+                              !usedSeedCandidateIds.has(candidate.candidateId),
+                          ),
+                          desiredAddedSeconds,
+                        );
+                        const continuationStop = classifyRecoveryContinuationStop({
+                          totalScenicRequestsStarted: scenicRouteRequestsAttempted,
+                          recoveryRequestsStarted: recoveryCounts.providerRequestsStarted,
+                          hasUnusedRecoverableSeed: seed != null,
+                        });
+                        if (continuationStop) recoveryCounts.stopReason = continuationStop;
+                        continue;
                       }
                       recoveryCounts.stopReason = "RECOVERY_SHAPE_REJECTED";
                       const adaptiveSeed = recoverableShapeSeeds.find(
@@ -1426,6 +1486,27 @@ export const planScenicRoute = createServerFn({ method: "POST" })
                       },
                     });
                     durationRefinementResult = orchestration.controller;
+                    if (recoveryAwaitingRefinement && constructionRecoveryResult) {
+                      const { classifyRecoveryRefinementOutcome } =
+                        await import("./route-duration-refinement");
+                      constructionRecoveryResult.stopReason = classifyRecoveryRefinementOutcome({
+                        refinementProviderRequestsStarted:
+                          orchestration.controller.stateCounts.providerRequestsStarted,
+                        hasValidSameFamilyBracket: orchestration.controller.executions.some(
+                          (execution) =>
+                            execution.upperCandidateId != null &&
+                            Number.isFinite(execution.bracketLowerMinutes) &&
+                            execution.bracketLowerMinutes >= 0 &&
+                            execution.bracketUpperMinutes != null &&
+                            Number.isFinite(execution.bracketUpperMinutes) &&
+                            execution.bracketUpperMinutes > execution.bracketLowerMinutes,
+                        ),
+                        totalScenicRequestsStarted: scenicRouteRequestsAttempted,
+                        recoveryRequestsStarted: constructionRecoveryResult.providerRequestsStarted,
+                        priorRecoveryStopReason: constructionRecoveryResult.stopReason,
+                      });
+                      recoveryAwaitingRefinement = false;
+                    }
                     if (
                       hadSafeObservationBeforeRecovery &&
                       orchestration.controller.stateCounts.providerRequestsStarted === 0 &&
@@ -1433,6 +1514,18 @@ export const planScenicRoute = createServerFn({ method: "POST" })
                       recoverableShapeSeeds.length > 0
                     )
                       constructionRecoveryResult = await runConstructionRecovery();
+                  }
+                  if (recoveryAwaitingRefinement && constructionRecoveryResult) {
+                    const { classifyRecoveryRefinementOutcome } =
+                      await import("./route-duration-refinement");
+                    constructionRecoveryResult.stopReason = classifyRecoveryRefinementOutcome({
+                      refinementProviderRequestsStarted: 0,
+                      hasValidSameFamilyBracket: false,
+                      totalScenicRequestsStarted: scenicRouteRequestsAttempted,
+                      recoveryRequestsStarted: constructionRecoveryResult.providerRequestsStarted,
+                      priorRecoveryStopReason: constructionRecoveryResult.stopReason,
+                    });
+                    recoveryAwaitingRefinement = false;
                   }
                 }
                 const qualityEquivalent = exploredCandidateQuality.filter(

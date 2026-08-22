@@ -8,6 +8,8 @@ import {
   MIN_ANTIPODAL_CLEARANCE_RADIANS,
   classifyProviderResultForOrchestration,
   classifyConstructionRecoveryPreflight,
+  classifyRecoveryContinuationStop,
+  classifyRecoveryRefinementOutcome,
   MAX_DERIVED_WAYPOINT_DISPLACEMENT_FROM_SOURCE_METERS,
   createRequestLocalCalibrationFamily,
   createRequestLocalPlanFamily,
@@ -222,7 +224,7 @@ describe("bounded duration refinement", () => {
         routeShapeRejectionReason: "WAYPOINT_SPUR",
         affectedWaypointIndex: 0,
       }),
-      { calibrationEligible: false, recoveryEligible: false },
+      { calibrationEligible: false, recoveryEligible: true },
     );
 
     for (const affectedWaypointIndex of [
@@ -846,7 +848,126 @@ describe("bounded duration refinement", () => {
         attemptedSignatures: new Set(),
         attemptsAlreadyUsed: MAX_SCENIC_ROUTE_ATTEMPTS,
       }),
-      "RECOVERY_CAPACITY_EXHAUSTED",
+      "SHARED_CAPACITY_EXHAUSTED",
+    );
+  });
+
+  it("reports recovery and refinement lifecycle stops from work actually performed", () => {
+    assert.deepEqual(
+      [
+        { total: 6, recovery: 2, unused: false },
+        { total: 5, recovery: 2, unused: false },
+        { total: 5, recovery: 1, unused: false },
+        { total: 5, recovery: 1, unused: true },
+      ].map(({ total, recovery, unused }) =>
+        classifyRecoveryContinuationStop({
+          totalScenicRequestsStarted: total,
+          recoveryRequestsStarted: recovery,
+          hasUnusedRecoverableSeed: unused,
+        }),
+      ),
+      [
+        "SHARED_CAPACITY_EXHAUSTED",
+        "RECOVERY_ATTEMPT_LIMIT_REACHED",
+        "NO_UNUSED_RECOVERABLE_SEED",
+        null,
+      ],
+    );
+    assert.equal(
+      classifyRecoveryContinuationStop({
+        totalScenicRequestsStarted: 5,
+        recoveryRequestsStarted: 2,
+        hasUnusedRecoverableSeed: true,
+      }),
+      "RECOVERY_ATTEMPT_LIMIT_REACHED",
+    );
+    assert.equal(
+      classifyRecoveryContinuationStop({
+        totalScenicRequestsStarted: 4,
+        recoveryRequestsStarted: 1,
+        hasUnusedRecoverableSeed: false,
+      }),
+      "NO_UNUSED_RECOVERABLE_SEED",
+    );
+    assert.equal(
+      classifyRecoveryContinuationStop({
+        totalScenicRequestsStarted: 6,
+        recoveryRequestsStarted: 1,
+        hasUnusedRecoverableSeed: true,
+      }),
+      "SHARED_CAPACITY_EXHAUSTED",
+    );
+    assert.equal(
+      classifyRecoveryRefinementOutcome({
+        refinementProviderRequestsStarted: 0,
+        hasValidSameFamilyBracket: false,
+        totalScenicRequestsStarted: 6,
+        recoveryRequestsStarted: 1,
+        priorRecoveryStopReason: "RECOVERY_RESPONSE_RECORDED",
+      }),
+      "SHARED_CAPACITY_EXHAUSTED",
+    );
+    assert.equal(
+      classifyRecoveryRefinementOutcome({
+        refinementProviderRequestsStarted: 0,
+        hasValidSameFamilyBracket: false,
+        totalScenicRequestsStarted: 5,
+        recoveryRequestsStarted: 2,
+        priorRecoveryStopReason: "RECOVERY_RESPONSE_RECORDED",
+      }),
+      "RECOVERY_ATTEMPT_LIMIT_REACHED",
+    );
+    assert.equal(
+      classifyRecoveryRefinementOutcome({
+        refinementProviderRequestsStarted: 0,
+        hasValidSameFamilyBracket: false,
+        totalScenicRequestsStarted: 5,
+        recoveryRequestsStarted: 1,
+        priorRecoveryStopReason: "RECOVERY_RESPONSE_RECORDED",
+      }),
+      "NO_DISTINCT_RECOVERY_CONSTRUCTION",
+    );
+    assert.equal(
+      classifyRecoveryRefinementOutcome({
+        refinementProviderRequestsStarted: 1,
+        hasValidSameFamilyBracket: true,
+        totalScenicRequestsStarted: 6,
+        recoveryRequestsStarted: 1,
+        priorRecoveryStopReason: "RECOVERY_RESPONSE_RECORDED",
+      }),
+      "SAFE_RESPONSE_DEFERRED_TO_REFINEMENT",
+    );
+    assert.equal(
+      classifyRecoveryRefinementOutcome({
+        refinementProviderRequestsStarted: 1,
+        hasValidSameFamilyBracket: false,
+        totalScenicRequestsStarted: 5,
+        recoveryRequestsStarted: 1,
+        priorRecoveryStopReason: "RECOVERY_RESPONSE_RECORDED",
+      }),
+      "RECOVERY_RESPONSE_RECORDED",
+    );
+    assert.deepEqual(
+      [
+        { bracket: false, total: 6, recovery: 1 },
+        { bracket: false, total: 5, recovery: 2 },
+        { bracket: false, total: 5, recovery: 1 },
+        { bracket: true, total: 6, recovery: 2 },
+      ].map(({ bracket, total, recovery }) =>
+        classifyRecoveryRefinementOutcome({
+          refinementProviderRequestsStarted: 1,
+          hasValidSameFamilyBracket: bracket,
+          totalScenicRequestsStarted: total,
+          recoveryRequestsStarted: recovery,
+          priorRecoveryStopReason: "RECOVERY_RESPONSE_RECORDED",
+        }),
+      ),
+      [
+        "SHARED_CAPACITY_EXHAUSTED",
+        "RECOVERY_ATTEMPT_LIMIT_REACHED",
+        "RECOVERY_RESPONSE_RECORDED",
+        "SAFE_RESPONSE_DEFERRED_TO_REFINEMENT",
+      ],
     );
   });
 

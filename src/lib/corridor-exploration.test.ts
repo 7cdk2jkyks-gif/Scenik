@@ -957,6 +957,7 @@ describe("budget-driven corridor exploration", () => {
     const baselineDurationSeconds = 3_600;
     let placesCalls = 0;
     let scenicRouteCalls = 0;
+    let recoveryBaselineReturned = true;
     let activeFixture:
       | "180"
       | "165"
@@ -965,6 +966,7 @@ describe("budget-driven corridor exploration", () => {
       | "30-live"
       | "30-live-familyless"
       | "65-live"
+      | "recovery-65-live"
       | "invalid-index-spur"
       | "recovery"
       | "recovery-over"
@@ -1025,6 +1027,20 @@ describe("budget-driven corridor exploration", () => {
         ...args: Parameters<typeof actualSafeEvaluateRouteCoherenceWithAnchors>
       ) => {
         const result = actualSafeEvaluateRouteCoherenceWithAnchors(...args);
+        if (
+          activeFixture === "recovery-65-live" &&
+          scenicRouteCalls >= 1 &&
+          scenicRouteCalls <= 4
+        ) {
+          const affectedWaypointIndex = scenicRouteCalls <= 3 ? 0 : 1;
+          return {
+            ...result,
+            routeShapeEligible: false,
+            routeShapeRejectionReason: "WAYPOINT_SPUR" as const,
+            waypointSpurDetected: true,
+            affectedWaypointIndex,
+          };
+        }
         return activeFixture === "invalid-index-spur"
           ? {
               ...result,
@@ -1047,7 +1063,7 @@ describe("budget-driven corridor exploration", () => {
       searchNearbyScenicPlaces: async ({ center }: { center: { lat: number; lng: number } }) => {
         placesCalls += 1;
         if (activeFixture === "180" && placesCalls <= 7) return [fixedCollisionPlace];
-        if (activeFixture === "65-live")
+        if (activeFixture === "65-live" || activeFixture === "recovery-65-live")
           return [
             {
               id: "sixty-five-left-woods",
@@ -1271,14 +1287,20 @@ describe("budget-driven corridor exploration", () => {
         alternatives?: boolean;
       }) => {
         const fixtureBaselineDurationSeconds =
-          activeFixture === "65-live" ? 24_157 : baselineDurationSeconds;
+          activeFixture === "65-live"
+            ? 24_157
+            : activeFixture === "recovery-65-live"
+              ? 24_762
+              : baselineDurationSeconds;
         const fixtureStart = activeFixture === "30-live-familyless" ? familylessStart : start;
         const fixtureStop = activeFixture === "30-live-familyless" ? familylessStop : requiredStop;
         const fixtureEnd = activeFixture === "30-live-familyless" ? familylessEnd : end;
         if (
-          scenicRouteCalls === 0 &&
-          (input.waypoints?.length ?? 0) === (activeFixture === "30-live" ? 0 : 1)
+          (!recoveryBaselineReturned && input.alternatives !== true) ||
+          (scenicRouteCalls === 0 &&
+            (input.waypoints?.length ?? 0) === (activeFixture === "30-live" ? 0 : 1))
         ) {
+          if (activeFixture === "recovery-65-live") recoveryBaselineReturned = true;
           scenicRouteCalls = -1;
           const fastest = computed(
             [fixtureStart, fixtureStop, fixtureEnd],
@@ -1339,24 +1361,28 @@ describe("budget-driven corridor exploration", () => {
                   ? [32.9 * 60, 31.9 * 60, 69.9 * 60, 35 * 60, 27 * 60]
                   : activeFixture === "65-live"
                     ? [58.3 * 60, 41.1 * 60, 78.3 * 60, 183.1 * 60, 59 * 60]
-                    : activeFixture.startsWith("30-live")
-                      ? [20.2 * 60, 59.9 * 60, 96.4 * 60, 27 * 60]
-                      : activeFixture === "invalid-index-spur"
-                        ? [32.9 * 60, 31.9 * 60, 69.9 * 60]
-                        : activeFixture === "recovery-over"
-                          ? [40 * 60, 55.9 * 60, 91 * 60, 40 * 60, 27 * 60]
-                          : activeFixture === "recovery-under"
-                            ? [40 * 60, 55.9 * 60, 91 * 60, 18 * 60, 27 * 60]
-                            : activeFixture === "recovery-invalid"
-                              ? [40 * 60, 55.9 * 60, 91 * 60, 45 * 60, 27 * 60]
-                              : [40 * 60, 55.9 * 60, 91 * 60, 27 * 60, 27 * 60];
+                    : activeFixture === "recovery-65-live"
+                      ? [49.5 * 60, 49.5 * 60, 97.5 * 60, 146.5 * 60, 10.3 * 60, 59 * 60]
+                      : activeFixture.startsWith("30-live")
+                        ? [20.2 * 60, 59.9 * 60, 96.4 * 60, 27 * 60]
+                        : activeFixture === "invalid-index-spur"
+                          ? [32.9 * 60, 31.9 * 60, 69.9 * 60]
+                          : activeFixture === "recovery-over"
+                            ? [40 * 60, 55.9 * 60, 91 * 60, 40 * 60, 27 * 60]
+                            : activeFixture === "recovery-under"
+                              ? [40 * 60, 55.9 * 60, 91 * 60, 18 * 60, 27 * 60]
+                              : activeFixture === "recovery-invalid"
+                                ? [40 * 60, 55.9 * 60, 91 * 60, 45 * 60, 27 * 60]
+                                : [40 * 60, 55.9 * 60, 91 * 60, 27 * 60, 27 * 60];
         const addedSeconds =
           addedSecondsByOrdinal[Math.min(ordinal, addedSecondsByOrdinal.length) - 1];
         const requestedPoints =
           activeFixture !== "180" &&
           ((activeFixture === "30" && ordinal >= 3) ||
             (activeFixture.startsWith("30-live") && ordinal >= 4) ||
-            (activeFixture.startsWith("recovery") && ordinal >= 4))
+            (activeFixture.startsWith("recovery") &&
+              activeFixture !== "recovery-65-live" &&
+              ordinal >= 4))
             ? [
                 fixtureStart,
                 ...[
@@ -1377,12 +1403,16 @@ describe("budget-driven corridor exploration", () => {
                 ].sort((a, b) => a.lng - b.lng),
                 fixtureEnd,
               ]
-            : activeFixture === "65-live" && ordinal >= 5
+            : (activeFixture === "65-live" && ordinal >= 5) ||
+                (activeFixture === "recovery-65-live" && ordinal === 6)
               ? [
                   fixtureStart,
-                  ...[...waypoints, { lat: 50.96, lng: 0.5 }, { lat: 50.96, lng: 0.96 }].sort(
-                    (a, b) => a.lng - b.lng,
-                  ),
+                  ...[
+                    ...waypoints,
+                    ...(activeFixture === "recovery-65-live" ? [{ lat: 51.04, lng: -0.5 }] : []),
+                    { lat: 50.96, lng: 0.5 },
+                    { lat: 50.96, lng: 0.96 },
+                  ].sort((a, b) => a.lng - b.lng),
                   fixtureEnd,
                 ]
               : [fixtureStart, ...waypoints, fixtureEnd];
@@ -1393,91 +1423,101 @@ describe("budget-driven corridor exploration", () => {
               ? [start, waypoints[0], start, ...waypoints.slice(1), end]
               : activeFixture === "65-live" && ordinal === 4
                 ? [start, { lat: 51, lng: -0.7 }, { lat: 51, lng: -0.9 }, ...waypoints, end]
-                : activeFixture.startsWith("30-live") && ordinal === 1
-                  ? [
-                      fixtureStart,
-                      ...[
-                        ...waypoints,
-                        activeFixture === "30-live-familyless"
-                          ? { lat: 89.49, lng: -5 }
-                          : { lat: 51.04, lng: -0.5 },
-                        activeFixture === "30-live-familyless"
-                          ? { lat: 89.49, lng: 5 }
-                          : { lat: 51.04, lng: 0.5 },
-                      ].sort((a, b) => a.lng - b.lng),
-                      fixtureEnd,
-                    ]
-                  : activeFixture.startsWith("30-live") && ordinal === 2
-                    ? [fixtureStart, waypoints[0], fixtureStart, ...waypoints.slice(1), fixtureEnd]
-                    : activeFixture.startsWith("165") &&
-                        (ordinal <= 2 ||
-                          (ordinal >= 4 &&
-                            !(
-                              activeFixture === "165-meaningful" &&
-                              (ordinal === 4 || ordinal === 6)
-                            )))
-                      ? [start, waypoints[0], start, ...waypoints.slice(1), end]
-                      : activeFixture.startsWith("165") && (ordinal === 3 || ordinal === 6)
+                : activeFixture === "recovery-65-live" && ordinal <= 2
+                  ? [start, waypoints[0], start, ...waypoints.slice(1), end]
+                  : activeFixture === "recovery-65-live" && ordinal <= 4
+                    ? [start, ...waypoints, waypoints[1] ?? waypoints[0], end]
+                    : activeFixture.startsWith("30-live") && ordinal === 1
+                      ? [
+                          fixtureStart,
+                          ...[
+                            ...waypoints,
+                            activeFixture === "30-live-familyless"
+                              ? { lat: 89.49, lng: -5 }
+                              : { lat: 51.04, lng: -0.5 },
+                            activeFixture === "30-live-familyless"
+                              ? { lat: 89.49, lng: 5 }
+                              : { lat: 51.04, lng: 0.5 },
+                          ].sort((a, b) => a.lng - b.lng),
+                          fixtureEnd,
+                        ]
+                      : activeFixture.startsWith("30-live") && ordinal === 2
                         ? [
-                            start,
-                            ...[
-                              ...waypoints,
-                              { lat: 51.04, lng: -0.5 },
-                              { lat: 51.04, lng: 0.5 },
-                              ...(activeFixture === "165-meaningful" && ordinal === 6
-                                ? [
-                                    { lat: 50.6, lng: -0.4 },
-                                    { lat: 50.6, lng: 0 },
-                                    { lat: 50.6, lng: 0.4 },
-                                  ]
-                                : []),
-                            ].sort((a, b) => a.lng - b.lng),
-                            end,
+                            fixtureStart,
+                            waypoints[0],
+                            fixtureStart,
+                            ...waypoints.slice(1),
+                            fixtureEnd,
                           ]
-                        : activeFixture.startsWith("recovery") && ordinal === 1
+                        : activeFixture.startsWith("165") &&
+                            (ordinal <= 2 ||
+                              (ordinal >= 4 &&
+                                !(
+                                  activeFixture === "165-meaningful" &&
+                                  (ordinal === 4 || ordinal === 6)
+                                )))
                           ? [start, waypoints[0], start, ...waypoints.slice(1), end]
-                          : activeFixture.startsWith("recovery") && ordinal === 2
+                          : activeFixture.startsWith("165") && (ordinal === 3 || ordinal === 6)
                             ? [
                                 start,
-                                { lat: 51, lng: -0.7 },
-                                { lat: 51, lng: -0.9 },
-                                ...waypoints,
+                                ...[
+                                  ...waypoints,
+                                  { lat: 51.04, lng: -0.5 },
+                                  { lat: 51.04, lng: 0.5 },
+                                  ...(activeFixture === "165-meaningful" && ordinal === 6
+                                    ? [
+                                        { lat: 50.6, lng: -0.4 },
+                                        { lat: 50.6, lng: 0 },
+                                        { lat: 50.6, lng: 0.4 },
+                                      ]
+                                    : []),
+                                ].sort((a, b) => a.lng - b.lng),
                                 end,
                               ]
-                            : activeFixture === "30" && ordinal === 2
-                              ? [
-                                  start,
-                                  { lat: 51, lng: -0.7 },
-                                  { lat: 51, lng: -0.9 },
-                                  ...waypoints,
-                                  end,
-                                ]
-                              : activeFixture.startsWith("recovery") && ordinal === 3
-                                ? [start, ...waypoints, waypoints[1] ?? waypoints[0], end]
-                                : activeFixture === "recovery-invalid" && ordinal === 4
-                                  ? [start, waypoints[0], start, ...waypoints.slice(1), end]
-                                  : activeFixture === "recovery-invalid" && ordinal === 5
-                                    ? [
-                                        start,
-                                        { lat: 51, lng: -0.7 },
-                                        { lat: 51, lng: -0.9 },
-                                        ...waypoints,
-                                        end,
-                                      ]
-                                    : (activeFixture === "180" &&
-                                          ordinal === 3 &&
-                                          waypoints.length >= 2) ||
-                                        (activeFixture === "30" &&
-                                          ordinal <= 2 &&
-                                          waypoints.length >= 2)
-                                      ? [
-                                          start,
-                                          waypoints[1],
-                                          waypoints[0],
-                                          ...waypoints.slice(2),
-                                          end,
-                                        ]
-                                      : requestedPoints;
+                            : activeFixture.startsWith("recovery") && ordinal === 1
+                              ? [start, waypoints[0], start, ...waypoints.slice(1), end]
+                              : activeFixture.startsWith("recovery") && ordinal === 2
+                                ? [
+                                    start,
+                                    { lat: 51, lng: -0.7 },
+                                    { lat: 51, lng: -0.9 },
+                                    ...waypoints,
+                                    end,
+                                  ]
+                                : activeFixture === "30" && ordinal === 2
+                                  ? [
+                                      start,
+                                      { lat: 51, lng: -0.7 },
+                                      { lat: 51, lng: -0.9 },
+                                      ...waypoints,
+                                      end,
+                                    ]
+                                  : activeFixture.startsWith("recovery") && ordinal === 3
+                                    ? [start, ...waypoints, waypoints[1] ?? waypoints[0], end]
+                                    : activeFixture === "recovery-invalid" && ordinal === 4
+                                      ? [start, waypoints[0], start, ...waypoints.slice(1), end]
+                                      : activeFixture === "recovery-invalid" && ordinal === 5
+                                        ? [
+                                            start,
+                                            { lat: 51, lng: -0.7 },
+                                            { lat: 51, lng: -0.9 },
+                                            ...waypoints,
+                                            end,
+                                          ]
+                                        : (activeFixture === "180" &&
+                                              ordinal === 3 &&
+                                              waypoints.length >= 2) ||
+                                            (activeFixture === "30" &&
+                                              ordinal <= 2 &&
+                                              waypoints.length >= 2)
+                                          ? [
+                                              start,
+                                              waypoints[1],
+                                              waypoints[0],
+                                              ...waypoints.slice(2),
+                                              end,
+                                            ]
+                                          : requestedPoints;
         const directions = computed(
           returnedPoints,
           fixtureBaselineDurationSeconds + addedSeconds,
@@ -1813,6 +1853,101 @@ describe("budget-driven corridor exploration", () => {
       );
       assert.equal(sixtyFiveSummary.refinement.stopReason, "TARGET_REACHED");
       assert.equal(sixtyFiveSummary.selected.addedSeconds, 59 * 60);
+
+      activeFixture = "recovery-65-live";
+      placesCalls = 0;
+      scenicRouteCalls = 0;
+      recoveryBaselineReturned = false;
+      submittedWaypointCounts.length = 0;
+      submittedShapingWaypoints.length = 0;
+      returnedGeometryByDuration.clear();
+      diagnosticLogs.length = 0;
+      const recoveredSixtyFive = await (
+        planScenicRoute as unknown as (input: {
+          data: {
+            start_address: string;
+            end_address: string;
+            mood: string;
+            theme: string;
+            extra_minutes: number;
+            stops: string[];
+          };
+          context: { userId: string; supabase: object };
+        }) => Promise<typeof result>
+      )({
+        data: {
+          start_address: "Origin",
+          end_address: "Destination",
+          mood: "Peaceful",
+          theme: "Forest",
+          extra_minutes: 65,
+          stops: ["Stop"],
+        },
+        context: { userId: "00000000-0000-4000-8000-000000000000", supabase: {} },
+      });
+      assert.equal(
+        scenicRouteCalls,
+        6,
+        JSON.stringify(recoveredSixtyFive.routeGenerationDiagnostics),
+      );
+      assert.ok(
+        recoveredSixtyFive.routeGenerationDiagnostics.constructionRecovery,
+        JSON.stringify(recoveredSixtyFive.routeGenerationDiagnostics),
+      );
+      assert.deepEqual(
+        recoveredSixtyFive.routeGenerationDiagnostics.constructionRecovery,
+        {
+          attempted: true,
+          seedsConsidered: 4,
+          safeConstructionsProduced: 2,
+          providerRequestsStarted: 2,
+          providerResponsesReturned: 2,
+          providerRequestsFailed: 0,
+          responsesEvaluated: 2,
+          stopReason: "TARGET_REACHED",
+        },
+        JSON.stringify(recoveredSixtyFive.routeGenerationDiagnostics),
+      );
+      assert.equal(
+        recoveredSixtyFive.routeGenerationDiagnostics.durationRefinement?.providerRequestsStarted ??
+          0,
+        0,
+      );
+      const firstRecovery = recoveredSixtyFive.routeGenerationDiagnostics.candidateEligibility.find(
+        (candidate) => candidate.actualAddedMinutes === 10.3,
+      );
+      assert.ok(firstRecovery);
+      assert.equal(firstRecovery.routeShapeEligible, true);
+      assert.equal(firstRecovery.selected, false);
+      assert.equal(firstRecovery.preferredQualityEligible, false);
+      assert.equal(firstRecovery.timeCommitmentEligible, false);
+      assert.ok((firstRecovery.allowanceUtilisation ?? 1) < 0.35);
+      assert.ok((firstRecovery.scenicScore ?? 60) < 60);
+      const secondRecovery =
+        recoveredSixtyFive.routeGenerationDiagnostics.candidateEligibility.find(
+          (candidate) => candidate.actualAddedMinutes === 59,
+        );
+      assert.ok(secondRecovery);
+      assert.equal(secondRecovery.candidateId, "construction-recovery-6");
+      assert.equal(secondRecovery.selected, true);
+      assert.equal(secondRecovery.routeShapeEligible, true);
+      assert.equal(secondRecovery.duplicateEligible, true);
+      assert.equal(secondRecovery.budgetEligible, true);
+      assert.equal(secondRecovery.evidenceEligible, true);
+      assert.equal(secondRecovery.evidenceMatchedToGeometry, 7);
+      assert.equal(secondRecovery.evidenceMatchedThroughWaypoints, 0);
+      assert.equal(secondRecovery.scenicScore, 77);
+      assert.equal(
+        secondRecovery.qualityEligible,
+        true,
+        JSON.stringify(recoveredSixtyFive.routeGenerationDiagnostics),
+      );
+      assert.equal(recoveredSixtyFive.timeTargetOutcome, "TARGET_MET");
+      assert.equal(recoveredSixtyFive.measuredExtraTimeSeconds, 59 * 60);
+      assert.equal(
+        recoveredSixtyFive.directions.encodedPolyline,
+        returnedGeometryByDuration.get(24_762 + 59 * 60),
+      );
 
       activeFixture = "165";
       placesCalls = 0;
@@ -2490,7 +2625,7 @@ describe("budget-driven corridor exploration", () => {
       assert.equal(safeOver.measuredExtraTimeSeconds, 27 * 60);
       assert.equal(
         safeOver.routeGenerationDiagnostics.constructionRecovery?.stopReason,
-        "SAFE_OBSERVATION_PRODUCED",
+        "SAFE_RESPONSE_DEFERRED_TO_REFINEMENT",
       );
       assert.equal(
         safeOver.routeGenerationDiagnostics.durationRefinement?.stopReason,
@@ -2502,7 +2637,7 @@ describe("budget-driven corridor exploration", () => {
       assert.equal(safeUnder.measuredExtraTimeSeconds, 27 * 60);
       assert.equal(
         safeUnder.routeGenerationDiagnostics.constructionRecovery?.stopReason,
-        "SAFE_OBSERVATION_PRODUCED",
+        "RECOVERY_RESPONSE_RECORDED",
       );
       assert.equal(
         safeUnder.routeGenerationDiagnostics.durationRefinement?.stopReason,
