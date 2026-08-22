@@ -2,12 +2,14 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   DERIVED_MOVEMENT_NUMERICAL_EPSILON_METERS,
+  CORRIDOR_PROGRESS_COMPARISON_EPSILON,
   MIN_DERIVED_WAYPOINT_SEPARATION_METERS,
   MAX_SCENIC_ROUTE_ATTEMPTS,
   MIN_ANTIPODAL_CLEARANCE_RADIANS,
   classifyProviderResultForOrchestration,
   classifyConstructionRecoveryPreflight,
   MAX_DERIVED_WAYPOINT_DISPLACEMENT_FROM_SOURCE_METERS,
+  createRequestLocalCalibrationFamily,
   createRequestLocalPlanFamily,
   deriveShapeRecoveryPlan,
   deriveRouteShapingPlan,
@@ -75,6 +77,41 @@ function computed(
       endLat: point.lat,
       endLng: point.lng,
     })),
+  };
+}
+
+function sphericalInterpolateForTest(
+  start: { lat: number; lng: number },
+  end: { lat: number; lng: number },
+  fraction: number,
+) {
+  const radians = (value: number) => (value * Math.PI) / 180;
+  const vector = (point: { lat: number; lng: number }) => {
+    const latitude = radians(point.lat);
+    const longitude = radians(point.lng);
+    return [
+      Math.cos(latitude) * Math.cos(longitude),
+      Math.cos(latitude) * Math.sin(longitude),
+      Math.sin(latitude),
+    ] as const;
+  };
+  const from = vector(start);
+  const to = vector(end);
+  const angle = Math.acos(
+    Math.max(-1, Math.min(1, from[0] * to[0] + from[1] * to[1] + from[2] * to[2])),
+  );
+  const sine = Math.sin(angle);
+  assert.ok(Number.isFinite(angle) && sine > 0);
+  const fromWeight = Math.sin((1 - fraction) * angle) / sine;
+  const toWeight = Math.sin(fraction * angle) / sine;
+  const point = [
+    from[0] * fromWeight + to[0] * toWeight,
+    from[1] * fromWeight + to[1] * toWeight,
+    from[2] * fromWeight + to[2] * toWeight,
+  ];
+  return {
+    lat: (Math.atan2(point[2], Math.hypot(point[0], point[1])) * 180) / Math.PI,
+    lng: (Math.atan2(point[1], point[0]) * 180) / Math.PI,
   };
 }
 
@@ -1160,6 +1197,205 @@ describe("bounded duration refinement", () => {
       planFamilyStructuralKey({ ...base, sourceWaypointIds: ["evidence-1", "evidence-1"] }),
       null,
     );
+  });
+
+  it("admits only a bounded edge-safe submitted construction for synthetic-zero calibration", () => {
+    const input = {
+      familyId: "family-7",
+      origin: { lat: 51, lng: -1 },
+      destination: { lat: 51, lng: 1 },
+      requiredStops: [{ lat: 51, lng: 0 }],
+      anchors: [
+        { lat: 51, lng: -1 },
+        { lat: 51, lng: 0 },
+        { lat: 51, lng: 1 },
+      ],
+      sourceWaypointIds: ["evidence-7"],
+      plan: {
+        ...sourcePlan,
+        signature: "submitted-edge-plan",
+        waypoints: [
+          {
+            ...sourcePlan.waypoints[0],
+            id: "submitted-edge-waypoint",
+            lat: 50.96,
+            lng: 0.96,
+            insertionIndex: 1,
+          },
+        ],
+      },
+    };
+    assert.equal(createRequestLocalPlanFamily(input), null);
+    const calibrationFamily = createRequestLocalCalibrationFamily(input);
+    assert.ok(calibrationFamily);
+    assert.equal(calibrationFamily.projectionPolicy, "bounded-edge-corridor");
+    assert.deepEqual(calibrationFamily.sourcePlan, input.plan);
+    const inward = deriveRouteShapingPlan(
+      calibrationFamily,
+      calibrationFamily.currentDisplacementMeters * 0.75,
+    );
+    assert.ok(inward);
+    assert.equal(inward.waypoints.length, 1);
+    assert.equal(inward.waypoints[0].insertionIndex, 1);
+
+    assert.equal(
+      createRequestLocalCalibrationFamily({
+        ...input,
+        plan: {
+          ...input.plan,
+          waypoints: [{ ...input.plan.waypoints[0], lng: 0.995 }],
+        },
+      }),
+      null,
+    );
+    assert.equal(
+      createRequestLocalCalibrationFamily({
+        ...input,
+        plan: {
+          ...input.plan,
+          waypoints: [{ ...input.plan.waypoints[0], lat: Number.NaN }],
+        },
+      }),
+      null,
+    );
+    assert.equal(
+      createRequestLocalCalibrationFamily({
+        ...input,
+        plan: {
+          ...input.plan,
+          waypoints: [{ ...input.plan.waypoints[0], insertionIndex: 2 }],
+        },
+      }),
+      null,
+    );
+  });
+
+  it("applies numerically stable inclusive conventional and calibration progress boundaries", () => {
+    assert.equal(CORRIDOR_PROGRESS_COMPARISON_EPSILON, 1e-12);
+    const start = { lat: 0, lng: 0 };
+    const end = { lat: 0, lng: 1 };
+    const inputAt = (progress: number) => {
+      const interpolated = sphericalInterpolateForTest(start, end, progress);
+      return {
+        familyId: "family-8",
+        origin: start,
+        destination: end,
+        requiredStops: [],
+        anchors: [start, end],
+        sourceWaypointIds: ["evidence-8"],
+        plan: {
+          ...sourcePlan,
+          signature: `progress-${progress}`,
+          waypoints: [
+            {
+              ...sourcePlan.waypoints[0],
+              lat: interpolated.lat + 0.01,
+              lng: interpolated.lng,
+            },
+          ],
+        },
+      };
+    };
+    const cases = [
+      { progress: 0, ordinary: false, calibration: false },
+      { progress: 0.009999, ordinary: false, calibration: false },
+      { progress: 0.01, ordinary: false, calibration: true },
+      { progress: 0.010001, ordinary: false, calibration: true },
+      { progress: 0.049999, ordinary: false, calibration: true },
+      { progress: 0.05, ordinary: true, calibration: true },
+      { progress: 0.95, ordinary: true, calibration: true },
+      { progress: 0.950001, ordinary: false, calibration: true },
+      { progress: 0.99, ordinary: false, calibration: true },
+      { progress: 0.990001, ordinary: false, calibration: false },
+      { progress: 1, ordinary: false, calibration: false },
+    ];
+    for (const expected of cases) {
+      assert.equal(
+        createRequestLocalPlanFamily(inputAt(expected.progress)) != null,
+        expected.ordinary,
+        `ordinary progress ${expected.progress}`,
+      );
+      assert.equal(
+        createRequestLocalCalibrationFamily(inputAt(expected.progress)) != null,
+        expected.calibration,
+        `calibration progress ${expected.progress}`,
+      );
+    }
+  });
+
+  it("rejects ambiguous calibration segments before the connected provider preflight", async () => {
+    const clearanceDegrees = (MIN_ANTIPODAL_CLEARANCE_RADIANS * 180) / Math.PI;
+    const inputFor = (start: { lat: number; lng: number }, end: { lat: number; lng: number }) => ({
+      familyId: "family-9",
+      origin: start,
+      destination: end,
+      requiredStops: [],
+      anchors: [start, end],
+      sourceWaypointIds: ["evidence-9"],
+      plan: {
+        ...sourcePlan,
+        signature: "spherical-calibration-boundary",
+        waypoints: [
+          {
+            ...sourcePlan.waypoints[0],
+            lat: 1,
+            lng: 90,
+          },
+        ],
+      },
+    });
+    const rejectedSegments = [
+      [
+        { lat: 0, lng: 0 },
+        { lat: 0, lng: 0 },
+      ],
+      [
+        { lat: 0, lng: 0 },
+        { lat: 0, lng: 180 },
+      ],
+      [
+        { lat: 0, lng: 0 },
+        { lat: 0, lng: 179.999999 },
+      ],
+      [
+        { lat: 0, lng: 179.999999 },
+        { lat: 0, lng: 0 },
+      ],
+      [
+        { lat: 10, lng: 0 },
+        { lat: -10, lng: 179.999999 },
+      ],
+      [
+        { lat: 0, lng: 0 },
+        { lat: 0, lng: 180 - clearanceDegrees },
+      ],
+      [
+        { lat: 0, lng: 0 },
+        { lat: 0, lng: 180 - clearanceDegrees / 2 },
+      ],
+    ] as const;
+    for (const [start, end] of rejectedSegments)
+      assert.equal(createRequestLocalCalibrationFamily(inputFor(start, end)), null);
+
+    const clearlySafeEnd = { lat: 0, lng: 180 - clearanceDegrees * 4 };
+    assert.ok(createRequestLocalCalibrationFamily(inputFor({ lat: 0, lng: 0 }, clearlySafeEnd)));
+
+    let providerRequests = 0;
+    const ambiguousFamily = createRequestLocalCalibrationFamily(
+      inputFor({ lat: 0, lng: 0 }, { lat: 0, lng: 179.999999 }),
+    );
+    if (ambiguousFamily)
+      await executeDerivedRouteRequest({
+        family: ambiguousFamily,
+        targetDisplacementMeters: ambiguousFamily.currentDisplacementMeters * 0.75,
+        request: async () => {
+          providerRequests += 1;
+          return "unexpected";
+        },
+        evaluate: () => null,
+      });
+    assert.equal(ambiguousFamily, null);
+    assert.equal(providerRequests, 0);
   });
 
   it("fails closed for ambiguous, polar, invalid and topology-crossing derivations", () => {

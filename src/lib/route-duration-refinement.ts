@@ -36,6 +36,10 @@ export const MIN_UNAMBIGUOUS_CORRIDOR_OFFSET_METERS = 50;
 export const DERIVED_MOVEMENT_NUMERICAL_EPSILON_METERS = 0.01;
 const MIN_SEGMENT_PROGRESS = 0.05;
 const MAX_SEGMENT_PROGRESS = 0.95;
+const MIN_BOUNDED_CALIBRATION_PROGRESS = 0.01;
+const MAX_BOUNDED_CALIBRATION_PROGRESS = 0.99;
+/** Absorbs only projection reconstruction noise at inclusive progress boundaries. */
+export const CORRIDOR_PROGRESS_COMPARISON_EPSILON = 1e-12;
 export const MIN_DERIVED_WAYPOINT_SEPARATION_METERS = 1_000;
 
 export type DurationRefinementStrategy =
@@ -221,6 +225,7 @@ export type RequestLocalPlanFamily = {
   requiredStops: LatLng[];
   sourceDisplacementMeters: number;
   currentDisplacementMeters: number;
+  projectionPolicy: "ordinary-corridor" | "bounded-edge-corridor";
 };
 
 function finiteCoordinate(point: LatLng): boolean {
@@ -253,8 +258,17 @@ type CorridorProjection = {
   longitudeMetersPerDegree: number;
 };
 
-function corridorProjection(segmentStart: LatLng, segmentEnd: LatLng, point: LatLng) {
+function corridorProjection(
+  segmentStart: LatLng,
+  segmentEnd: LatLng,
+  point: LatLng,
+  progressBounds: { minimum: number; maximum: number } = {
+    minimum: MIN_SEGMENT_PROGRESS,
+    maximum: MAX_SEGMENT_PROGRESS,
+  },
+) {
   if (![segmentStart, segmentEnd, point].every(finiteCoordinate)) return null;
+  if (safeSphericalSegmentAngle(segmentStart, segmentEnd) == null) return null;
   const referenceLatitude = (segmentStart.lat + segmentEnd.lat) / 2;
   const longitudeMetersPerDegree = 111_320 * Math.cos((referenceLatitude * Math.PI) / 180);
   if (!Number.isFinite(longitudeMetersPerDegree) || Math.abs(longitudeMetersPerDegree) < 1_000)
@@ -268,8 +282,8 @@ function corridorProjection(segmentStart: LatLng, segmentEnd: LatLng, point: Lat
   const progress = (pointEast * east + pointNorth * north) / squaredLength;
   if (
     !Number.isFinite(progress) ||
-    progress < MIN_SEGMENT_PROGRESS ||
-    progress > MAX_SEGMENT_PROGRESS
+    progress < progressBounds.minimum - CORRIDOR_PROGRESS_COMPARISON_EPSILON ||
+    progress > progressBounds.maximum + CORRIDOR_PROGRESS_COMPARISON_EPSILON
   )
     return null;
   const projectedEastMeters = east * progress;
@@ -325,11 +339,15 @@ export function planFamilyStructuralKey(input: {
   });
 }
 
-function waypointDisplacement(waypoint: ScenicWaypointPlan, anchors: LatLng[]): number | null {
+function waypointDisplacement(
+  waypoint: ScenicWaypointPlan,
+  anchors: LatLng[],
+  progressBounds?: { minimum: number; maximum: number },
+): number | null {
   const start = anchors[waypoint.insertionIndex];
   const end = anchors[waypoint.insertionIndex + 1];
   if (!start || !end) return null;
-  const projection = corridorProjection(start, end, waypoint);
+  const projection = corridorProjection(start, end, waypoint, progressBounds);
   return projection ? Math.abs(projection.signedOffsetMeters) : null;
 }
 
@@ -373,6 +391,19 @@ function centralAngle(a: UnitVector, b: UnitVector): number {
   return Math.acos(Math.max(-1, Math.min(1, vectorDot(a, b))));
 }
 
+function safeSphericalSegmentAngle(start: LatLng, end: LatLng): number | null {
+  if (![start, end].every(finiteCoordinate)) return null;
+  const dot = vectorDot(unitVector(start), unitVector(end));
+  if (!Number.isFinite(dot)) return null;
+  const segmentAngle = Math.acos(Math.max(-1, Math.min(1, dot)));
+  return Number.isFinite(segmentAngle) &&
+    segmentAngle * RECOVERY_EARTH_RADIUS_METERS >= 100 &&
+    Math.PI - segmentAngle >
+      MIN_ANTIPODAL_CLEARANCE_RADIANS + ANTIPODAL_CLEARANCE_COMPARISON_EPSILON_RADIANS
+    ? segmentAngle
+    : null;
+}
+
 function coordinateFromUnitVector(vector: UnitVector): LatLng | null {
   const normalised = normalisedVector(vector);
   if (!normalised) return null;
@@ -389,17 +420,11 @@ function sphericalCorridorProjection(
   point: LatLng,
 ): { projected: LatLng; projectedVector: UnitVector; pointVector: UnitVector } | null {
   if (![segmentStart, segmentEnd, point].every(finiteCoordinate)) return null;
+  const segmentAngle = safeSphericalSegmentAngle(segmentStart, segmentEnd);
+  if (segmentAngle == null) return null;
   const start = unitVector(segmentStart);
   const end = unitVector(segmentEnd);
   const target = unitVector(point);
-  const segmentAngle = centralAngle(start, end);
-  if (
-    !Number.isFinite(segmentAngle) ||
-    segmentAngle * RECOVERY_EARTH_RADIUS_METERS < 100 ||
-    Math.PI - segmentAngle <=
-      MIN_ANTIPODAL_CLEARANCE_RADIANS + ANTIPODAL_CLEARANCE_COMPARISON_EPSILON_RADIANS
-  )
-    return null;
   const normal = normalisedVector(vectorCross(start, end));
   if (!normal) return null;
   const targetNormalComponent = vectorDot(target, normal);
@@ -619,10 +644,26 @@ export function createRequestLocalPlanFamily(input: {
   sourceWaypointIds: string[];
   plan: ScenicCorridorPlan;
 }): RequestLocalPlanFamily | null {
+  return createRequestLocalPlanFamilyWithProjection(input, "ordinary-corridor");
+}
+
+function createRequestLocalPlanFamilyWithProjection(
+  input: Parameters<typeof createRequestLocalPlanFamily>[0],
+  projectionPolicy: RequestLocalPlanFamily["projectionPolicy"],
+): RequestLocalPlanFamily | null {
   const structuralKey = planFamilyStructuralKey(input);
   if (!structuralKey || !/^family-\d+$/.test(input.familyId)) return null;
   const displacements = input.plan.waypoints.map((waypoint) =>
-    waypointDisplacement(waypoint, input.anchors),
+    waypointDisplacement(
+      waypoint,
+      input.anchors,
+      projectionPolicy === "bounded-edge-corridor"
+        ? {
+            minimum: MIN_BOUNDED_CALIBRATION_PROGRESS,
+            maximum: MAX_BOUNDED_CALIBRATION_PROGRESS,
+          }
+        : undefined,
+    ),
   );
   if (displacements.some((value) => value == null || !finitePositive(value))) return null;
   return {
@@ -640,7 +681,21 @@ export function createRequestLocalPlanFamily(input: {
     requiredStops: input.requiredStops.map((stop) => ({ ...stop })),
     sourceDisplacementMeters: Math.max(...(displacements as number[])),
     currentDisplacementMeters: Math.max(...(displacements as number[])),
+    projectionPolicy,
   };
+}
+
+/** Builds the ordinary family first, then permits only a small, bounded
+ * edge margin for calibration. The exact submitted plan and
+ * request-local evidence identities remain the family source; near-pole and
+ * otherwise numerically ambiguous projections still fail closed. */
+export function createRequestLocalCalibrationFamily(
+  input: Parameters<typeof createRequestLocalPlanFamily>[0],
+): RequestLocalPlanFamily | null {
+  return (
+    createRequestLocalPlanFamily(input) ??
+    createRequestLocalPlanFamilyWithProjection(input, "bounded-edge-corridor")
+  );
 }
 
 export function deriveRouteShapingPlan(
@@ -669,7 +724,17 @@ export function deriveRouteShapingPlan(
     const start = family.anchors[source.insertionIndex];
     const end = family.anchors[source.insertionIndex + 1];
     if (!start || !end) return null;
-    const projection = corridorProjection(start, end, source);
+    const projection = corridorProjection(
+      start,
+      end,
+      source,
+      family.projectionPolicy === "bounded-edge-corridor"
+        ? {
+            minimum: MIN_BOUNDED_CALIBRATION_PROGRESS,
+            maximum: MAX_BOUNDED_CALIBRATION_PROGRESS,
+          }
+        : undefined,
+    );
     if (!projection) return null;
     const sourceOffset = Math.abs(projection.signedOffsetMeters);
     const derivedOffset = movingInward

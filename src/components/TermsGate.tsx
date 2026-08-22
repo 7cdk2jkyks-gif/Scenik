@@ -31,7 +31,7 @@ export function ConsentAgreement({
           aria-labelledby="agree-label"
           checked={agreed}
           onCheckedChange={(value) => onAgreedChange(value === true)}
-          className="h-[26px] w-[26px] rounded-full [&_svg]:h-4 [&_svg]:w-4"
+          className="h-[26px] min-h-[26px] max-h-[26px] w-[26px] min-w-[26px] max-w-[26px] aspect-square flex-none rounded-full p-0 [&_svg]:h-4 [&_svg]:w-4"
         />
       </label>
       <span id="agree-label" className="min-w-0 pt-1 text-ink/85">

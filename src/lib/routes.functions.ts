@@ -442,7 +442,7 @@ export const planScenicRoute = createServerFn({ method: "POST" })
               MAX_SCENIC_ROUTE_ATTEMPTS,
               MAX_DERIVED_WAYPOINT_DISPLACEMENT_FROM_SOURCE_METERS,
               classifyProviderResultForOrchestration,
-              createRequestLocalPlanFamily,
+              createRequestLocalCalibrationFamily,
               effectiveConstructionMetadata,
               evaluateRefinedProviderCandidate,
               isSafeRefinementCorridorPlan,
@@ -667,7 +667,7 @@ export const planScenicRoute = createServerFn({ method: "POST" })
                         ...existingFamily,
                         currentDisplacementMeters: plan.estimatedDetourMeters,
                       }
-                    : createRequestLocalPlanFamily({
+                    : createRequestLocalCalibrationFamily({
                         familyId: `family-${nextCandidateOrdinal}`,
                         origin: routeInput.origin,
                         destination: routeInput.destination,
